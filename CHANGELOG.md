@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.17] - 2026-05-04
+
+- Tedarikci teklif toplama akisi eklendi: mail ve WhatsApp talepleri artik tedarikci teklif formu linki uretir.
+- Tedarikci public teklif formuna pesin, 30 gun, 60 gun, cek/vade, ozel vade, KDV, nakliye/teslim ve not alanlari eklendi.
+- Fiyat yazmak istemeyen tedarikciler icin teklif dosyasi veya genel teklif notu ile gonderim destegi eklendi.
+- Dashboard kartlarinda gelen tedarikci tekliflerini kalem bazli karsilastirma ve her kalemde farkli tedarikci/vade secme destegi eklendi.
+
 ## [1.0.16] - 2026-05-04
 
 - Takipteki urun ve hizmet kartlarina Tedarikciden fiyat al aksiyonu eklendi.

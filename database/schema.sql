@@ -363,6 +363,95 @@ CREATE TABLE renewal_notification_deliveries (
     INDEX idx_renewal_notification_delivery_recipient (recipient_email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE supplier_quote_requests (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    renewal_id INT UNSIGNED NOT NULL,
+    supplier_id INT UNSIGNED NULL,
+    supplier_contact_id INT UNSIGNED NULL,
+    supplier_name VARCHAR(190) NULL,
+    contact_name VARCHAR(190) NULL,
+    recipient_email VARCHAR(190) NULL,
+    recipient_phone VARCHAR(60) NULL,
+    token_hash CHAR(64) NOT NULL,
+    source ENUM('mail', 'whatsapp', 'manual') NOT NULL DEFAULT 'mail',
+    status ENUM('pending', 'opened', 'submitted', 'expired') NOT NULL DEFAULT 'pending',
+    message_subject VARCHAR(255) NULL,
+    message_body TEXT NULL,
+    quote_note TEXT NULL,
+    terms_acknowledged TINYINT(1) NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,
+    opened_at DATETIME NULL,
+    submitted_at DATETIME NULL,
+    submitted_ip VARCHAR(45) NULL,
+    submitted_user_agent VARCHAR(255) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supplier_quote_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
+    CONSTRAINT fk_supplier_quote_requests_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_quote_requests_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_supplier_quote_requests_token (token_hash),
+    INDEX idx_supplier_quote_requests_renewal (renewal_id, status, created_at),
+    INDEX idx_supplier_quote_requests_supplier (supplier_id, created_at),
+    INDEX idx_supplier_quote_requests_email (recipient_email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE supplier_quote_lines (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    request_id INT UNSIGNED NOT NULL,
+    renewal_item_id INT UNSIGNED NULL,
+    item_title VARCHAR(190) NOT NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    price_cash DECIMAL(12,2) NULL,
+    price_30 DECIMAL(12,2) NULL,
+    price_60 DECIMAL(12,2) NULL,
+    price_check DECIMAL(12,2) NULL,
+    price_custom DECIMAL(12,2) NULL,
+    custom_term VARCHAR(120) NULL,
+    vat_included TINYINT(1) NOT NULL DEFAULT 1,
+    delivery_note TEXT NULL,
+    note TEXT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supplier_quote_lines_request FOREIGN KEY (request_id) REFERENCES supplier_quote_requests(id) ON DELETE CASCADE,
+    CONSTRAINT fk_supplier_quote_lines_item FOREIGN KEY (renewal_item_id) REFERENCES renewal_items(id) ON DELETE SET NULL,
+    INDEX idx_supplier_quote_lines_request (request_id),
+    INDEX idx_supplier_quote_lines_item (renewal_item_id),
+    INDEX idx_supplier_quote_lines_cash (price_cash),
+    INDEX idx_supplier_quote_lines_30 (price_30),
+    INDEX idx_supplier_quote_lines_60 (price_60)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE supplier_quote_selections (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    renewal_id INT UNSIGNED NOT NULL,
+    renewal_item_id INT UNSIGNED NOT NULL,
+    quote_line_id INT UNSIGNED NULL,
+    selected_term VARCHAR(30) NOT NULL,
+    selected_price DECIMAL(12,2) NOT NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    selected_by INT UNSIGNED NULL,
+    selected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supplier_quote_selections_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
+    CONSTRAINT fk_supplier_quote_selections_item FOREIGN KEY (renewal_item_id) REFERENCES renewal_items(id) ON DELETE CASCADE,
+    CONSTRAINT fk_supplier_quote_selections_line FOREIGN KEY (quote_line_id) REFERENCES supplier_quote_lines(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_quote_selections_user FOREIGN KEY (selected_by) REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_supplier_quote_selection_item (renewal_item_id),
+    INDEX idx_supplier_quote_selections_renewal (renewal_id),
+    INDEX idx_supplier_quote_selections_line (quote_line_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE supplier_quote_attachments (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    request_id INT UNSIGNED NOT NULL,
+    original_name VARCHAR(255) NOT NULL,
+    stored_path VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(120) NULL,
+    file_size INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supplier_quote_attachments_request FOREIGN KEY (request_id) REFERENCES supplier_quote_requests(id) ON DELETE CASCADE,
+    INDEX idx_supplier_quote_attachments_request (request_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE mail_logs (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     renewal_id INT UNSIGNED NULL,

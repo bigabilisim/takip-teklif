@@ -3618,6 +3618,168 @@ label {
     padding: 8px 10px;
 }
 
+.supplier-quotes-panel,
+.supplier-quote-card {
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid #cfe3df;
+    border-radius: 9px;
+    background: #f8fbfa;
+}
+
+.supplier-quotes-panel {
+    background: #f3faf8;
+}
+
+.supplier-quote-compare-item {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #dbe8e5;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.supplier-quote-compare-head,
+.supplier-quote-offer-head,
+.supplier-quote-item-head,
+.supplier-quote-context {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+}
+
+.supplier-quote-compare-head span,
+.supplier-quote-item-head span,
+.supplier-quote-context span {
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+
+.supplier-quote-compare-head strong,
+.supplier-quote-item-head strong,
+.supplier-quote-context strong {
+    display: block;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.supplier-quote-compare-head em,
+.supplier-quote-item-head em,
+.supplier-quote-offer-head em {
+    color: #607069;
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 750;
+}
+
+.supplier-quote-offer-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+}
+
+.supplier-quote-offer-card {
+    display: grid;
+    gap: 10px;
+    padding: 11px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #fbfdfc;
+}
+
+.supplier-quote-offer-head strong {
+    display: block;
+    font-size: 14px;
+}
+
+.supplier-quote-offer-head span {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.supplier-quote-term-grid,
+.supplier-quote-price-grid,
+.supplier-quote-context {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+}
+
+.supplier-quote-term {
+    display: grid;
+    gap: 5px;
+    padding: 9px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.supplier-quote-term.selected {
+    border-color: var(--primary);
+    background: #ecf8f5;
+}
+
+.supplier-quote-term span,
+.supplier-quote-term small {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 750;
+}
+
+.supplier-quote-term strong {
+    font-size: 15px;
+}
+
+.supplier-quote-notes,
+.supplier-quote-files {
+    display: grid;
+    gap: 6px;
+    color: #52655f;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.supplier-quote-public {
+    width: min(1120px, 100%);
+    max-width: 1120px;
+}
+
+.supplier-quote-form {
+    display: grid;
+    gap: 14px;
+}
+
+.supplier-quote-check,
+.supplier-quote-ack {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+}
+
+.supplier-quote-check input,
+.supplier-quote-ack input {
+    width: auto;
+    min-height: auto;
+}
+
+.supplier-quote-ack {
+    padding: 13px;
+    border: 1px solid #cfe3df;
+    border-radius: 8px;
+    background: #f3faf8;
+    font-size: 14px;
+}
+
 @media (max-width: 1180px) {
     .content {
         padding: 24px;
@@ -3825,7 +3987,10 @@ label {
     .item-grid,
     .grapesjs-test-card,
     .request-inline-form,
-    .supplier-price-layout {
+    .supplier-price-layout,
+    .supplier-quote-compare-head,
+    .supplier-quote-offer-head,
+    .supplier-quote-item-head {
         grid-template-columns: 1fr;
     }
 
@@ -3949,7 +4114,10 @@ label {
     .payment-fx-panel,
     .product-total-bar,
     .renewal-detail-item,
-    .public-payment-item {
+    .public-payment-item,
+    .supplier-quote-price-grid,
+    .supplier-quote-term-grid,
+    .supplier-quote-context {
         grid-template-columns: 1fr;
     }
 

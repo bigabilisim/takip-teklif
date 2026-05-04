@@ -18,6 +18,7 @@ final class RenewalRepository
     private static bool $itemSchemaEnsured = false;
     private static bool $decisionSchemaEnsured = false;
     private static bool $notificationDeliverySchemaEnsured = false;
+    private static bool $supplierQuoteSchemaEnsured = false;
     private static bool $phoneNormalizationEnsured = false;
 
     public function __construct()
@@ -31,6 +32,7 @@ final class RenewalRepository
         $this->ensureItemSchema();
         $this->ensureDecisionSchema();
         $this->ensureNotificationDeliverySchema();
+        $this->ensureSupplierQuoteSchema();
         $this->ensurePhoneNormalization();
     }
 
@@ -479,6 +481,310 @@ final class RenewalRepository
         $stmt->execute(['renewal_id' => $renewalId]);
 
         return $stmt->fetchAll();
+    }
+
+    public function createSupplierQuoteRequest(int $renewalId, array $recipient, string $subject, string $message, string $source = 'mail'): array
+    {
+        $token = bin2hex(random_bytes(32));
+        $source = in_array($source, ['mail', 'whatsapp', 'manual'], true) ? $source : 'manual';
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO supplier_quote_requests
+                (renewal_id, supplier_id, supplier_contact_id, supplier_name, contact_name, recipient_email, recipient_phone, token_hash, source, status, message_subject, message_body, expires_at)
+             VALUES
+                (:renewal_id, :supplier_id, :supplier_contact_id, :supplier_name, :contact_name, :recipient_email, :recipient_phone, :token_hash, :source, :status, :message_subject, :message_body, DATE_ADD(NOW(), INTERVAL 14 DAY))'
+        );
+        $stmt->execute([
+            'renewal_id' => $renewalId,
+            'supplier_id' => empty($recipient['supplier_id']) ? null : (int) $recipient['supplier_id'],
+            'supplier_contact_id' => empty($recipient['contact_id']) ? null : (int) $recipient['contact_id'],
+            'supplier_name' => $this->nullableString($recipient['supplier_name'] ?? ''),
+            'contact_name' => $this->nullableString($recipient['name'] ?? ''),
+            'recipient_email' => $this->nullableString($recipient['email'] ?? ''),
+            'recipient_phone' => $this->nullableString($recipient['phone'] ?? ''),
+            'token_hash' => hash('sha256', $token),
+            'source' => $source,
+            'status' => 'pending',
+            'message_subject' => mb_substr(trim($subject), 0, 240),
+            'message_body' => trim($message),
+        ]);
+
+        return [
+            'id' => (int) $this->db->lastInsertId(),
+            'token' => $token,
+            'url' => \url('/tedarikci-teklif/' . $token),
+        ];
+    }
+
+    public function findSupplierQuoteRequestByToken(string $token): ?array
+    {
+        $token = trim($token);
+        if ($token === '' || !preg_match('/^[a-f0-9]{64}$/i', $token)) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare(
+            "SELECT sqr.*,
+                    r.customer_id,
+                    r.title,
+                    r.brand,
+                    r.kind,
+                    r.license_key,
+                    r.currency,
+                    r.renewal_date,
+                    r.start_date,
+                    r.renewal_period_id,
+                    rp.name AS renewal_period_name,
+                    c.company_name,
+                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
+             FROM supplier_quote_requests sqr
+             INNER JOIN renewals r ON r.id = sqr.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             LEFT JOIN renewal_periods rp ON rp.id = r.renewal_period_id
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             WHERE sqr.token_hash = :token_hash
+             LIMIT 1"
+        );
+        $stmt->execute(['token_hash' => hash('sha256', strtolower($token))]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function markSupplierQuoteRequestOpened(int $requestId, string $ipAddress = '', string $userAgent = ''): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE supplier_quote_requests
+             SET status = CASE WHEN status = 'pending' THEN 'opened' ELSE status END,
+                 opened_at = COALESCE(opened_at, NOW()),
+                 submitted_ip = COALESCE(submitted_ip, :submitted_ip),
+                 submitted_user_agent = COALESCE(submitted_user_agent, :submitted_user_agent),
+                 updated_at = NOW()
+             WHERE id = :id"
+        );
+        $stmt->execute([
+            'id' => $requestId,
+            'submitted_ip' => $this->nullableString(substr($ipAddress, 0, 45)),
+            'submitted_user_agent' => $this->nullableString(substr($userAgent, 0, 255)),
+        ]);
+    }
+
+    public function submitSupplierQuote(int $requestId, array $data, ?array $attachment = null, string $ipAddress = '', string $userAgent = ''): void
+    {
+        $this->db->beginTransaction();
+
+        try {
+            $this->db->prepare('DELETE FROM supplier_quote_lines WHERE request_id = :request_id')
+                ->execute(['request_id' => $requestId]);
+
+            $insert = $this->db->prepare(
+                'INSERT INTO supplier_quote_lines
+                    (request_id, renewal_item_id, item_title, currency, price_cash, price_30, price_60, price_check, price_custom, custom_term, vat_included, delivery_note, note)
+                 VALUES
+                    (:request_id, :renewal_item_id, :item_title, :currency, :price_cash, :price_30, :price_60, :price_check, :price_custom, :custom_term, :vat_included, :delivery_note, :note)'
+            );
+
+            $lines = $data['lines'] ?? [];
+            if (is_array($lines)) {
+                foreach ($lines as $itemId => $line) {
+                    if (!is_array($line)) {
+                        continue;
+                    }
+
+                    $itemTitle = trim((string) ($line['item_title'] ?? ''));
+                    $prices = [
+                        'price_cash' => $this->nullableDecimalValue($line['price_cash'] ?? null),
+                        'price_30' => $this->nullableDecimalValue($line['price_30'] ?? null),
+                        'price_60' => $this->nullableDecimalValue($line['price_60'] ?? null),
+                        'price_check' => $this->nullableDecimalValue($line['price_check'] ?? null),
+                        'price_custom' => $this->nullableDecimalValue($line['price_custom'] ?? null),
+                    ];
+
+                    if ($itemTitle === '' && count(array_filter($prices, static fn ($price): bool => $price !== null)) < 1) {
+                        continue;
+                    }
+
+                    $insert->execute([
+                        'request_id' => $requestId,
+                        'renewal_item_id' => (int) $itemId > 0 ? (int) $itemId : null,
+                        'item_title' => $itemTitle !== '' ? $itemTitle : 'Ürün / hizmet',
+                        'currency' => strtoupper(substr((string) ($line['currency'] ?? ($data['currency'] ?? 'TRY')), 0, 3)) ?: 'TRY',
+                        'price_cash' => $prices['price_cash'],
+                        'price_30' => $prices['price_30'],
+                        'price_60' => $prices['price_60'],
+                        'price_check' => $prices['price_check'],
+                        'price_custom' => $prices['price_custom'],
+                        'custom_term' => $this->nullableString($line['custom_term'] ?? ''),
+                        'vat_included' => !empty($line['vat_included']) ? 1 : 0,
+                        'delivery_note' => $this->nullableString($line['delivery_note'] ?? ''),
+                        'note' => $this->nullableString($line['note'] ?? ''),
+                    ]);
+                }
+            }
+
+            if ($attachment !== null) {
+                $stmt = $this->db->prepare(
+                    'INSERT INTO supplier_quote_attachments
+                        (request_id, original_name, stored_path, mime_type, file_size)
+                     VALUES
+                        (:request_id, :original_name, :stored_path, :mime_type, :file_size)'
+                );
+                $stmt->execute([
+                    'request_id' => $requestId,
+                    'original_name' => trim((string) ($attachment['original_name'] ?? '')),
+                    'stored_path' => trim((string) ($attachment['stored_path'] ?? '')),
+                    'mime_type' => $this->nullableString($attachment['mime_type'] ?? ''),
+                    'file_size' => (int) ($attachment['file_size'] ?? 0),
+                ]);
+            }
+
+            $stmt = $this->db->prepare(
+                "UPDATE supplier_quote_requests
+                 SET status = 'submitted',
+                     submitted_at = NOW(),
+                     submitted_ip = :submitted_ip,
+                     submitted_user_agent = :submitted_user_agent,
+                     quote_note = :quote_note,
+                     terms_acknowledged = 1,
+                     updated_at = NOW()
+                 WHERE id = :id"
+            );
+            $stmt->execute([
+                'id' => $requestId,
+                'submitted_ip' => $this->nullableString(substr($ipAddress, 0, 45)),
+                'submitted_user_agent' => $this->nullableString(substr($userAgent, 0, 255)),
+                'quote_note' => $this->nullableString($data['quote_note'] ?? ''),
+            ]);
+
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function supplierQuotesForRenewal(int $renewalId): array
+    {
+        $requestStmt = $this->db->prepare(
+            'SELECT sqr.*,
+                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
+             FROM supplier_quote_requests sqr
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             WHERE sqr.renewal_id = :renewal_id
+             ORDER BY sqr.created_at DESC, sqr.id DESC'
+        );
+        $requestStmt->execute(['renewal_id' => $renewalId]);
+        $requests = $requestStmt->fetchAll();
+
+        $lineStmt = $this->db->prepare(
+            'SELECT sqln.*,
+                    sqr.supplier_id,
+                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    sqr.contact_name,
+                    sqr.recipient_email,
+                    sqr.status AS request_status,
+                    sqr.submitted_at
+             FROM supplier_quote_lines sqln
+             INNER JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             WHERE sqr.renewal_id = :renewal_id
+             ORDER BY sqln.renewal_item_id ASC, sqln.id ASC'
+        );
+        $lineStmt->execute(['renewal_id' => $renewalId]);
+        $lines = $lineStmt->fetchAll();
+
+        $attachmentStmt = $this->db->prepare(
+            'SELECT sqa.*, sqr.supplier_id, COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
+             FROM supplier_quote_attachments sqa
+             INNER JOIN supplier_quote_requests sqr ON sqr.id = sqa.request_id
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             WHERE sqr.renewal_id = :renewal_id
+             ORDER BY sqa.created_at DESC, sqa.id DESC'
+        );
+        $attachmentStmt->execute(['renewal_id' => $renewalId]);
+        $attachments = $attachmentStmt->fetchAll();
+
+        $selectionStmt = $this->db->prepare(
+            'SELECT sqs.*, sqln.item_title, COALESCE(sqr.supplier_name, s.company_name) AS supplier_display, u.name AS selected_by_name
+             FROM supplier_quote_selections sqs
+             LEFT JOIN supplier_quote_lines sqln ON sqln.id = sqs.quote_line_id
+             LEFT JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             LEFT JOIN users u ON u.id = sqs.selected_by
+             WHERE sqs.renewal_id = :renewal_id
+             ORDER BY sqs.selected_at DESC, sqs.id DESC'
+        );
+        $selectionStmt->execute(['renewal_id' => $renewalId]);
+        $selections = $selectionStmt->fetchAll();
+
+        return [
+            'requests' => $requests,
+            'lines' => $lines,
+            'attachments' => $attachments,
+            'selections' => $selections,
+        ];
+    }
+
+    public function selectSupplierQuoteLine(int $lineId, string $term, int $userId): array
+    {
+        $term = in_array($term, ['cash', '30', '60', 'check', 'custom'], true) ? $term : '';
+        if ($term === '') {
+            throw new \RuntimeException('Geçersiz teklif vadesi.');
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT sqln.*, sqr.renewal_id
+             FROM supplier_quote_lines sqln
+             INNER JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
+             WHERE sqln.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute(['id' => $lineId]);
+        $line = $stmt->fetch();
+        if (!$line) {
+            throw new \RuntimeException('Teklif satırı bulunamadı.');
+        }
+
+        $price = $this->supplierQuoteTermPrice($line, $term);
+        if ($price === null) {
+            throw new \RuntimeException('Seçilen vadede fiyat yok.');
+        }
+
+        $renewalItemId = (int) ($line['renewal_item_id'] ?? 0);
+        if ($renewalItemId < 1) {
+            throw new \RuntimeException('Teklif satırı bir ürün kalemine bağlı değil.');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO supplier_quote_selections
+                (renewal_id, renewal_item_id, quote_line_id, selected_term, selected_price, currency, selected_by, selected_at)
+             VALUES
+                (:renewal_id, :renewal_item_id, :quote_line_id, :selected_term, :selected_price, :currency, :selected_by, NOW())
+             ON DUPLICATE KEY UPDATE
+                quote_line_id = VALUES(quote_line_id),
+                selected_term = VALUES(selected_term),
+                selected_price = VALUES(selected_price),
+                currency = VALUES(currency),
+                selected_by = VALUES(selected_by),
+                selected_at = NOW()'
+        );
+        $stmt->execute([
+            'renewal_id' => (int) $line['renewal_id'],
+            'renewal_item_id' => $renewalItemId,
+            'quote_line_id' => $lineId,
+            'selected_term' => $term,
+            'selected_price' => $price,
+            'currency' => (string) ($line['currency'] ?? 'TRY'),
+            'selected_by' => $userId > 0 ? $userId : null,
+        ]);
+
+        return [
+            'renewal_id' => (int) $line['renewal_id'],
+            'renewal_item_id' => $renewalItemId,
+            'price' => $price,
+            'currency' => (string) ($line['currency'] ?? 'TRY'),
+            'term' => $term,
+        ];
     }
 
     public function iyzicoPayments(int $renewalId): array
@@ -1272,6 +1578,112 @@ final class RenewalRepository
         self::$notificationDeliverySchemaEnsured = true;
     }
 
+    private function ensureSupplierQuoteSchema(): void
+    {
+        if (self::$supplierQuoteSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS supplier_quote_requests (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                renewal_id INT UNSIGNED NOT NULL,
+                supplier_id INT UNSIGNED NULL,
+                supplier_contact_id INT UNSIGNED NULL,
+                supplier_name VARCHAR(190) NULL,
+                contact_name VARCHAR(190) NULL,
+                recipient_email VARCHAR(190) NULL,
+                recipient_phone VARCHAR(60) NULL,
+                token_hash CHAR(64) NOT NULL,
+                source ENUM('mail', 'whatsapp', 'manual') NOT NULL DEFAULT 'mail',
+                status ENUM('pending', 'opened', 'submitted', 'expired') NOT NULL DEFAULT 'pending',
+                message_subject VARCHAR(255) NULL,
+                message_body TEXT NULL,
+                quote_note TEXT NULL,
+                terms_acknowledged TINYINT(1) NOT NULL DEFAULT 0,
+                expires_at DATETIME NOT NULL,
+                opened_at DATETIME NULL,
+                submitted_at DATETIME NULL,
+                submitted_ip VARCHAR(45) NULL,
+                submitted_user_agent VARCHAR(255) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_supplier_quote_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
+                CONSTRAINT fk_supplier_quote_requests_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_quote_requests_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_supplier_quote_requests_token (token_hash),
+                INDEX idx_supplier_quote_requests_renewal (renewal_id, status, created_at),
+                INDEX idx_supplier_quote_requests_supplier (supplier_id, created_at),
+                INDEX idx_supplier_quote_requests_email (recipient_email)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS supplier_quote_lines (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                request_id INT UNSIGNED NOT NULL,
+                renewal_item_id INT UNSIGNED NULL,
+                item_title VARCHAR(190) NOT NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                price_cash DECIMAL(12,2) NULL,
+                price_30 DECIMAL(12,2) NULL,
+                price_60 DECIMAL(12,2) NULL,
+                price_check DECIMAL(12,2) NULL,
+                price_custom DECIMAL(12,2) NULL,
+                custom_term VARCHAR(120) NULL,
+                vat_included TINYINT(1) NOT NULL DEFAULT 1,
+                delivery_note TEXT NULL,
+                note TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_supplier_quote_lines_request FOREIGN KEY (request_id) REFERENCES supplier_quote_requests(id) ON DELETE CASCADE,
+                CONSTRAINT fk_supplier_quote_lines_item FOREIGN KEY (renewal_item_id) REFERENCES renewal_items(id) ON DELETE SET NULL,
+                INDEX idx_supplier_quote_lines_request (request_id),
+                INDEX idx_supplier_quote_lines_item (renewal_item_id),
+                INDEX idx_supplier_quote_lines_cash (price_cash),
+                INDEX idx_supplier_quote_lines_30 (price_30),
+                INDEX idx_supplier_quote_lines_60 (price_60)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS supplier_quote_selections (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                renewal_id INT UNSIGNED NOT NULL,
+                renewal_item_id INT UNSIGNED NOT NULL,
+                quote_line_id INT UNSIGNED NULL,
+                selected_term VARCHAR(30) NOT NULL,
+                selected_price DECIMAL(12,2) NOT NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                selected_by INT UNSIGNED NULL,
+                selected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_supplier_quote_selections_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
+                CONSTRAINT fk_supplier_quote_selections_item FOREIGN KEY (renewal_item_id) REFERENCES renewal_items(id) ON DELETE CASCADE,
+                CONSTRAINT fk_supplier_quote_selections_line FOREIGN KEY (quote_line_id) REFERENCES supplier_quote_lines(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_quote_selections_user FOREIGN KEY (selected_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_supplier_quote_selection_item (renewal_item_id),
+                INDEX idx_supplier_quote_selections_renewal (renewal_id),
+                INDEX idx_supplier_quote_selections_line (quote_line_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS supplier_quote_attachments (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                request_id INT UNSIGNED NOT NULL,
+                original_name VARCHAR(255) NOT NULL,
+                stored_path VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(120) NULL,
+                file_size INT UNSIGNED NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_supplier_quote_attachments_request FOREIGN KEY (request_id) REFERENCES supplier_quote_requests(id) ON DELETE CASCADE,
+                INDEX idx_supplier_quote_attachments_request (request_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        self::$supplierQuoteSchemaEnsured = true;
+    }
+
     private function ensurePhoneNormalization(): void
     {
         if (self::$phoneNormalizationEnsured) {
@@ -2007,6 +2419,24 @@ final class RenewalRepository
         return (new \DateTimeImmutable($startDate))
             ->modify('+' . $count . ' ' . $unit)
             ->format('Y-m-d');
+    }
+
+    private function supplierQuoteTermPrice(array $line, string $term): ?float
+    {
+        $column = match ($term) {
+            'cash' => 'price_cash',
+            '30' => 'price_30',
+            '60' => 'price_60',
+            'check' => 'price_check',
+            'custom' => 'price_custom',
+            default => '',
+        };
+
+        if ($column === '' || $line[$column] === null || $line[$column] === '') {
+            return null;
+        }
+
+        return round((float) $line[$column], 2);
     }
 
     private function saveCurrentInvoicePeriod(int $renewalId, array $data): void

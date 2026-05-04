@@ -38,6 +38,11 @@ if (preg_match('#^/cari-bilgi/([a-f0-9]{64})$#', $path, $matches)) {
     exit;
 }
 
+if (preg_match('#^/tedarikci-teklif/([a-f0-9]{64})$#', $path, $matches)) {
+    handle_supplier_quote_public($method, $matches[1]);
+    exit;
+}
+
 if (preg_match('#^/renewals/(\d+)/payment$#', $path, $matches)) {
     handle_public_renewal_payment($method, (int) $matches[1]);
     exit;
@@ -137,6 +142,12 @@ try {
     } elseif (preg_match('#^/renewals/(\d+)/supplier-price-mail$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_supplier_price_request_mail($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/renewals/(\d+)/supplier-price-whatsapp$#', $path, $matches) && $method === 'GET') {
+        require_permission('renewals.manage');
+        handle_supplier_price_request_whatsapp($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/supplier-quotes/(\d+)/select$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_supplier_quote_select($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/decision$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_renewal_decision($repo, (int) $matches[1]);
@@ -487,12 +498,13 @@ function handle_supplier_price_request_mail(RenewalRepository $repo, int $renewa
             throw new RuntimeException('Fiyat talebi gonderilecek en az bir tedarikci yetkilisi secin veya manuel e-posta yazin.');
         }
 
-        $body = supplier_price_request_body($row, $message);
         $sent = 0;
         $failed = 0;
         $lastError = '';
 
         foreach ($recipients as $recipient) {
+            $quoteRequest = $repo->createSupplierQuoteRequest((int) $row['id'], $recipient, $subject, $message, 'mail');
+            $body = supplier_price_request_body($row, $message, (string) $quoteRequest['url']);
             $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
             $ok = !empty($result['ok']);
             $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
@@ -532,6 +544,66 @@ function handle_supplier_price_request_mail(RenewalRepository $repo, int $renewa
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
 }
 
+function handle_supplier_quote_select(RenewalRepository $repo, int $lineId): void
+{
+    verify_csrf();
+
+    try {
+        $term = (string) ($_POST['term'] ?? '');
+        $selected = $repo->selectSupplierQuoteLine($lineId, $term, (int) ($_SESSION['user_id'] ?? 0));
+        flash(
+            'success',
+            'Kalem için tedarikçi teklifi seçildi: '
+            . supplier_quote_term_label($selected['term'])
+            . ' / '
+            . money_format_local($selected['price'], (string) $selected['currency'])
+        );
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function handle_supplier_price_request_whatsapp(RenewalRepository $repo, int $renewalId): void
+{
+    try {
+        $row = $repo->find($renewalId);
+        if (!$row) {
+            throw new RuntimeException('Yenileme kaydi bulunamadi.');
+        }
+
+        $contactId = (int) ($_GET['contact_id'] ?? 0);
+        $contact = null;
+        foreach (renewal_supplier_contacts($repo, $row) as $candidate) {
+            if ((int) ($candidate['contact_id'] ?? 0) === $contactId) {
+                $contact = $candidate;
+                break;
+            }
+        }
+
+        if (!$contact) {
+            throw new RuntimeException('Tedarikci yetkilisi bulunamadi.');
+        }
+
+        $waNumber = whatsapp_number_from_phone((string) ($contact['phone'] ?? ''));
+        if ($waNumber === null) {
+            throw new RuntimeException('Tedarikci telefon numarasi WhatsApp icin uygun degil.');
+        }
+
+        $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
+        $message = supplier_price_default_message($row);
+        $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $contact, $subject, $message, 'whatsapp');
+        $whatsappMessage = supplier_price_whatsapp_message($row, $contact, (string) $quoteRequest['url']);
+
+        header('Location: https://wa.me/' . rawurlencode($waNumber) . '?text=' . rawurlencode($whatsappMessage));
+        exit;
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+        redirect(safe_return_path($_GET['return_to'] ?? '/'));
+    }
+}
+
 function supplier_price_mail_recipients_from_request(RenewalRepository $repo, array $row): array
 {
     $selected = $_POST['supplier_mail_recipients'] ?? [];
@@ -555,8 +627,12 @@ function supplier_price_mail_recipients_from_request(RenewalRepository $repo, ar
         }
 
         $recipients[$email] = [
+            'supplier_id' => (int) ($contact['supplier_id'] ?? 0),
+            'contact_id' => (int) ($contact['contact_id'] ?? 0),
+            'supplier_name' => (string) ($contact['supplier_name'] ?? ''),
             'name' => (string) ($contact['name'] ?? ''),
             'email' => $email,
+            'phone' => (string) ($contact['phone'] ?? ''),
         ];
     }
 
@@ -958,6 +1034,8 @@ function renewal_supplier_contacts(RenewalRepository $repo, array $row): array
         }
 
         $unique[$key] = [
+            'supplier_id' => (int) ($contact['supplier_id'] ?? 0),
+            'contact_id' => (int) ($contact['contact_id'] ?? 0),
             'supplier_name' => $supplierName,
             'name' => $name !== '' ? $name : ($supplierName !== '' ? $supplierName : ($email ?: $phone)),
             'email' => $email,
@@ -980,31 +1058,29 @@ function supplier_price_default_message(array $row): string
         'Merhaba,',
         '',
         (string) ($row['company_name'] ?? '-') . ' müşterimiz için aşağıdaki ürün / hizmet yenilemesi yaklaşmaktadır.',
-        'Güncel yenileme fiyatınızı, varsa adet / kur / iskonto ve yenileme koşullarını paylaşmanızı rica ederiz.',
+        'Güncel yenileme teklifinizi peşin, 30 gün, 60 gün, çek veya özel vade seçenekleriyle paylaşmanızı rica ederiz.',
+        'Fiyat yazmak istemezseniz teklif dosyanızı veya genel teklif notunuzu formdan iletebilirsiniz.',
         '',
         'Ürün / hizmet: ' . $title,
         'Marka: ' . (string) (($row['brand'] ?? '') ?: '-'),
         'Lisans / referans no: ' . (string) (($row['license_key'] ?? '') ?: '-'),
+        'Talep edilen periyot: ' . (string) (($row['renewal_period_name'] ?? '') ?: '-'),
         'Yenileme tarihi: ' . (!empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-'),
         $statusLine,
-        'Mevcut toplam: ' . money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY')) . ' KDV dahil',
-        '',
-        'Notlar:',
-        (string) (($row['notes'] ?? '') ?: '-'),
         '',
         'Teşekkürler.',
     ]);
 }
 
-function supplier_price_request_body(array $row, string $message): string
+function supplier_price_request_body(array $row, string $message, string $quoteUrl = ''): string
 {
     $rows = [
         'Müşteri' => (string) ($row['company_name'] ?? '-'),
         'Ürün / hizmet' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')),
         'Marka' => (string) (($row['brand'] ?? '') ?: '-'),
         'Lisans / referans no' => (string) (($row['license_key'] ?? '') ?: '-'),
+        'Talep edilen periyot' => (string) (($row['renewal_period_name'] ?? '') ?: '-'),
         'Yenileme tarihi' => !empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-',
-        'Mevcut toplam' => money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY')) . ' KDV dahil',
     ];
 
     $htmlRows = '';
@@ -1024,13 +1100,18 @@ function supplier_price_request_body(array $row, string $message): string
         . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Güncel yenileme fiyatı rica ederiz.</h1>'
         . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h($message), false) . '</div>'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
+        . ($quoteUrl !== '' ? '<p style="margin:20px 0 0;"><a href="' . h($quoteUrl) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Teklif formunu aç</a></p>' : '')
+        . '<p style="margin:14px 0 0;color:#607069;font-size:13px;line-height:1.5;">Formda nakliye, KDV, vade ve teklif notu onayı zorunludur. Fiyat yazmak istemezseniz teklifinizi dosya veya not olarak iletebilirsiniz.</p>'
         . '</td></tr></table></td></tr></table></body></html>';
 }
 
-function supplier_price_whatsapp_message(array $row, array $contact): string
+function supplier_price_whatsapp_message(array $row, array $contact, string $quoteUrl = ''): string
 {
     $name = trim((string) ($contact['name'] ?? ''));
     $message = supplier_price_default_message($row);
+    if ($quoteUrl !== '') {
+        $message .= "\n\nTeklif formu:\n" . $quoteUrl;
+    }
     if ($name === '') {
         return $message;
     }
@@ -2546,6 +2627,312 @@ function handle_customer_info_public(string $method, string $token): void
     });
 }
 
+function handle_supplier_quote_public(string $method, string $token): void
+{
+    $repo = new RenewalRepository();
+    $request = $repo->findSupplierQuoteRequestByToken($token);
+    $error = null;
+
+    if (!$request) {
+        render_public_layout('Tedarikci Teklif Formu', static function (): void {
+            echo '<section class="login-panel"><div class="alert error">Teklif talebi bulunamadı veya bağlantı geçersiz.</div></section>';
+        });
+        return;
+    }
+
+    $items = $repo->renewalItems((int) $request['renewal_id']);
+    if ($items === []) {
+        $items = [[
+            'id' => 0,
+            'title' => $request['title'] ?? 'Ürün / hizmet',
+            'brand' => $request['brand'] ?? '',
+            'license_key' => $request['license_key'] ?? '',
+            'quantity' => '1',
+        ]];
+    }
+
+    $expired = strtotime((string) $request['expires_at']) < time();
+    if ($expired && ($request['status'] ?? '') !== 'submitted') {
+        render_public_layout('Tedarikci Teklif Formu', static function () use ($request): void {
+            ?>
+            <section class="login-panel supplier-quote-public">
+                <div class="alert error">Bu teklif bağlantısının süresi dolmuş.</div>
+                <p class="muted compact">Talep: <?= h((string) ($request['company_name'] ?? '-')) ?></p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    if (($request['status'] ?? '') === 'submitted' && $method !== 'POST') {
+        render_public_layout('Tedarikci Teklif Formu', static function () use ($request): void {
+            ?>
+            <section class="login-panel supplier-quote-public">
+                <div class="alert success">Teklifiniz alınmış. Teşekkür ederiz.</div>
+                <p class="muted compact"><?= h((string) ($request['company_name'] ?? '-')) ?> için teklif kaydınız panele işlendi.</p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    $repo->markSupplierQuoteRequestOpened(
+        (int) $request['id'],
+        (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+        (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
+    );
+
+    if ($method === 'POST') {
+        verify_csrf();
+
+        try {
+            if (empty($_POST['terms_acknowledged'])) {
+                throw new RuntimeException('Teklifi göndermek için fiyat, vade, KDV, nakliye ve not onayını işaretleyin.');
+            }
+
+            $attachment = supplier_quote_save_upload($_FILES['supplier_quote_file'] ?? null, (int) $request['id']);
+            if (!supplier_quote_has_payload($_POST, $attachment)) {
+                throw new RuntimeException('En az bir fiyat yazın veya teklif dosyası/notu iletin.');
+            }
+
+            $submissionErrors = supplier_quote_submission_errors($_POST, $attachment);
+            if ($submissionErrors !== []) {
+                throw new RuntimeException(implode(' ', $submissionErrors));
+            }
+
+            $repo->submitSupplierQuote(
+                (int) $request['id'],
+                $_POST,
+                $attachment,
+                (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+                (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
+            );
+
+            render_public_layout('Tedarikci Teklif Formu', static function () use ($request): void {
+                ?>
+                <section class="login-panel supplier-quote-public">
+                    <div class="alert success">Teklifiniz alınmıştır. Teşekkür ederiz.</div>
+                    <p class="muted compact"><?= h((string) ($request['company_name'] ?? '-')) ?> için gönderdiğiniz teklif sistemde kayıt altına alındı.</p>
+                </section>
+                <?php
+            });
+            return;
+        } catch (Throwable $e) {
+            $error = $e->getMessage();
+        }
+    }
+
+    render_public_layout('Tedarikci Teklif Formu', static function () use ($request, $items, $error): void {
+        ?>
+        <section class="login-panel supplier-quote-public">
+            <div class="login-heading">
+                <p class="eyebrow">Tedarikçi teklif formu</p>
+                <h1>Fiyat teklifinizi iletin.</h1>
+                <p class="muted compact">
+                    Lütfen her kalem için peşin, 30 gün, 60 gün, çek veya özel vade fiyatlarını yazın.
+                    Nakliye, KDV, teslim ve özel şartları not alanlarında belirtmeden teklif gönderilemez.
+                </p>
+            </div>
+
+            <?php if ($error): ?>
+                <div class="alert error"><?= h($error) ?></div>
+            <?php endif; ?>
+
+            <div class="supplier-quote-context">
+                <div><span>Müşteri</span><strong><?= h((string) ($request['company_name'] ?? '-')) ?></strong></div>
+                <div><span>Tedarikçi</span><strong><?= h((string) (($request['supplier_display'] ?? '') ?: ($request['recipient_email'] ?? '-'))) ?></strong></div>
+                <div><span>Yenileme tarihi</span><strong><?= h(!empty($request['renewal_date']) ? date('d.m.Y', strtotime((string) $request['renewal_date'])) : '-') ?></strong></div>
+                <div><span>Talep edilen periyot</span><strong><?= h((string) (($request['renewal_period_name'] ?? '') ?: '-')) ?></strong></div>
+            </div>
+
+            <form method="post" enctype="multipart/form-data" class="supplier-quote-form">
+                <?= csrf_field() ?>
+                <input type="hidden" name="currency" value="<?= h((string) ($request['currency'] ?? 'TRY')) ?>">
+
+                <?php foreach ($items as $item): ?>
+                    <?= render_supplier_quote_item_form($item, (string) ($request['currency'] ?? 'TRY')) ?>
+                <?php endforeach; ?>
+
+                <div class="supplier-quote-card">
+                    <div class="section-head compact">
+                        <div>
+                            <h3>Dosya veya genel teklif notu</h3>
+                            <span>Fiyatları tek tek yazmak istemezseniz teklifinizi dosya/not olarak iletebilirsiniz.</span>
+                        </div>
+                    </div>
+                    <label>
+                        Teklif dosyası
+                        <input type="file" name="supplier_quote_file" accept=".pdf,.xls,.xlsx,.doc,.docx,.jpg,.jpeg,.png,application/pdf,image/png,image/jpeg">
+                    </label>
+                    <label>
+                        Genel teklif notu
+                        <textarea name="quote_note" rows="4" placeholder="Nakliye dahil/hariç, teslim süresi, stok, KDV ve teklif geçerlilik süresini yazınız."><?= h($_POST['quote_note'] ?? '') ?></textarea>
+                    </label>
+                </div>
+
+                <label class="supplier-quote-ack">
+                    <input type="checkbox" name="terms_acknowledged" value="1" <?= !empty($_POST['terms_acknowledged']) ? 'checked' : '' ?> required>
+                    <span>Fiyat, vade, KDV, nakliye, teslim ve teklif notlarını eksiksiz belirttiğimi onaylıyorum.</span>
+                </label>
+
+                <button type="submit" class="button primary full">Teklifi gönder</button>
+            </form>
+        </section>
+        <?php
+    });
+}
+
+function render_supplier_quote_item_form(array $item, string $currency): string
+{
+    $id = (int) ($item['id'] ?? 0);
+    $key = (string) $id;
+    $posted = is_array($_POST['lines'][$key] ?? null) ? $_POST['lines'][$key] : [];
+    $title = (string) (($item['title'] ?? '') ?: ($item['definition_name'] ?? 'Ürün / hizmet'));
+
+    ob_start();
+    ?>
+    <div class="supplier-quote-card">
+        <div class="supplier-quote-item-head">
+            <div>
+                <span>Kalem</span>
+                <strong><?= h($title) ?></strong>
+                <em>
+                    <?= h(trim((string) (($item['brand'] ?? '') ?: '-'))) ?>
+                    <?= !empty($item['license_key']) ? ' / ' . h((string) $item['license_key']) : '' ?>
+                </em>
+            </div>
+            <b><?= h(number_format((float) ($item['quantity'] ?? 1), 2, ',', '.')) ?> adet</b>
+        </div>
+        <input type="hidden" name="lines[<?= h($key) ?>][item_title]" value="<?= h($title) ?>">
+        <div class="supplier-quote-price-grid">
+            <label>Peşin <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_cash]" value="<?= h($posted['price_cash'] ?? '') ?>" placeholder="0.00"></label>
+            <label>30 gün <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_30]" value="<?= h($posted['price_30'] ?? '') ?>" placeholder="0.00"></label>
+            <label>60 gün <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_60]" value="<?= h($posted['price_60'] ?? '') ?>" placeholder="0.00"></label>
+            <label>Çek / vade <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_check]" value="<?= h($posted['price_check'] ?? '') ?>" placeholder="0.00"></label>
+            <label>Özel vade adı <input name="lines[<?= h($key) ?>][custom_term]" value="<?= h($posted['custom_term'] ?? '') ?>" placeholder="Örn: 90 gün"></label>
+            <label>Özel vade fiyatı <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_custom]" value="<?= h($posted['price_custom'] ?? '') ?>" placeholder="0.00"></label>
+            <label>Para birimi <input name="lines[<?= h($key) ?>][currency]" value="<?= h($posted['currency'] ?? $currency) ?>" maxlength="3"></label>
+            <label class="supplier-quote-check">
+                <input type="checkbox" name="lines[<?= h($key) ?>][vat_included]" value="1" <?= !isset($posted['vat_included']) || !empty($posted['vat_included']) ? 'checked' : '' ?>>
+                KDV dahil
+            </label>
+        </div>
+        <label>
+            Nakliye / teslim şartı
+            <textarea name="lines[<?= h($key) ?>][delivery_note]" rows="2" placeholder="Nakliye dahil mi, teslim süresi nedir?"><?= h($posted['delivery_note'] ?? '') ?></textarea>
+        </label>
+        <label>
+            Kalem notu
+            <textarea name="lines[<?= h($key) ?>][note]" rows="2" placeholder="Stok, muadil ürün, garanti veya özel şartlar"><?= h($posted['note'] ?? '') ?></textarea>
+        </label>
+    </div>
+    <?php
+    return (string) ob_get_clean();
+}
+
+function supplier_quote_save_upload(?array $file, int $requestId): ?array
+{
+    if (!$file || (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return null;
+    }
+
+    if ((int) ($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        throw new RuntimeException('Teklif dosyası yüklenemedi.');
+    }
+
+    if ((int) ($file['size'] ?? 0) > 10 * 1024 * 1024) {
+        throw new RuntimeException('Teklif dosyası en fazla 10 MB olabilir.');
+    }
+
+    $original = (string) ($file['name'] ?? 'teklif');
+    $extension = strtolower(pathinfo($original, PATHINFO_EXTENSION));
+    $allowed = ['pdf', 'xls', 'xlsx', 'doc', 'docx', 'jpg', 'jpeg', 'png'];
+    if (!in_array($extension, $allowed, true)) {
+        throw new RuntimeException('Teklif dosyası PDF, Excel, Word veya görsel olmalıdır.');
+    }
+
+    $dir = ROOT_PATH . '/storage/supplier_quotes';
+    if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+        throw new RuntimeException('Teklif dosyası klasörü oluşturulamadı.');
+    }
+
+    $storedName = 'tedarikci-teklif-' . $requestId . '-' . bin2hex(random_bytes(8)) . '.' . $extension;
+    $target = $dir . '/' . $storedName;
+    if (!move_uploaded_file((string) ($file['tmp_name'] ?? ''), $target)) {
+        throw new RuntimeException('Teklif dosyası kaydedilemedi.');
+    }
+
+    return [
+        'original_name' => $original,
+        'stored_path' => 'storage/supplier_quotes/' . $storedName,
+        'mime_type' => (string) ($file['type'] ?? ''),
+        'file_size' => (int) ($file['size'] ?? 0),
+    ];
+}
+
+function supplier_quote_has_payload(array $data, ?array $attachment): bool
+{
+    if ($attachment !== null || trim((string) ($data['quote_note'] ?? '')) !== '') {
+        return true;
+    }
+
+    $lines = $data['lines'] ?? [];
+    if (!is_array($lines)) {
+        return false;
+    }
+
+    foreach ($lines as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+
+        foreach (['price_cash', 'price_30', 'price_60', 'price_check', 'price_custom'] as $field) {
+            $value = str_replace(',', '.', trim((string) ($line[$field] ?? '')));
+            if ($value !== '' && is_numeric($value) && (float) $value > 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function supplier_quote_submission_errors(array $data, ?array $attachment): array
+{
+    $errors = [];
+    $globalNote = trim((string) ($data['quote_note'] ?? ''));
+    $lines = $data['lines'] ?? [];
+    $hasAnyPrice = false;
+
+    if (is_array($lines)) {
+        foreach ($lines as $line) {
+            if (!is_array($line)) {
+                continue;
+            }
+
+            $lineHasPrice = false;
+            foreach (['price_cash', 'price_30', 'price_60', 'price_check', 'price_custom'] as $field) {
+                $value = str_replace(',', '.', trim((string) ($line[$field] ?? '')));
+                if ($value !== '' && is_numeric($value) && (float) $value > 0) {
+                    $lineHasPrice = true;
+                    $hasAnyPrice = true;
+                }
+            }
+
+            if ($lineHasPrice && $globalNote === '' && trim((string) ($line['delivery_note'] ?? '')) === '' && trim((string) ($line['note'] ?? '')) === '') {
+                $errors[] = 'Fiyat yazılan her kalem için nakliye/teslim veya kalem notu girin.';
+                break;
+            }
+        }
+    }
+
+    if (!$hasAnyPrice && $attachment === null && $globalNote === '') {
+        $errors[] = 'Fiyat yazmadan teklif iletmek için dosya yükleyin veya genel teklif notu yazın.';
+    }
+
+    return $errors;
+}
+
 function customer_info_form_values(array $source, string $fallbackEmail = '', string $fallbackContactName = ''): array
 {
     $contacts = customer_info_contact_rows($source, $fallbackEmail, $fallbackContactName);
@@ -2864,6 +3251,8 @@ function render_dashboard_lane(array $rows, string $variant, bool $canManage, bo
                             <?= render_notification_reader_chips((string) $readSummary['readers']) ?>
                         </div>
                     <?php endif; ?>
+
+                    <?= render_supplier_quote_comparison(new RenewalRepository(), $row) ?>
 
                     <div class="track-actions">
                         <?php if ($canManage && $variant !== 'offers'): ?>
@@ -7390,14 +7779,14 @@ function render_supplier_price_request_dialog(array $row): string
                                 continue;
                             }
                             $hasWhatsappRecipient = true;
-                            $message = supplier_price_whatsapp_message($row, $contact);
+                            $whatsappLink = url('/renewals/' . $id . '/supplier-price-whatsapp?contact_id=' . (int) ($contact['contact_id'] ?? 0) . '&return_to=' . rawurlencode($returnTo));
                             ?>
                             <div class="whatsapp-contact-card">
                                 <div>
                                     <strong><?= h((string) (($contact['name'] ?? '') ?: $phone)) ?></strong>
                                     <span><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($phone) ?></span>
                                 </div>
-                                <a class="button small whatsapp" target="_blank" rel="noopener" href="https://wa.me/<?= h($waNumber) ?>?text=<?= h(rawurlencode($message)) ?>">WhatsApp aç</a>
+                                <a class="button small whatsapp" target="_blank" rel="noopener" href="<?= h($whatsappLink) ?>">WhatsApp aç</a>
                             </div>
                         <?php endforeach; ?>
                         <?php if (!$hasWhatsappRecipient): ?>
@@ -7408,6 +7797,149 @@ function render_supplier_price_request_dialog(array $row): string
             </div>
         </div>
     </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_supplier_quote_comparison(RenewalRepository $repo, array $row): string
+{
+    $renewalId = (int) ($row['id'] ?? 0);
+    if ($renewalId < 1) {
+        return '';
+    }
+
+    $quotes = $repo->supplierQuotesForRenewal($renewalId);
+    $requests = $quotes['requests'] ?? [];
+    $lines = $quotes['lines'] ?? [];
+    $attachments = $quotes['attachments'] ?? [];
+    $selections = $quotes['selections'] ?? [];
+
+    if ($requests === [] && $lines === []) {
+        return '';
+    }
+
+    $items = [];
+    foreach ($repo->renewalItems($renewalId) as $item) {
+        $items[(int) $item['id']] = $item;
+    }
+
+    $selectionByItem = [];
+    foreach ($selections as $selection) {
+        $selectionByItem[(int) $selection['renewal_item_id']] = $selection;
+    }
+
+    $linesByItem = [];
+    foreach ($lines as $line) {
+        $linesByItem[(int) ($line['renewal_item_id'] ?? 0)][] = $line;
+    }
+
+    $submitted = count(array_filter($requests, static fn (array $request): bool => ($request['status'] ?? '') === 'submitted'));
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+
+    ob_start();
+    ?>
+    <div class="supplier-quotes-panel">
+        <div class="section-head compact">
+            <div>
+                <h3>Tedarikçi teklifleri</h3>
+                <span><?= h((string) $submitted) ?> / <?= h((string) count($requests)) ?> tedarikçi teklif verdi. Her kalemde ayrı tedarikçi seçebilirsiniz.</span>
+            </div>
+        </div>
+
+        <?php foreach ($items as $itemId => $item): ?>
+            <div class="supplier-quote-compare-item">
+                <div class="supplier-quote-compare-head">
+                    <div>
+                        <span>Kalem</span>
+                        <strong><?= h((string) (($item['title'] ?? '') ?: 'Ürün / hizmet')) ?></strong>
+                    </div>
+                    <?php if (isset($selectionByItem[$itemId])): ?>
+                        <?php $selected = $selectionByItem[$itemId]; ?>
+                        <em>
+                            Seçilen: <?= h((string) ($selected['supplier_display'] ?? '-')) ?>
+                            / <?= h(supplier_quote_term_label((string) $selected['selected_term'])) ?>
+                            / <?= h(money_format_local($selected['selected_price'], (string) $selected['currency'])) ?>
+                        </em>
+                    <?php endif; ?>
+                </div>
+
+                <?php if (empty($linesByItem[$itemId])): ?>
+                    <p class="muted compact">Bu kalem için henüz fiyat girilmedi.</p>
+                <?php else: ?>
+                    <div class="supplier-quote-offer-grid">
+                        <?php foreach ($linesByItem[$itemId] as $line): ?>
+                            <?= render_supplier_quote_offer_card($line, $selectionByItem[$itemId] ?? null, $returnTo) ?>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endforeach; ?>
+
+        <?php if ($attachments !== []): ?>
+            <div class="supplier-quote-files">
+                <strong>Dosya ile gelen teklifler</strong>
+                <?php foreach ($attachments as $file): ?>
+                    <span><?= h((string) ($file['supplier_display'] ?? 'Tedarikçi')) ?> - <?= h((string) $file['original_name']) ?></span>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_supplier_quote_offer_card(array $line, ?array $selected, string $returnTo): string
+{
+    $terms = [
+        'cash' => ['label' => 'Peşin', 'field' => 'price_cash'],
+        '30' => ['label' => '30 gün', 'field' => 'price_30'],
+        '60' => ['label' => '60 gün', 'field' => 'price_60'],
+        'check' => ['label' => 'Çek / vade', 'field' => 'price_check'],
+        'custom' => ['label' => supplier_quote_term_label('custom', (string) ($line['custom_term'] ?? '')), 'field' => 'price_custom'],
+    ];
+    $lineId = (int) $line['id'];
+    $selectedLineId = (int) ($selected['quote_line_id'] ?? 0);
+    $selectedTerm = (string) ($selected['selected_term'] ?? '');
+
+    ob_start();
+    ?>
+    <div class="supplier-quote-offer-card">
+        <div class="supplier-quote-offer-head">
+            <div>
+                <strong><?= h((string) (($line['supplier_display'] ?? '') ?: 'Tedarikçi')) ?></strong>
+                <span><?= h((string) (($line['contact_name'] ?? '') ?: ($line['recipient_email'] ?? ''))) ?></span>
+            </div>
+            <em><?= !empty($line['submitted_at']) ? h(date('d.m.Y H:i', strtotime((string) $line['submitted_at']))) : h((string) ($line['request_status'] ?? 'bekliyor')) ?></em>
+        </div>
+        <div class="supplier-quote-term-grid">
+            <?php foreach ($terms as $term => $meta): ?>
+                <?php
+                $price = $line[$meta['field']] ?? null;
+                if ($price === null || $price === '') {
+                    continue;
+                }
+                $isSelected = $selectedLineId === $lineId && $selectedTerm === $term;
+                ?>
+                <form method="post" action="<?= h(url('/supplier-quotes/' . $lineId . '/select')) ?>" class="supplier-quote-term <?= $isSelected ? 'selected' : '' ?>">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                    <input type="hidden" name="term" value="<?= h($term) ?>">
+                    <span><?= h((string) $meta['label']) ?></span>
+                    <strong><?= h(money_format_local($price, (string) ($line['currency'] ?? 'TRY'))) ?></strong>
+                    <small><?= !empty($line['vat_included']) ? 'KDV dahil' : 'KDV hariç' ?></small>
+                    <button type="submit" class="button small <?= $isSelected ? 'primary' : 'secondary' ?>"><?= $isSelected ? 'Seçildi' : 'Seç' ?></button>
+                </form>
+            <?php endforeach; ?>
+        </div>
+        <?php if (!empty($line['delivery_note']) || !empty($line['note'])): ?>
+            <div class="supplier-quote-notes">
+                <?php if (!empty($line['delivery_note'])): ?><span>Nakliye/teslim: <?= h((string) $line['delivery_note']) ?></span><?php endif; ?>
+                <?php if (!empty($line['note'])): ?><span>Not: <?= h((string) $line['note']) ?></span><?php endif; ?>
+            </div>
+        <?php endif; ?>
+    </div>
     <?php
 
     return (string) ob_get_clean();
@@ -7609,6 +8141,18 @@ function renewal_decision_label(string $decision): string
         'postponed' => 'Farklı tarihe ertelendi',
         'revision_requested' => 'Revize istendi',
         default => $decision,
+    };
+}
+
+function supplier_quote_term_label(string $term, string $customTerm = ''): string
+{
+    return match ($term) {
+        'cash' => 'Peşin',
+        '30' => '30 gün',
+        '60' => '60 gün',
+        'check' => 'Çek / vade',
+        'custom' => $customTerm !== '' ? $customTerm : 'Özel vade',
+        default => $term,
     };
 }
 
