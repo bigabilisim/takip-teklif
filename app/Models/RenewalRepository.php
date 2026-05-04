@@ -1546,6 +1546,66 @@ final class RenewalRepository
         return array_values($recipients);
     }
 
+    public function supplierCommunicationRecipients(?int $supplierId, ?int $supplierGroupId): array
+    {
+        if (($supplierId ?? 0) < 1 && ($supplierGroupId ?? 0) < 1) {
+            return [];
+        }
+
+        $where = 's.deleted_at IS NULL
+                  AND sc.notify_enabled = 1
+                  AND (
+                    (sc.email IS NOT NULL AND sc.email <> \'\')
+                    OR (sc.phone IS NOT NULL AND sc.phone <> \'\')
+                  )';
+        $params = [];
+
+        if (($supplierId ?? 0) > 0) {
+            $where .= ' AND s.id = :supplier_id';
+            $params['supplier_id'] = $supplierId;
+        } else {
+            $where .= ' AND s.supplier_group_id = :supplier_group_id';
+            $params['supplier_group_id'] = $supplierGroupId;
+        }
+
+        $stmt = $this->db->prepare(
+            "SELECT s.id AS supplier_id,
+                    s.company_name AS supplier_name,
+                    sc.id AS contact_id,
+                    sc.full_name,
+                    sc.email,
+                    sc.phone
+             FROM suppliers s
+             INNER JOIN supplier_contacts sc ON sc.supplier_id = s.id
+             WHERE {$where}
+             ORDER BY s.company_name ASC, sc.full_name ASC"
+        );
+        $stmt->execute($params);
+
+        $recipients = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $email = trim(mb_strtolower((string) ($row['email'] ?? '')));
+            $phoneDigits = preg_replace('/\D+/', '', (string) ($row['phone'] ?? '')) ?: '';
+            $key = $email !== ''
+                ? 'email:' . $email
+                : 'phone:' . (string) $row['supplier_id'] . ':' . $phoneDigits;
+            if ($key === 'phone:' . (string) $row['supplier_id'] . ':' || isset($recipients[$key])) {
+                continue;
+            }
+
+            $recipients[$key] = [
+                'supplier_id' => (int) $row['supplier_id'],
+                'supplier_name' => (string) $row['supplier_name'],
+                'contact_id' => (int) $row['contact_id'],
+                'name' => (string) $row['full_name'],
+                'email' => $email,
+                'phone' => (string) ($row['phone'] ?? ''),
+            ];
+        }
+
+        return array_values($recipients);
+    }
+
     public function createCustomer(array $data): int
     {
         $this->db->beginTransaction();

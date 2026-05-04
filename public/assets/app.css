@@ -764,6 +764,16 @@ input[type="submit"][aria-busy="true"] {
     background: #d8f2e4;
 }
 
+.button.supplier-price {
+    border-color: #e7c57f;
+    background: #fff6e7;
+    color: #8a5500;
+}
+
+.button.supplier-price:hover {
+    background: #ffedc8;
+}
+
 .button.small {
     min-height: 34px;
     padding: 0 10px;
@@ -1736,6 +1746,31 @@ td.actions {
 
 .communication-dialog {
     width: min(94vw, 760px);
+}
+
+.supplier-price-dialog {
+    width: min(94vw, 980px);
+}
+
+.supplier-price-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+    gap: 16px;
+    align-items: start;
+}
+
+.supplier-price-mail-form,
+.supplier-whatsapp-panel {
+    min-width: 0;
+}
+
+.supplier-whatsapp-panel {
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fbfcfb;
 }
 
 .recipient-picker {
@@ -3789,7 +3824,8 @@ label {
     .section-fields.two,
     .item-grid,
     .grapesjs-test-card,
-    .request-inline-form {
+    .request-inline-form,
+    .supplier-price-layout {
         grid-template-columns: 1fr;
     }
 

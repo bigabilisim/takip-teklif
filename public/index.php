@@ -134,6 +134,9 @@ try {
     } elseif (preg_match('#^/renewals/(\d+)/mail$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_manual_renewal_mail($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/renewals/(\d+)/supplier-price-mail$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_supplier_price_request_mail($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/decision$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_renewal_decision($repo, (int) $matches[1]);
@@ -456,6 +459,120 @@ function handle_manual_renewal_mail(RenewalRepository $repo, int $renewalId): vo
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/renewals'));
+}
+
+function handle_supplier_price_request_mail(RenewalRepository $repo, int $renewalId): void
+{
+    verify_csrf();
+
+    try {
+        $row = $repo->find($renewalId);
+        if (!$row) {
+            throw new RuntimeException('Yenileme kaydi bulunamadi.');
+        }
+
+        $subject = trim((string) ($_POST['subject'] ?? ''));
+        if ($subject === '') {
+            $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
+        }
+        $subject = mb_substr($subject, 0, 240);
+
+        $message = trim((string) ($_POST['message'] ?? ''));
+        if ($message === '') {
+            $message = supplier_price_default_message($row);
+        }
+
+        $recipients = supplier_price_mail_recipients_from_request($repo, $row);
+        if ($recipients === []) {
+            throw new RuntimeException('Fiyat talebi gonderilecek en az bir tedarikci yetkilisi secin veya manuel e-posta yazin.');
+        }
+
+        $body = supplier_price_request_body($row, $message);
+        $sent = 0;
+        $failed = 0;
+        $lastError = '';
+
+        foreach ($recipients as $recipient) {
+            $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
+            $ok = !empty($result['ok']);
+            $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+            $repo->logMail(
+                (int) $row['id'],
+                (string) $recipient['email'],
+                $subject,
+                $body,
+                $ok ? 'sent' : 'failed',
+                $error,
+                false
+            );
+
+            if ($ok) {
+                $sent++;
+            } else {
+                $failed++;
+                $lastError = $error ?? '';
+            }
+        }
+
+        if ($sent > 0) {
+            $repo->markSupplierPriceRequested((int) $row['id']);
+        }
+
+        if ($sent > 0 && $failed < 1) {
+            flash('success', 'Tedarikci fiyat talebi maili gonderildi. Alici sayisi: ' . $sent);
+        } elseif ($sent > 0) {
+            flash('error', 'Tedarikci fiyat talebi kismen gonderildi. Basarili: ' . $sent . ', basarisiz: ' . $failed);
+        } else {
+            flash('error', 'Tedarikci fiyat talebi gonderilemedi: ' . ($lastError ?: 'Alici sunucusu kabul etmedi.'));
+        }
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function supplier_price_mail_recipients_from_request(RenewalRepository $repo, array $row): array
+{
+    $selected = $_POST['supplier_mail_recipients'] ?? [];
+    if (!is_array($selected)) {
+        $selected = [];
+    }
+
+    $selectedEmails = [];
+    foreach ($selected as $email) {
+        $normalized = trim(mb_strtolower((string) $email));
+        if (filter_var($normalized, FILTER_VALIDATE_EMAIL)) {
+            $selectedEmails[$normalized] = true;
+        }
+    }
+
+    $recipients = [];
+    foreach (renewal_supplier_contacts($repo, $row) as $contact) {
+        $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+        if ($email === '' || !isset($selectedEmails[$email])) {
+            continue;
+        }
+
+        $recipients[$email] = [
+            'name' => (string) ($contact['name'] ?? ''),
+            'email' => $email,
+        ];
+    }
+
+    $customEmail = trim(mb_strtolower((string) ($_POST['custom_supplier_email'] ?? '')));
+    if ($customEmail !== '') {
+        if (!filter_var($customEmail, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Manuel tedarikci e-posta adresi gecersiz.');
+        }
+
+        $recipients[$customEmail] = [
+            'name' => 'Manuel tedarikci alicisi',
+            'email' => $customEmail,
+        ];
+    }
+
+    return array_values($recipients);
 }
 
 function renewal_mail_recipients_from_request(RenewalRepository $repo, array $row): array
@@ -812,6 +929,113 @@ function supplier_revision_request_body(array $row, string $note): string
         . '<p style="margin:0 0 18px;color:#607069;line-height:1.5;">Aşağıdaki yenileme için daha uygun fiyat çalışması beklenmektedir.</p>'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
         . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function renewal_supplier_contacts(RenewalRepository $repo, array $row): array
+{
+    $contacts = $repo->supplierCommunicationRecipients(
+        empty($row['supplier_id']) ? null : (int) $row['supplier_id'],
+        empty($row['supplier_group_id']) ? null : (int) $row['supplier_group_id']
+    );
+
+    $unique = [];
+    foreach ($contacts as $contact) {
+        if (!is_array($contact)) {
+            continue;
+        }
+
+        $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+        $phone = normalize_phone_number((string) ($contact['phone'] ?? ''));
+        $name = trim((string) ($contact['name'] ?? $contact['full_name'] ?? ''));
+        $supplierName = trim((string) ($contact['supplier_name'] ?? ''));
+        if ($email === '' && $phone === '') {
+            continue;
+        }
+
+        $key = $email !== '' ? 'email:' . $email : 'phone:' . preg_replace('/\D+/', '', $phone);
+        if (isset($unique[$key])) {
+            continue;
+        }
+
+        $unique[$key] = [
+            'supplier_name' => $supplierName,
+            'name' => $name !== '' ? $name : ($supplierName !== '' ? $supplierName : ($email ?: $phone)),
+            'email' => $email,
+            'phone' => $phone,
+        ];
+    }
+
+    return array_values($unique);
+}
+
+function supplier_price_default_message(array $row): string
+{
+    $days = days_until($row['renewal_date'] ?? null);
+    $statusLine = $days !== null && $days < 0
+        ? 'Yenileme tarihi ' . abs($days) . ' gün önce geçti.'
+        : 'Yenilemeye kalan süre: ' . max(0, (int) $days) . ' gün.';
+    $title = (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'yenileme kaydı'));
+
+    return implode("\n", [
+        'Merhaba,',
+        '',
+        (string) ($row['company_name'] ?? '-') . ' müşterimiz için aşağıdaki ürün / hizmet yenilemesi yaklaşmaktadır.',
+        'Güncel yenileme fiyatınızı, varsa adet / kur / iskonto ve yenileme koşullarını paylaşmanızı rica ederiz.',
+        '',
+        'Ürün / hizmet: ' . $title,
+        'Marka: ' . (string) (($row['brand'] ?? '') ?: '-'),
+        'Lisans / referans no: ' . (string) (($row['license_key'] ?? '') ?: '-'),
+        'Yenileme tarihi: ' . (!empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-'),
+        $statusLine,
+        'Mevcut toplam: ' . money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY')) . ' KDV dahil',
+        '',
+        'Notlar:',
+        (string) (($row['notes'] ?? '') ?: '-'),
+        '',
+        'Teşekkürler.',
+    ]);
+}
+
+function supplier_price_request_body(array $row, string $message): string
+{
+    $rows = [
+        'Müşteri' => (string) ($row['company_name'] ?? '-'),
+        'Ürün / hizmet' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')),
+        'Marka' => (string) (($row['brand'] ?? '') ?: '-'),
+        'Lisans / referans no' => (string) (($row['license_key'] ?? '') ?: '-'),
+        'Yenileme tarihi' => !empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-',
+        'Mevcut toplam' => money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY')) . ' KDV dahil',
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;width:34%;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . nl2br(h($value), false) . '</td>'
+            . '</tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d9e3df;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Tedarikçi fiyat talebi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Güncel yenileme fiyatı rica ederiz.</h1>'
+        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h($message), false) . '</div>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function supplier_price_whatsapp_message(array $row, array $contact): string
+{
+    $name = trim((string) ($contact['name'] ?? ''));
+    $message = supplier_price_default_message($row);
+    if ($name === '') {
+        return $message;
+    }
+
+    return str_replace('Merhaba,', 'Merhaba ' . $name . ',', $message);
 }
 
 function renewal_notification_subject_and_status(array $row, ?int $days): array
@@ -2645,8 +2869,10 @@ function render_dashboard_lane(array $rows, string $variant, bool $canManage, bo
                         <?php if ($canManage && $variant !== 'offers'): ?>
                             <button type="button" class="button small secondary" data-dialog-open="renewal-mail-<?= h($row['id']) ?>">Mail olarak gönder</button>
                             <button type="button" class="button small whatsapp" data-dialog-open="renewal-whatsapp-<?= h($row['id']) ?>">WhatsApp PDF gönder</button>
+                            <button type="button" class="button small supplier-price" data-dialog-open="supplier-price-<?= h($row['id']) ?>">Tedarikçiden fiyat al</button>
                             <a href="<?= h(url('/renewals/' . $row['id'] . '/edit')) ?>" class="button small secondary">Düzenle</a>
                             <?= render_renewal_communication_dialogs($row) ?>
+                            <?= render_supplier_price_request_dialog($row) ?>
                         <?php endif; ?>
                         <?php if ($variant === 'offers'): ?>
                             <?= render_renewal_actions($row, $canManage, $canDelete, $canAcknowledge, $canNotifyRow) ?>
@@ -6958,12 +7184,14 @@ function render_renewal_actions(array $row, bool $canManage, bool $canDelete, bo
         <?php if ($canManage): ?>
             <button type="button" class="button small secondary" data-dialog-open="renewal-mail-<?= h($row['id']) ?>">Mail olarak gönder</button>
             <button type="button" class="button small whatsapp" data-dialog-open="renewal-whatsapp-<?= h($row['id']) ?>">WhatsApp PDF gönder</button>
+            <button type="button" class="button small supplier-price" data-dialog-open="supplier-price-<?= h($row['id']) ?>">Tedarikçiden fiyat al</button>
             <a href="<?= h(url('/renewals/' . $row['id'] . '/edit')) ?>" class="button small">Duzenle</a>
             <button type="button" class="button small primary" data-dialog-open="renewal-decision-approved-<?= h($row['id']) ?>">Onaylandı</button>
             <button type="button" class="button small danger" data-dialog-open="renewal-decision-rejected-<?= h($row['id']) ?>">Reddedildi</button>
             <button type="button" class="button small secondary" data-dialog-open="renewal-decision-postponed-<?= h($row['id']) ?>">Ertelendi</button>
             <button type="button" class="button small secondary" data-dialog-open="renewal-decision-revision-<?= h($row['id']) ?>">Revize istendi</button>
             <?= render_renewal_communication_dialogs($row) ?>
+            <?= render_supplier_price_request_dialog($row) ?>
             <?= render_renewal_decision_dialogs($row) ?>
         <?php endif; ?>
         <?php if ($canDelete): ?>
@@ -7074,6 +7302,109 @@ function render_renewal_communication_dialogs(array $row): string
                 <?php if (!$hasWhatsappRecipient): ?>
                     <div class="empty">Bu cari için WhatsApp'a uygun telefon numarası bulunamadı.</div>
                 <?php endif; ?>
+            </div>
+        </div>
+    </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_supplier_price_request_dialog(array $row): string
+{
+    $id = (int) $row['id'];
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+    $repo = new RenewalRepository();
+    $contacts = renewal_supplier_contacts($repo, $row);
+    $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
+    $defaultMessage = supplier_price_default_message($row);
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog communication-dialog supplier-price-dialog" id="supplier-price-<?= h($id) ?>">
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <h2>Tedarikçiden fiyat al</h2>
+                    <span><?= h((string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-'))) ?> için tedarikçiye mail veya WhatsApp ile güncel fiyat talebi gönderin.</span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+
+            <div class="supplier-price-layout">
+                <form method="post" action="<?= h(url('/renewals/' . $id . '/supplier-price-mail')) ?>" class="form-grid supplier-price-mail-form">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                    <div class="recipient-picker">
+                        <strong>Mail alıcıları</strong>
+                        <?php $hasMailRecipient = false; ?>
+                        <?php foreach ($contacts as $contact): ?>
+                            <?php
+                            $email = trim((string) ($contact['email'] ?? ''));
+                            if ($email === '') {
+                                continue;
+                            }
+                            $hasMailRecipient = true;
+                            ?>
+                            <label class="recipient-card">
+                                <input type="checkbox" name="supplier_mail_recipients[]" value="<?= h($email) ?>" checked>
+                                <span>
+                                    <b><?= h((string) (($contact['name'] ?? '') ?: $email)) ?></b>
+                                    <em><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($email) ?></em>
+                                </span>
+                            </label>
+                        <?php endforeach; ?>
+                        <?php if (!$hasMailRecipient): ?>
+                            <p class="muted compact">Bilgilendirme kutusu açık ve e-posta adresi dolu tedarikçi yetkilisi bulunamadı. Manuel alıcı yazabilirsiniz.</p>
+                        <?php endif; ?>
+                    </div>
+                    <label>
+                        Manuel tedarikçi e-postası
+                        <input type="email" name="custom_supplier_email" placeholder="tedarikci@firma.com">
+                    </label>
+                    <label>
+                        Konu
+                        <input name="subject" value="<?= h($subject) ?>" required maxlength="240">
+                    </label>
+                    <label>
+                        Talep metni
+                        <textarea name="message" rows="8" required><?= h($defaultMessage) ?></textarea>
+                    </label>
+                    <button type="submit" class="button primary full">Fiyat talebi maili gönder</button>
+                </form>
+
+                <div class="supplier-whatsapp-panel">
+                    <div class="section-head compact">
+                        <div>
+                            <h3>WhatsApp ile gönder</h3>
+                            <span class="muted compact">Yetkili seçildiğinde hazır fiyat talebi mesajı WhatsApp'ta açılır.</span>
+                        </div>
+                    </div>
+                    <div class="whatsapp-recipient-list">
+                        <?php $hasWhatsappRecipient = false; ?>
+                        <?php foreach ($contacts as $contact): ?>
+                            <?php
+                            $phone = trim((string) ($contact['phone'] ?? ''));
+                            $waNumber = whatsapp_number_from_phone($phone);
+                            if ($waNumber === null) {
+                                continue;
+                            }
+                            $hasWhatsappRecipient = true;
+                            $message = supplier_price_whatsapp_message($row, $contact);
+                            ?>
+                            <div class="whatsapp-contact-card">
+                                <div>
+                                    <strong><?= h((string) (($contact['name'] ?? '') ?: $phone)) ?></strong>
+                                    <span><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($phone) ?></span>
+                                </div>
+                                <a class="button small whatsapp" target="_blank" rel="noopener" href="https://wa.me/<?= h($waNumber) ?>?text=<?= h(rawurlencode($message)) ?>">WhatsApp aç</a>
+                            </div>
+                        <?php endforeach; ?>
+                        <?php if (!$hasWhatsappRecipient): ?>
+                            <div class="empty">Bu tedarikçi için WhatsApp'a uygun telefon numarası bulunamadı.</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
             </div>
         </div>
     </dialog>

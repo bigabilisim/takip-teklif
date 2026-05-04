@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.16] - 2026-05-04
+
+- Takipteki urun ve hizmet kartlarina Tedarikciden fiyat al aksiyonu eklendi.
+- Tedarikci fiyat talebi icin mail gonderme ve WhatsApp hazir mesaj acma ekranlari eklendi.
+- Tedarikci yetkililerinde mail veya telefon bazli fiyat talebi alicilari desteklendi.
+
 ## [1.0.15] - 2026-05-04
 
 - Tanimlamalar ekrani 4 kolonlu kompakt kart yapisina tasindi.
