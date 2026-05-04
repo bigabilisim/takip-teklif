@@ -1,0 +1,19 @@
+{
+    "name": "Yenileme Takip Sistemi",
+    "short_name": "Yenileme",
+    "description": "Urun ve hizmet yenileme takip paneli",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#f4f6f5",
+    "theme_color": "#147c72",
+    "lang": "tr",
+    "icons": [
+        {
+            "src": "/assets/pwa-icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ]
+}

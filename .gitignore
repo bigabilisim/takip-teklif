@@ -1,0 +1,11 @@
+/config/config.php
+/storage/parasut_token*.json
+/storage/parasut_contacts_cache*.json
+/storage/exchange_rates.json
+/storage/payment_link_secret.key
+/storage/backups/
+/storage/config/*.php
+/storage/logs/*.log
+/storage/logs/*.html
+/storage/uploads/
+.DS_Store
