@@ -325,6 +325,23 @@
     }
 
     document.addEventListener('click', (event) => {
+        const copyButton = event.target.closest('[data-copy-value]');
+        if (copyButton) {
+            const value = copyButton.dataset.copyValue || '';
+            if (value && navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(value).then(() => {
+                    const previous = copyButton.textContent;
+                    copyButton.textContent = 'Kopyalandı';
+                    window.setTimeout(() => {
+                        copyButton.textContent = previous || 'Linki kopyala';
+                    }, 1600);
+                }).catch(() => {
+                    copyButton.textContent = 'Kopyalanamadı';
+                });
+            }
+            return;
+        }
+
         const opener = event.target.closest('[data-dialog-open]');
         if (opener) {
             const dialog = document.getElementById(opener.dataset.dialogOpen || '');

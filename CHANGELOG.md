@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.18] - 2026-05-04
+
+- Tedarikciden fiyat al penceresine mail gondermeden teklif formu linki olusturma alani eklendi.
+- Olusturulan tedarikci teklif linkleri pencerede kopyalanabilir ve form olarak acilabilir sekilde gosterildi.
+- Link olusturulduktan sonra ilgili pencerenin otomatik tekrar acilmasi saglandi.
+
 ## [1.0.17] - 2026-05-04
 
 - Tedarikci teklif toplama akisi eklendi: mail ve WhatsApp talepleri artik tedarikci teklif formu linki uretir.

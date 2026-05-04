@@ -142,6 +142,9 @@ try {
     } elseif (preg_match('#^/renewals/(\d+)/supplier-price-mail$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_supplier_price_request_mail($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/renewals/(\d+)/supplier-price-link$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_supplier_price_request_link($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/supplier-price-whatsapp$#', $path, $matches) && $method === 'GET') {
         require_permission('renewals.manage');
         handle_supplier_price_request_whatsapp($repo, (int) $matches[1]);
@@ -565,6 +568,57 @@ function handle_supplier_quote_select(RenewalRepository $repo, int $lineId): voi
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
 }
 
+function handle_supplier_price_request_link(RenewalRepository $repo, int $renewalId): void
+{
+    verify_csrf();
+
+    try {
+        $row = $repo->find($renewalId);
+        if (!$row) {
+            throw new RuntimeException('Yenileme kaydi bulunamadi.');
+        }
+
+        $subject = trim((string) ($_POST['subject'] ?? ''));
+        if ($subject === '') {
+            $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
+        }
+        $subject = mb_substr($subject, 0, 240);
+
+        $message = trim((string) ($_POST['message'] ?? ''));
+        if ($message === '') {
+            $message = supplier_price_default_message($row);
+        }
+
+        $recipients = supplier_price_link_recipients_from_request($repo, $row);
+        if ($recipients === []) {
+            throw new RuntimeException('Teklif linki olusturmak icin en az bir tedarikci yetkilisi secin veya manuel e-posta yazin.');
+        }
+
+        $created = [];
+        foreach ($recipients as $recipient) {
+            $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $recipient, $subject, $message, 'manual');
+            $created[] = [
+                'label' => supplier_quote_recipient_label($recipient),
+                'url' => (string) $quoteRequest['url'],
+                'created_at' => date('d.m.Y H:i'),
+            ];
+        }
+
+        $_SESSION['_supplier_quote_links'] ??= [];
+        $previous = $_SESSION['_supplier_quote_links'][$renewalId] ?? [];
+        if (!is_array($previous)) {
+            $previous = [];
+        }
+        $_SESSION['_supplier_quote_links'][$renewalId] = array_slice(array_merge($created, $previous), 0, 12);
+
+        flash('success', 'Tedarikci teklif linki olusturuldu. Linki pencereden kopyalayabilirsiniz.');
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect(supplier_price_dialog_return_path(safe_return_path($_POST['return_to'] ?? '/'), $renewalId));
+}
+
 function handle_supplier_price_request_whatsapp(RenewalRepository $repo, int $renewalId): void
 {
     try {
@@ -649,6 +703,92 @@ function supplier_price_mail_recipients_from_request(RenewalRepository $repo, ar
     }
 
     return array_values($recipients);
+}
+
+function supplier_price_link_recipients_from_request(RenewalRepository $repo, array $row): array
+{
+    $selected = $_POST['supplier_quote_contacts'] ?? [];
+    if (!is_array($selected)) {
+        $selected = [];
+    }
+
+    $selectedKeys = [];
+    foreach ($selected as $key) {
+        $key = (string) $key;
+        if (preg_match('/^\d+$/', $key) === 1) {
+            $selectedKeys[$key] = true;
+        }
+    }
+
+    $recipients = [];
+    $contacts = renewal_supplier_contacts($repo, $row);
+    foreach ($contacts as $index => $contact) {
+        if (!isset($selectedKeys[(string) $index])) {
+            continue;
+        }
+
+        $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+        $phone = normalize_phone_number((string) ($contact['phone'] ?? ''));
+        $dedupeKey = $email !== '' ? 'email:' . $email : 'phone:' . preg_replace('/\D+/', '', $phone);
+        if ($dedupeKey === 'phone:' || isset($recipients[$dedupeKey])) {
+            continue;
+        }
+
+        $recipients[$dedupeKey] = [
+            'supplier_id' => (int) ($contact['supplier_id'] ?? 0),
+            'contact_id' => (int) ($contact['contact_id'] ?? 0),
+            'supplier_name' => (string) ($contact['supplier_name'] ?? ''),
+            'name' => (string) ($contact['name'] ?? ''),
+            'email' => $email,
+            'phone' => $phone,
+        ];
+    }
+
+    $customEmail = trim(mb_strtolower((string) ($_POST['custom_supplier_email'] ?? '')));
+    if ($customEmail !== '') {
+        if (!filter_var($customEmail, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Manuel tedarikci e-posta adresi gecersiz.');
+        }
+
+        $recipients['email:' . $customEmail] = [
+            'name' => 'Manuel tedarikci alicisi',
+            'email' => $customEmail,
+        ];
+    }
+
+    return array_values($recipients);
+}
+
+function supplier_quote_recipient_label(array $recipient): string
+{
+    $parts = array_filter([
+        trim((string) ($recipient['supplier_name'] ?? '')),
+        trim((string) ($recipient['name'] ?? '')),
+    ]);
+    $identity = trim((string) (($recipient['email'] ?? '') ?: ($recipient['phone'] ?? '')));
+    if ($identity !== '') {
+        $parts[] = $identity;
+    }
+
+    return implode(' - ', $parts) ?: 'Tedarikci teklif linki';
+}
+
+function supplier_price_dialog_return_path(string $returnTo, int $renewalId): string
+{
+    $parts = parse_url($returnTo);
+    if (!is_array($parts)) {
+        return '/?supplier_price_dialog=' . $renewalId;
+    }
+
+    $path = (string) ($parts['path'] ?? '/');
+    $query = [];
+    if (!empty($parts['query'])) {
+        parse_str((string) $parts['query'], $query);
+    }
+    $query['supplier_price_dialog'] = (string) $renewalId;
+    $queryString = http_build_query($query);
+
+    return $path . ($queryString !== '' ? '?' . $queryString : '');
 }
 
 function renewal_mail_recipients_from_request(RenewalRepository $repo, array $row): array
@@ -7707,10 +7847,12 @@ function render_supplier_price_request_dialog(array $row): string
     $contacts = renewal_supplier_contacts($repo, $row);
     $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
     $defaultMessage = supplier_price_default_message($row);
+    $generatedLinks = supplier_quote_generated_links($id);
+    $autoOpen = (int) ($_GET['supplier_price_dialog'] ?? 0) === $id;
 
     ob_start();
     ?>
-    <dialog class="app-dialog communication-dialog supplier-price-dialog" id="supplier-price-<?= h($id) ?>">
+    <dialog class="app-dialog communication-dialog supplier-price-dialog" id="supplier-price-<?= h($id) ?>"<?= $autoOpen ? ' data-auto-open-dialog' : '' ?>>
         <div class="app-dialog-body">
             <div class="section-head dialog-head">
                 <div>
@@ -7762,36 +7904,104 @@ function render_supplier_price_request_dialog(array $row): string
                     <button type="submit" class="button primary full">Fiyat talebi maili gönder</button>
                 </form>
 
-                <div class="supplier-whatsapp-panel">
-                    <div class="section-head compact">
-                        <div>
-                            <h3>WhatsApp ile gönder</h3>
-                            <span class="muted compact">Yetkili seçildiğinde hazır fiyat talebi mesajı WhatsApp'ta açılır.</span>
-                        </div>
-                    </div>
-                    <div class="whatsapp-recipient-list">
-                        <?php $hasWhatsappRecipient = false; ?>
-                        <?php foreach ($contacts as $contact): ?>
-                            <?php
-                            $phone = trim((string) ($contact['phone'] ?? ''));
-                            $waNumber = whatsapp_number_from_phone($phone);
-                            if ($waNumber === null) {
-                                continue;
-                            }
-                            $hasWhatsappRecipient = true;
-                            $whatsappLink = url('/renewals/' . $id . '/supplier-price-whatsapp?contact_id=' . (int) ($contact['contact_id'] ?? 0) . '&return_to=' . rawurlencode($returnTo));
-                            ?>
-                            <div class="whatsapp-contact-card">
-                                <div>
-                                    <strong><?= h((string) (($contact['name'] ?? '') ?: $phone)) ?></strong>
-                                    <span><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($phone) ?></span>
-                                </div>
-                                <a class="button small whatsapp" target="_blank" rel="noopener" href="<?= h($whatsappLink) ?>">WhatsApp aç</a>
+                <div class="supplier-price-side">
+                    <form method="post" action="<?= h(url('/renewals/' . $id . '/supplier-price-link')) ?>" class="supplier-direct-link-panel">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                        <input type="hidden" name="subject" value="<?= h($subject) ?>">
+                        <input type="hidden" name="message" value="<?= h($defaultMessage) ?>">
+                        <div class="section-head compact">
+                            <div>
+                                <h3>Teklif linki oluştur</h3>
+                                <span class="muted compact">Mail atmadan tedarikçinin teklif gireceği form linkini alın.</span>
                             </div>
-                        <?php endforeach; ?>
-                        <?php if (!$hasWhatsappRecipient): ?>
-                            <div class="empty">Bu tedarikçi için WhatsApp'a uygun telefon numarası bulunamadı.</div>
-                        <?php endif; ?>
+                        </div>
+                        <div class="recipient-picker compact">
+                            <?php $hasLinkRecipient = false; ?>
+                            <?php foreach ($contacts as $index => $contact): ?>
+                                <?php
+                                $identity = trim((string) (($contact['email'] ?? '') ?: ($contact['phone'] ?? '')));
+                                if ($identity === '') {
+                                    continue;
+                                }
+                                $hasLinkRecipient = true;
+                                ?>
+                                <label class="recipient-card compact">
+                                    <input type="checkbox" name="supplier_quote_contacts[]" value="<?= h((string) $index) ?>" checked>
+                                    <span>
+                                        <b><?= h((string) (($contact['name'] ?? '') ?: $identity)) ?></b>
+                                        <em><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($identity) ?></em>
+                                    </span>
+                                </label>
+                            <?php endforeach; ?>
+                            <?php if (!$hasLinkRecipient): ?>
+                                <p class="muted compact">Tedarikçi yetkilisi bulunamadı. Manuel e-posta ile link oluşturabilirsiniz.</p>
+                            <?php endif; ?>
+                        </div>
+                        <label>
+                            Manuel e-posta
+                            <input type="email" name="custom_supplier_email" placeholder="tedarikci@firma.com">
+                        </label>
+                        <button type="submit" class="button primary full">Teklif linki oluştur</button>
+                    </form>
+
+                    <?php if ($generatedLinks !== []): ?>
+                        <div class="supplier-link-results">
+                            <div class="section-head compact">
+                                <div>
+                                    <h3>Oluşturulan linkler</h3>
+                                    <span class="muted compact">Tedarikçiye gönderebilir veya formu hemen açabilirsiniz.</span>
+                                </div>
+                            </div>
+                            <?php foreach ($generatedLinks as $link): ?>
+                                <?php $linkUrl = (string) ($link['url'] ?? ''); ?>
+                                <?php if ($linkUrl === '') { continue; } ?>
+                                <div class="supplier-link-card">
+                                    <div>
+                                        <strong><?= h((string) ($link['label'] ?? 'Tedarikçi')) ?></strong>
+                                        <span><?= h((string) ($link['created_at'] ?? '')) ?></span>
+                                    </div>
+                                    <input readonly value="<?= h($linkUrl) ?>" aria-label="Tedarikçi teklif linki">
+                                    <div class="inline-actions">
+                                        <button type="button" class="button small secondary" data-copy-value="<?= h($linkUrl) ?>">Linki kopyala</button>
+                                        <a class="button small primary" href="<?= h($linkUrl) ?>" target="_blank" rel="noopener">Formu aç</a>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="supplier-whatsapp-panel">
+                        <div class="section-head compact">
+                            <div>
+                                <h3>WhatsApp ile gönder</h3>
+                                <span class="muted compact">Yetkili seçildiğinde hazır fiyat talebi mesajı WhatsApp'ta açılır.</span>
+                            </div>
+                        </div>
+                        <div class="whatsapp-recipient-list">
+                            <?php $hasWhatsappRecipient = false; ?>
+                            <?php foreach ($contacts as $contact): ?>
+                                <?php
+                                $phone = trim((string) ($contact['phone'] ?? ''));
+                                $waNumber = whatsapp_number_from_phone($phone);
+                                if ($waNumber === null) {
+                                    continue;
+                                }
+                                $hasWhatsappRecipient = true;
+                                $whatsappLink = url('/renewals/' . $id . '/supplier-price-whatsapp?contact_id=' . (int) ($contact['contact_id'] ?? 0) . '&return_to=' . rawurlencode($returnTo));
+                                ?>
+                                <div class="whatsapp-contact-card">
+                                    <div>
+                                        <strong><?= h((string) (($contact['name'] ?? '') ?: $phone)) ?></strong>
+                                        <span><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($phone) ?></span>
+                                    </div>
+                                    <a class="button small whatsapp" target="_blank" rel="noopener" href="<?= h($whatsappLink) ?>">WhatsApp aç</a>
+                                </div>
+                            <?php endforeach; ?>
+                            <?php if (!$hasWhatsappRecipient): ?>
+                                <div class="empty">Bu tedarikçi için WhatsApp'a uygun telefon numarası bulunamadı.</div>
+                            <?php endif; ?>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -7800,6 +8010,16 @@ function render_supplier_price_request_dialog(array $row): string
     <?php
 
     return (string) ob_get_clean();
+}
+
+function supplier_quote_generated_links(int $renewalId): array
+{
+    $links = $_SESSION['_supplier_quote_links'][$renewalId] ?? [];
+    if (!is_array($links)) {
+        return [];
+    }
+
+    return array_values(array_filter($links, static fn ($link): bool => is_array($link) && !empty($link['url'])));
 }
 
 function render_supplier_quote_comparison(RenewalRepository $repo, array $row): string

@@ -1760,17 +1760,69 @@ td.actions {
 }
 
 .supplier-price-mail-form,
-.supplier-whatsapp-panel {
+.supplier-whatsapp-panel,
+.supplier-price-side,
+.supplier-direct-link-panel,
+.supplier-link-results {
     min-width: 0;
 }
 
-.supplier-whatsapp-panel {
+.supplier-price-side {
+    display: grid;
+    gap: 14px;
+}
+
+.supplier-whatsapp-panel,
+.supplier-direct-link-panel,
+.supplier-link-results {
     display: grid;
     gap: 12px;
     padding: 14px;
     border: 1px solid var(--line);
     border-radius: 8px;
     background: #fbfcfb;
+}
+
+.supplier-direct-link-panel {
+    background: #f1faf7;
+    border-color: #c9e4dd;
+}
+
+.supplier-link-results {
+    background: #fffaf0;
+    border-color: #f1d5a9;
+}
+
+.supplier-link-card {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.supplier-link-card strong,
+.supplier-link-card span {
+    display: block;
+}
+
+.supplier-link-card span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.supplier-link-card input[readonly] {
+    min-width: 0;
+    font-size: 13px;
+    color: var(--primary-strong);
+    background: #f7fbfa;
+}
+
+.supplier-link-card .inline-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .recipient-picker {
@@ -1785,6 +1837,10 @@ td.actions {
 .recipient-picker > strong {
     color: var(--primary-strong);
     font-size: 13px;
+}
+
+.recipient-picker.compact {
+    padding: 10px;
 }
 
 .recipient-card {
