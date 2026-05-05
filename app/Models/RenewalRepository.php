@@ -665,6 +665,89 @@ final class RenewalRepository
         }
     }
 
+    public function deleteSupplierQuoteRequest(int $requestId): ?array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT sqr.*, COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
+             FROM supplier_quote_requests sqr
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             WHERE sqr.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute(['id' => $requestId]);
+        $request = $stmt->fetch();
+        if (!$request) {
+            return null;
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare(
+                'DELETE sqs
+                 FROM supplier_quote_selections sqs
+                 INNER JOIN supplier_quote_lines sqln ON sqln.id = sqs.quote_line_id
+                 WHERE sqln.request_id = :request_id'
+            )->execute(['request_id' => $requestId]);
+
+            $this->db->prepare('DELETE FROM supplier_quote_requests WHERE id = :id')
+                ->execute(['id' => $requestId]);
+
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+
+        return $request;
+    }
+
+    public function closeOpenSupplierQuoteRequestsIfThresholdReached(int $renewalId, int $threshold = 3): array
+    {
+        $threshold = max(1, $threshold);
+        $countStmt = $this->db->prepare(
+            "SELECT COUNT(*)
+             FROM supplier_quote_requests
+             WHERE renewal_id = :renewal_id
+               AND status = 'submitted'"
+        );
+        $countStmt->execute(['renewal_id' => $renewalId]);
+        $submittedCount = (int) $countStmt->fetchColumn();
+        if ($submittedCount < $threshold) {
+            return ['submitted_count' => $submittedCount, 'closed' => []];
+        }
+
+        $stmt = $this->db->prepare(
+            "SELECT sqr.*,
+                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    r.title,
+                    r.renewal_date,
+                    c.company_name
+             FROM supplier_quote_requests sqr
+             INNER JOIN renewals r ON r.id = sqr.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             WHERE sqr.renewal_id = :renewal_id
+               AND sqr.status IN ('pending', 'opened')
+             ORDER BY sqr.created_at ASC, sqr.id ASC"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $openRequests = $stmt->fetchAll();
+        if ($openRequests === []) {
+            return ['submitted_count' => $submittedCount, 'closed' => []];
+        }
+
+        $this->db->prepare(
+            "UPDATE supplier_quote_requests
+             SET status = 'expired',
+                 expires_at = NOW(),
+                 updated_at = NOW()
+             WHERE renewal_id = :renewal_id
+               AND status IN ('pending', 'opened')"
+        )->execute(['renewal_id' => $renewalId]);
+
+        return ['submitted_count' => $submittedCount, 'closed' => $openRequests];
+    }
+
     public function supplierQuotesForRenewal(int $renewalId): array
     {
         $requestStmt = $this->db->prepare(

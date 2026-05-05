@@ -3924,6 +3924,51 @@ label {
     line-height: 1.4;
 }
 
+.supplier-quote-request-manager {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #f7fbf9;
+}
+
+.supplier-quote-request-list {
+    display: grid;
+    gap: 8px;
+}
+
+.supplier-quote-request-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.supplier-quote-request-row > div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.supplier-quote-request-row strong,
+.supplier-quote-request-row span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.supplier-quote-request-row > div span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
 .customer-offer-dialog {
     width: min(94vw, 980px);
 }
@@ -4464,6 +4509,7 @@ label {
     .supplier-quote-price-grid,
     .supplier-quote-term-grid,
     .supplier-quote-context,
+    .supplier-quote-request-row,
     .customer-offer-history-card summary,
     .customer-offer-history-lines > div {
         grid-template-columns: 1fr;

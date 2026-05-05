@@ -156,6 +156,9 @@ try {
     } elseif (preg_match('#^/supplier-quotes/(\d+)/select$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_supplier_quote_select($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/supplier-quotes/(\d+)/delete$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_supplier_quote_delete($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/customer-offer/send$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_customer_offer_send($repo, (int) $matches[1]);
@@ -587,6 +590,29 @@ function handle_supplier_quote_select(RenewalRepository $repo, int $lineId): voi
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
 }
 
+function handle_supplier_quote_delete(RenewalRepository $repo, int $requestId): void
+{
+    verify_csrf();
+
+    try {
+        $request = $repo->deleteSupplierQuoteRequest($requestId);
+        if (!$request) {
+            throw new RuntimeException('Tedarikçi teklif talebi bulunamadı.');
+        }
+
+        flash(
+            'success',
+            'Tedarikçi teklif talebi sessizce silindi: '
+            . (string) (($request['supplier_display'] ?? '') ?: ($request['recipient_email'] ?? 'Tedarikçi'))
+            . '. Tedarikçiye bilgi maili gönderilmedi.'
+        );
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
 function send_supplier_quote_selection_email(RenewalRepository $repo, array $selected): array
 {
     $email = trim((string) ($selected['recipient_email'] ?? ''));
@@ -871,6 +897,50 @@ function send_supplier_quote_request_email(RenewalRepository $repo, array $row, 
     );
 
     return ['ok' => $ok, 'error' => $error];
+}
+
+function close_supplier_quote_requests_if_ready(RenewalRepository $repo, int $renewalId): array
+{
+    $summary = $repo->closeOpenSupplierQuoteRequestsIfThresholdReached($renewalId, 3);
+    $submittedCount = (int) ($summary['submitted_count'] ?? 0);
+    $closed = is_array($summary['closed'] ?? null) ? $summary['closed'] : [];
+    if ($closed === []) {
+        return ['submitted_count' => $submittedCount, 'closed' => 0, 'mail_sent' => 0, 'mail_failed' => 0];
+    }
+
+    $mailSent = 0;
+    $mailFailed = 0;
+    foreach ($closed as $request) {
+        $email = trim((string) ($request['recipient_email'] ?? ''));
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            continue;
+        }
+
+        $subject = 'Teklif talebi kapatıldı: ' . $submittedCount . ' teklif alındı';
+        $body = supplier_quote_closed_body($request, $submittedCount);
+        $result = Mailer::sendWithResult($email, $subject, $body, true);
+        $ok = !empty($result['ok']);
+        $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+
+        $repo->logMail(
+            (int) ($request['renewal_id'] ?? $renewalId),
+            $email,
+            $subject,
+            $body,
+            $ok ? 'sent' : 'failed',
+            $error,
+            false
+        );
+
+        $ok ? $mailSent++ : $mailFailed++;
+    }
+
+    return [
+        'submitted_count' => $submittedCount,
+        'closed' => count($closed),
+        'mail_sent' => $mailSent,
+        'mail_failed' => $mailFailed,
+    ];
 }
 
 function supplier_quote_link_result_message(bool $sendEmail, int $mailSent, int $mailFailed, int $mailSkipped, string $lastError = ''): string
@@ -1499,6 +1569,35 @@ function supplier_price_request_body(array $row, string $message, string $quoteU
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
         . ($quoteUrl !== '' ? '<p style="margin:20px 0 0;"><a href="' . h($quoteUrl) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Teklif formunu aç</a></p>' : '')
         . '<p style="margin:14px 0 0;color:#607069;font-size:13px;line-height:1.5;">Formda nakliye, KDV, vade ve teklif notu onayı zorunludur. Fiyat yazmak istemezseniz teklifinizi dosya veya not olarak iletebilirsiniz.</p>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function supplier_quote_closed_body(array $request, int $submittedCount): string
+{
+    $rows = [
+        'Müşteri' => (string) ($request['company_name'] ?? '-'),
+        'Kayıt' => (string) ($request['title'] ?? '-'),
+        'Alınan teklif sayısı' => (string) $submittedCount,
+        'Yenileme tarihi' => !empty($request['renewal_date']) ? date('d.m.Y', strtotime((string) $request['renewal_date'])) : '-',
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;width:38%;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h($value) . '</td>'
+            . '</tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d9e3df;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Tedarikçi teklif süreci</p>'
+        . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Bu teklif talebi kapatıldı.</h1>'
+        . '<p style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">Merhaba, ilgili yenileme için ' . h((string) $submittedCount) . ' teklif alınmıştır. Bu nedenle size gönderilen teklif formu kapatılmıştır; ayrıca işlem yapmanıza gerek yoktur.</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
         . '</td></tr></table></td></tr></table></body></html>';
 }
 
@@ -3218,6 +3317,18 @@ function handle_supplier_quote_public(string $method, string $token): void
         return;
     }
 
+    if (($request['status'] ?? '') === 'expired') {
+        render_public_layout('Tedarikci Teklif Formu', static function () use ($request): void {
+            ?>
+            <section class="login-panel supplier-quote-public">
+                <div class="alert success">Bu teklif süreci kapatılmış.</div>
+                <p class="muted compact"><?= h((string) ($request['company_name'] ?? '-')) ?> için yeterli teklif alındığı için bu bağlantı artık teklif kabul etmiyor.</p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
     $items = $repo->renewalItems((int) $request['renewal_id']);
     if ($items === []) {
         $items = [[
@@ -3285,6 +3396,7 @@ function handle_supplier_quote_public(string $method, string $token): void
                 (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
                 (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
             );
+            close_supplier_quote_requests_if_ready($repo, (int) $request['renewal_id']);
 
             render_public_layout('Tedarikci Teklif Formu', static function () use ($request): void {
                 ?>
@@ -8804,6 +8916,70 @@ function customer_offer_status_badge(string $status): string
     };
 }
 
+function render_supplier_quote_request_manager(array $requests, string $returnTo): string
+{
+    if ($requests === []) {
+        return '';
+    }
+
+    ob_start();
+    ?>
+    <div class="supplier-quote-request-manager">
+        <div class="section-head compact">
+            <div>
+                <h3>Tedarikçi talep listesi</h3>
+                <span>İstediğiniz tedarikçi talebini sessizce silebilirsiniz; tedarikçiye bilgi gitmez.</span>
+            </div>
+        </div>
+        <div class="supplier-quote-request-list">
+            <?php foreach ($requests as $request): ?>
+                <?php
+                $requestId = (int) ($request['id'] ?? 0);
+                $status = (string) ($request['status'] ?? 'pending');
+                $createdAt = !empty($request['created_at']) ? date('d.m.Y H:i', strtotime((string) $request['created_at'])) : '-';
+                ?>
+                <div class="supplier-quote-request-row">
+                    <div>
+                        <strong><?= h((string) (($request['supplier_display'] ?? '') ?: ($request['recipient_email'] ?? 'Tedarikçi'))) ?></strong>
+                        <span><?= h((string) (($request['recipient_email'] ?? '') ?: ($request['recipient_phone'] ?? '-'))) ?> · <?= h($createdAt) ?></span>
+                    </div>
+                    <span class="badge <?= h(supplier_quote_status_badge($status)) ?>"><?= h(supplier_quote_status_label($status)) ?></span>
+                    <?php if ($requestId > 0): ?>
+                        <form method="post" action="<?= h(url('/supplier-quotes/' . $requestId . '/delete')) ?>" onsubmit="return confirm('Bu tedarikçinin teklif talebi ve fiyatları sessizce silinsin mi? Tedarikçiye bilgi gönderilmeyecek.')">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                            <button type="submit" class="button small danger">Sil</button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function supplier_quote_status_label(string $status): string
+{
+    return match ($status) {
+        'opened' => 'Açıldı',
+        'submitted' => 'Teklif verdi',
+        'expired' => 'Kapatıldı',
+        default => 'Bekliyor',
+    };
+}
+
+function supplier_quote_status_badge(string $status): string
+{
+    return match ($status) {
+        'submitted' => 'active',
+        'opened' => 'urgency-warning',
+        'expired' => 'cancelled',
+        default => 'renewed',
+    };
+}
+
 function render_customer_offer_line_editor(int $index, array $selection, string $currency): string
 {
     $quantity = (float) ($selection['quantity'] ?? 1);
@@ -8914,6 +9090,7 @@ function render_supplier_quote_comparison(RenewalRepository $repo, array $row): 
         <?php if ($selectedQuotes !== []): ?>
             <?= render_customer_offer_dialog($row, $selectedQuotes) ?>
         <?php endif; ?>
+        <?= render_supplier_quote_request_manager($requests, $returnTo) ?>
         <?= render_customer_offer_history($customerOffers) ?>
 
         <?php if ($requests !== [] || $lines !== []): ?>

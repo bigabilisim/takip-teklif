@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.25] - 2026-05-05
+
+- Tedarikçi teklif paneline tüm tedarikçi taleplerini gösteren kompakt talep listesi eklendi.
+- Seçilen tedarikçi teklif talebi ve bağlı fiyat satırları sessizce silinebilir hale getirildi; tedarikçiye bilgi maili gönderilmez.
+- Bir yenileme için 3 tedarikçi teklif verdikten sonra açık kalan diğer tedarikçi formları otomatik kapatılır hale getirildi.
+- Otomatik kapanan tedarikçilere "3 teklif alındı, süreç kapatıldı" bilgilendirme maili gönderilmesi sağlandı.
+
 ## [1.0.24] - 2026-05-05
 
 - Secilen tedarikci tekliflerinden musteriyi onay/revize/red baglantisina yonlendiren musteri teklif akisi eklendi.
