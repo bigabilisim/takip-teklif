@@ -3351,6 +3351,8 @@ function render_dashboard_lane(array $rows, string $variant, bool $canManage, bo
             $days = days_until($row['renewal_date']);
             $daysLabel = $days === null ? '-' : ($days < 0 ? abs($days) . ' gün geçti' : $days . ' gün');
             $urgencyClass = renewal_urgency_class($row, $days);
+            $countdownClass = renewal_countdown_class($row, $days);
+            $countdownStyle = renewal_countdown_style($row, $days);
             $urgencyLabel = renewal_urgency_label($row, $days);
             $readSummary = renewal_notification_read_summary($row);
             $canAcknowledge = ($row['status'] ?? '') === 'active' && renewal_can_acknowledge($row, $days);
@@ -3362,7 +3364,7 @@ function render_dashboard_lane(array $rows, string $variant, bool $canManage, bo
                 $latestDecision = null;
             }
             ?>
-            <details class="dashboard-track-card <?= h($variant) ?> <?= h($urgencyClass) ?>">
+            <details class="dashboard-track-card <?= h($variant) ?> <?= h($urgencyClass) ?> <?= h($countdownClass) ?>"<?= $countdownStyle ?>>
                 <summary>
                     <span class="track-main">
                         <small><?= $variant === 'offers' ? 'Teklif / Cari' : 'Müşteri' ?></small>
@@ -8446,6 +8448,53 @@ function renewal_urgency_class(array $row, ?int $days): string
     }
 
     return 'active';
+}
+
+function renewal_countdown_class(array $row, ?int $days): string
+{
+    if (($row['status'] ?? '') !== 'active' || $days === null || $days > 14) {
+        return '';
+    }
+
+    return $days <= 0 ? 'countdown-blood' : 'countdown-heat';
+}
+
+function renewal_countdown_style(array $row, ?int $days): string
+{
+    if (($row['status'] ?? '') !== 'active' || $days === null || $days > 14) {
+        return '';
+    }
+
+    if ($days <= 0) {
+        $vars = [
+            '--countdown-color' => '#8b0000',
+            '--countdown-soft' => '#fde8e8',
+            '--countdown-pulse' => 'rgba(139, 0, 0, 0.42)',
+            '--countdown-glow' => 'rgba(139, 0, 0, 0.18)',
+        ];
+    } else {
+        $start = [250, 204, 21]; // #facc15
+        $end = [220, 38, 38]; // #dc2626
+        $ratio = max(0, min(1, (14 - $days) / 13));
+        $rgb = [];
+        foreach ([0, 1, 2] as $index) {
+            $rgb[$index] = (int) round($start[$index] + (($end[$index] - $start[$index]) * $ratio));
+        }
+        $color = sprintf('#%02x%02x%02x', $rgb[0], $rgb[1], $rgb[2]);
+        $vars = [
+            '--countdown-color' => $color,
+            '--countdown-soft' => sprintf('rgba(%d, %d, %d, 0.14)', $rgb[0], $rgb[1], $rgb[2]),
+            '--countdown-pulse' => sprintf('rgba(%d, %d, %d, 0.34)', $rgb[0], $rgb[1], $rgb[2]),
+            '--countdown-glow' => sprintf('rgba(%d, %d, %d, 0.16)', $rgb[0], $rgb[1], $rgb[2]),
+        ];
+    }
+
+    $style = '';
+    foreach ($vars as $name => $value) {
+        $style .= $name . ':' . $value . ';';
+    }
+
+    return ' style="' . h($style) . '"';
 }
 
 function renewal_urgency_label(array $row, ?int $days): string

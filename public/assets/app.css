@@ -559,6 +559,96 @@ h3 {
     box-shadow: 0 12px 24px rgba(18, 37, 34, 0.09);
 }
 
+.dashboard-track-card.countdown-heat,
+.dashboard-track-card.countdown-blood {
+    border-left-color: var(--countdown-color);
+    background:
+        linear-gradient(90deg, var(--countdown-soft) 0%, rgba(255, 255, 255, 0.94) 38%, rgba(255, 255, 255, 0.98) 100%);
+    animation: countdown-card-pulse 1.85s ease-in-out infinite;
+}
+
+.dashboard-track-card.countdown-blood {
+    animation-duration: 1.35s;
+}
+
+.dashboard-track-card.countdown-heat summary,
+.dashboard-track-card.countdown-blood summary {
+    background:
+        linear-gradient(90deg, var(--countdown-soft) 0%, rgba(255, 255, 255, 0.82) 46%, rgba(255, 255, 255, 0.95) 100%);
+}
+
+.dashboard-track-card.countdown-heat .badge,
+.dashboard-track-card.countdown-blood .badge {
+    background: var(--countdown-color);
+    color: #111111;
+    animation: countdown-badge-blink 1.2s ease-in-out infinite;
+}
+
+.dashboard-track-card.countdown-blood .badge {
+    color: #ffffff;
+}
+
+.dashboard-track-card.countdown-heat .track-days,
+.dashboard-track-card.countdown-blood .track-days {
+    min-width: 82px;
+    padding: 8px 10px;
+    border: 1px solid var(--countdown-color);
+    border-radius: 10px;
+    background: var(--countdown-color);
+    box-shadow: 0 0 0 0 var(--countdown-pulse);
+    animation: countdown-days-pulse 1.25s ease-in-out infinite;
+}
+
+.dashboard-track-card.countdown-heat .track-days small,
+.dashboard-track-card.countdown-heat .track-days strong {
+    color: #111111;
+}
+
+.dashboard-track-card.countdown-blood .track-days small,
+.dashboard-track-card.countdown-blood .track-days strong {
+    color: #ffffff;
+}
+
+.dashboard-track-card.countdown-blood .track-days {
+    background: #8b0000;
+    border-color: #6f0000;
+}
+
+@keyframes countdown-card-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 var(--countdown-pulse), inset 0 0 0 1px rgba(255, 255, 255, 0);
+    }
+    50% {
+        box-shadow: 0 0 0 9px rgba(255, 255, 255, 0), inset 0 0 34px var(--countdown-glow);
+    }
+}
+
+@keyframes countdown-days-pulse {
+    0%,
+    100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 0 var(--countdown-pulse);
+        filter: brightness(1);
+    }
+    50% {
+        transform: scale(1.045);
+        box-shadow: 0 0 0 8px rgba(255, 255, 255, 0);
+        filter: brightness(1.08);
+    }
+}
+
+@keyframes countdown-badge-blink {
+    0%,
+    100% {
+        opacity: 0.92;
+    }
+    50% {
+        opacity: 1;
+        filter: brightness(1.12);
+    }
+}
+
 .dashboard-track-card summary {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;

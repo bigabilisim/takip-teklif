@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.21] - 2026-05-05
+
+- Takipteki urun ve hizmet kartlarinda 14 gun ve altinda kalan gun rengi sari-kirmizi skalasina baglandi.
+- Kalan gun alani ve durum rozeti aciliyet yaklastikca pulse/yanip-sonme efektiyle vurgulanir hale getirildi.
+- Suresi gecen kayitlarda aciliyet rengi kan kirmizisi olarak sabitlendi.
+
 ## [1.0.20] - 2026-05-05
 
 - Tedarikci teklif linki olusturma islemi sayfa yonlendirmesi yapmadan ayni pencerede calisir hale getirildi.
