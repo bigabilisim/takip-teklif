@@ -230,6 +230,67 @@
         syncTotals();
     }
 
+    document.querySelectorAll('[data-customer-offer-form]').forEach((offerForm) => {
+        const currencySelect = offerForm.querySelector('[data-customer-offer-currency]');
+        const subtotalOutput = offerForm.querySelector('[data-customer-offer-subtotal]');
+        const vatOutput = offerForm.querySelector('[data-customer-offer-vat]');
+        const totalOutput = offerForm.querySelector('[data-customer-offer-total]');
+        const numberValue = (input, fallback = 0) => {
+            const value = String(input?.value || '').replace(',', '.');
+            const parsed = Number(value);
+
+            return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const moneyFormatter = () => new Intl.NumberFormat('tr-TR', {
+            style: 'currency',
+            currency: currencySelect?.value || 'TRY',
+        });
+
+        const syncCustomerOfferTotals = () => {
+            let subtotal = 0;
+            let vatTotal = 0;
+            let total = 0;
+            offerForm.querySelectorAll('[data-customer-offer-line]').forEach((line) => {
+                const quantity = Math.max(0, numberValue(line.querySelector('[data-customer-offer-qty]'), 1));
+                const unitPrice = Math.max(0, numberValue(line.querySelector('[data-customer-offer-unit]'), 0));
+                const vatRate = Math.max(0, numberValue(line.querySelector('[data-customer-offer-vat-rate]'), 0));
+                const lineSubtotal = quantity * unitPrice;
+                const lineVat = lineSubtotal * (vatRate / 100);
+                const lineTotal = lineSubtotal + lineVat;
+                subtotal += lineSubtotal;
+                vatTotal += lineVat;
+                total += lineTotal;
+
+                const unitPreview = line.querySelector('[data-customer-offer-unit-preview]');
+                const subtotalPreview = line.querySelector('[data-customer-offer-subtotal-preview]');
+                const totalPreview = line.querySelector('[data-customer-offer-total-preview]');
+                if (unitPreview) {
+                    unitPreview.textContent = moneyFormatter().format(unitPrice);
+                }
+                if (subtotalPreview) {
+                    subtotalPreview.textContent = moneyFormatter().format(lineSubtotal);
+                }
+                if (totalPreview) {
+                    totalPreview.textContent = moneyFormatter().format(lineTotal);
+                }
+            });
+
+            if (subtotalOutput) {
+                subtotalOutput.textContent = moneyFormatter().format(subtotal);
+            }
+            if (vatOutput) {
+                vatOutput.textContent = moneyFormatter().format(vatTotal);
+            }
+            if (totalOutput) {
+                totalOutput.textContent = moneyFormatter().format(total);
+            }
+        };
+
+        offerForm.addEventListener('input', syncCustomerOfferTotals);
+        offerForm.addEventListener('change', syncCustomerOfferTotals);
+        syncCustomerOfferTotals();
+    });
+
     const formatDateTR = (date) => date.toLocaleDateString('tr-TR', {
         day: '2-digit',
         month: '2-digit',

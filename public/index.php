@@ -43,6 +43,11 @@ if (preg_match('#^/tedarikci-teklif/([a-f0-9]{64})$#', $path, $matches)) {
     exit;
 }
 
+if (preg_match('#^/musteri-teklif/([a-f0-9]{64})$#', $path, $matches)) {
+    handle_customer_offer_public($method, $matches[1]);
+    exit;
+}
+
 if (preg_match('#^/renewals/(\d+)/payment$#', $path, $matches)) {
     handle_public_renewal_payment($method, (int) $matches[1]);
     exit;
@@ -151,6 +156,9 @@ try {
     } elseif (preg_match('#^/supplier-quotes/(\d+)/select$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_supplier_quote_select($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/renewals/(\d+)/customer-offer/send$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_customer_offer_send($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/decision$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_renewal_decision($repo, (int) $matches[1]);
@@ -358,14 +366,10 @@ function handle_iyzico_payment_create(RenewalRepository $repo, int $renewalId): 
     }
 
     $amount = (float) str_replace(',', '.', (string) ($_POST['amount'] ?? '0'));
-    $currency = strtoupper(trim((string) ($_POST['currency'] ?? 'TRY')));
+    $currency = normalize_allowed_currency($_POST['currency'] ?? 'TRY');
     if ($amount <= 0) {
         flash('error', 'iyzico odemesi icin tutar girin.');
         redirect('/renewals/' . $renewalId . '/edit#iyzico-payment');
-    }
-
-    if (!in_array($currency, ['TRY', 'USD', 'EUR', 'GBP'], true)) {
-        $currency = 'TRY';
     }
 
     $client = new IyzicoClient(new SettingsRepository());
@@ -568,23 +572,13 @@ function handle_supplier_quote_select(RenewalRepository $repo, int $lineId): voi
     try {
         $term = (string) ($_POST['term'] ?? '');
         $selected = $repo->selectSupplierQuoteLine($lineId, $term, (int) ($_SESSION['user_id'] ?? 0));
-        $mailResult = send_supplier_quote_selection_email($repo, $selected);
-        $mailSuffix = '';
-        if (!empty($mailResult['ok'])) {
-            $mailSuffix = ' Tedarikçiye seçim maili gönderildi.';
-        } elseif (($mailResult['status'] ?? '') === 'skipped') {
-            $mailSuffix = ' Tedarikçi e-postası olmadığı için mail gönderilmedi.';
-        } else {
-            $mailSuffix = ' Fakat seçim maili gönderilemedi: ' . (string) ($mailResult['error'] ?? 'Bilinmeyen hata');
-        }
-
         flash(
-            !empty($mailResult['ok']) || ($mailResult['status'] ?? '') === 'skipped' ? 'success' : 'error',
+            'success',
             'Kalem için tedarikçi teklifi seçildi: '
             . supplier_quote_term_label($selected['term'])
             . ' / '
             . money_format_local($selected['price'], (string) $selected['currency'])
-            . $mailSuffix
+            . '. Müşteri teklifini hazırladığınızda tedarikçiye işlem maili müşteri onayından sonra gönderilecek.'
         );
     } catch (Throwable $e) {
         flash('error', $e->getMessage());
@@ -631,6 +625,118 @@ function send_supplier_quote_selection_email(RenewalRepository $repo, array $sel
     );
 
     return ['ok' => $ok, 'status' => $ok ? 'sent' : 'failed', 'error' => $error];
+}
+
+function handle_customer_offer_send(RenewalRepository $repo, int $renewalId): void
+{
+    verify_csrf();
+
+    try {
+        $row = $repo->find($renewalId);
+        if (!$row) {
+            throw new RuntimeException('Yenileme kaydı bulunamadı.');
+        }
+
+        $recipients = customer_offer_recipients_from_request($repo, $row);
+        if ($recipients === []) {
+            throw new RuntimeException('Müşteri teklifini göndermek için en az bir alıcı seçin veya manuel e-posta yazın.');
+        }
+
+        $currency = normalize_allowed_currency($_POST['currency'] ?? 'TRY');
+        $subject = trim((string) ($_POST['subject'] ?? ''));
+        if ($subject === '') {
+            $subject = 'Yenileme teklifiniz: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Ürün / hizmet'));
+        }
+        $message = trim((string) ($_POST['message'] ?? ''));
+        if ($message === '') {
+            $message = 'Seçilen tedarikçi teklifleri üzerinden yenileme teklifinizi hazırladık. Lütfen fiyatları inceleyip onay, revize veya red tercihinizi iletin.';
+        }
+
+        $sent = 0;
+        $failed = 0;
+        $lastError = '';
+        foreach ($recipients as $recipient) {
+            $offer = $repo->createCustomerOffer($renewalId, $recipient, [
+                'currency' => $currency,
+                'subject' => $subject,
+                'message' => $message,
+                'lines' => $_POST['offer_lines'] ?? [],
+            ], (int) ($_SESSION['user_id'] ?? 0));
+
+            $body = customer_offer_mail_body($row, $offer, $message);
+            $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
+            $ok = !empty($result['ok']);
+            $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+            $repo->logMail(
+                (int) $row['id'],
+                (string) $recipient['email'],
+                $subject,
+                $body,
+                $ok ? 'sent' : 'failed',
+                $error,
+                false
+            );
+
+            $ok ? $sent++ : $failed++;
+            if (!$ok) {
+                $lastError = $error ?? '';
+            }
+        }
+
+        if ($sent > 0 && $failed < 1) {
+            flash('success', 'Müşteri teklifi gönderildi. Alıcı sayısı: ' . $sent);
+        } elseif ($sent > 0) {
+            flash('error', 'Müşteri teklifi kısmen gönderildi. Başarılı: ' . $sent . ', başarısız: ' . $failed);
+        } else {
+            flash('error', 'Müşteri teklifi gönderilemedi: ' . ($lastError ?: 'Alıcı sunucusu kabul etmedi.'));
+        }
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function customer_offer_recipients_from_request(RenewalRepository $repo, array $row): array
+{
+    $selected = $_POST['customer_offer_recipients'] ?? [];
+    if (!is_array($selected)) {
+        $selected = [];
+    }
+
+    $selectedEmails = [];
+    foreach ($selected as $email) {
+        $normalized = trim(mb_strtolower((string) $email));
+        if (filter_var($normalized, FILTER_VALIDATE_EMAIL)) {
+            $selectedEmails[$normalized] = true;
+        }
+    }
+
+    $recipients = [];
+    foreach (renewal_customer_contacts($row) as $contact) {
+        $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+        if ($email === '' || !isset($selectedEmails[$email])) {
+            continue;
+        }
+
+        $recipients[$email] = [
+            'name' => (string) (($contact['full_name'] ?? '') ?: $email),
+            'email' => $email,
+        ];
+    }
+
+    $customEmail = trim(mb_strtolower((string) ($_POST['custom_customer_offer_email'] ?? '')));
+    if ($customEmail !== '') {
+        if (!filter_var($customEmail, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Manuel müşteri e-posta adresi geçersiz.');
+        }
+        $recipients[$customEmail] = [
+            'name' => 'Manuel müşteri alıcısı',
+            'email' => $customEmail,
+        ];
+    }
+
+    return array_values($recipients);
 }
 
 function handle_supplier_price_request_link(RenewalRepository $repo, int $renewalId): void
@@ -1393,6 +1499,68 @@ function supplier_price_request_body(array $row, string $message, string $quoteU
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
         . ($quoteUrl !== '' ? '<p style="margin:20px 0 0;"><a href="' . h($quoteUrl) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Teklif formunu aç</a></p>' : '')
         . '<p style="margin:14px 0 0;color:#607069;font-size:13px;line-height:1.5;">Formda nakliye, KDV, vade ve teklif notu onayı zorunludur. Fiyat yazmak istemezseniz teklifinizi dosya veya not olarak iletebilirsiniz.</p>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function customer_offer_mail_body(array $row, array $offer, string $message): string
+{
+    $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
+    $rows = [
+        'Müşteri' => (string) ($row['company_name'] ?? '-'),
+        'Kayıt' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')),
+        'Ara toplam' => money_format_local($offer['subtotal'] ?? null, $currency),
+        'KDV' => money_format_local($offer['vat_total'] ?? null, $currency),
+        'KDV dahil toplam' => money_format_local($offer['total'] ?? null, $currency),
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;width:34%;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h($value) . '</td>'
+            . '</tr>';
+    }
+
+    $lineRows = '';
+    foreach (($offer['lines'] ?? []) as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $quantity = (float) ($line['quantity'] ?? 1);
+        $unitPrice = (float) ($line['unit_price'] ?? 0);
+        $subtotal = (float) ($line['line_subtotal'] ?? ($quantity * $unitPrice));
+        $total = (float) ($line['line_total'] ?? $subtotal);
+        $lineRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h((string) ($line['item_title'] ?? '-')) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;text-align:center;">' . h(number_format($quantity, 2, ',', '.')) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($unitPrice, $currency)) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($subtotal, $currency)) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#147c72;font-weight:700;text-align:right;">' . h(money_format_local($total, $currency)) . '</td>'
+            . '</tr>';
+    }
+    $lineTable = $lineRows === '' ? '' : '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;border-collapse:collapse;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr>'
+        . '<th align="left" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Ürün / hizmet</th>'
+        . '<th align="center" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Adet</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Birim fiyat</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Toplam</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">KDV dahil</th>'
+        . '</tr>'
+        . $lineRows
+        . '</table>';
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d9e3df;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Müşteri yenileme teklifi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Yenileme teklifinizi inceleyebilirsiniz.</h1>'
+        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h($message), false) . '</div>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
+        . $lineTable
+        . '<p style="margin:20px 0 0;"><a href="' . h((string) ($offer['url'] ?? '')) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Teklifi incele ve yanıtla</a></p>'
+        . '<p style="margin:14px 0 0;color:#607069;font-size:13px;line-height:1.5;">Bu bağlantı üzerinden onay, revize isteği veya red tercihinizi iletebilirsiniz.</p>'
         . '</td></tr></table></td></tr></table></body></html>';
 }
 
@@ -2210,6 +2378,73 @@ function render_public_renewal_items(array $items, string $currency): string
     return (string) ob_get_clean();
 }
 
+function render_customer_offer_lines_public(array $lines, string $currency): string
+{
+    if ($lines === []) {
+        return '<div class="empty">Teklif satırı bulunamadı.</div>';
+    }
+
+    ob_start();
+    ?>
+    <div class="public-payment-items customer-offer-lines">
+        <h2>Teklif kalemleri</h2>
+        <?php foreach ($lines as $line): ?>
+            <?php
+            $quantity = (float) ($line['quantity'] ?? 1);
+            $unitPrice = (float) ($line['unit_price'] ?? 0);
+            $subtotal = (float) ($line['line_subtotal'] ?? ($quantity * $unitPrice));
+            $vatRate = (float) ($line['vat_rate'] ?? 0);
+            $total = (float) ($line['line_total'] ?? ($subtotal + ($subtotal * $vatRate / 100)));
+            ?>
+            <div class="public-payment-item customer-offer-line">
+                <div>
+                    <strong><?= h((string) ($line['item_title'] ?? '-')) ?></strong>
+                    <span><?= h(number_format($quantity, 2, ',', '.')) ?> adet</span>
+                </div>
+                <div class="price-breakdown">
+                    <span>Birim fiyat: <b><?= h(money_format_local($unitPrice, $currency)) ?></b></span>
+                    <span>Toplam: <b><?= h(money_format_local($subtotal, $currency)) ?></b></span>
+                    <span>KDV'li fiyat: <b><?= h(money_format_local($total, $currency)) ?></b></span>
+                    <em>KDV %<?= h(number_format($vatRate, 2, ',', '.')) ?></em>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function send_supplier_customer_offer_approval_emails(RenewalRepository $repo, array $offer, array $lines): array
+{
+    $sent = 0;
+    $failed = 0;
+    foreach ($lines as $line) {
+        $email = trim((string) ($line['supplier_recipient_email'] ?? ''));
+        if ($email === '') {
+            continue;
+        }
+
+        $selected = [
+            'renewal_id' => (int) ($offer['renewal_id'] ?? 0),
+            'recipient_email' => $email,
+            'contact_name' => (string) ($line['supplier_contact_name'] ?? ''),
+            'item_title' => (string) ($line['item_title'] ?? ''),
+            'price' => $line['supplier_price'] ?? $line['unit_price'] ?? 0,
+            'currency' => (string) (($line['supplier_currency'] ?? '') ?: ($offer['currency'] ?? 'TRY')),
+            'term' => (string) ($line['supplier_term'] ?? ''),
+            'custom_term' => (string) ($line['supplier_custom_term'] ?? ''),
+            'vat_included' => (int) ($line['supplier_vat_included'] ?? 1),
+            'delivery_note' => (string) ($line['supplier_delivery_note'] ?? ''),
+            'note' => (string) ($line['supplier_note'] ?? ''),
+        ];
+        $result = send_supplier_quote_selection_email($repo, $selected);
+        !empty($result['ok']) ? $sent++ : $failed++;
+    }
+
+    return ['sent' => $sent, 'failed' => $failed];
+}
+
 function render_payment_exchange_panel(float $amount, string $currency, array $exchangeRates): string
 {
     $currency = strtoupper(trim($currency));
@@ -2257,6 +2492,18 @@ function payment_exchange_rate(array $exchangeRates, string $currency): ?float
     return is_numeric($value) && (float) $value > 0 ? (float) $value : null;
 }
 
+function normalize_allowed_currency(mixed $currency): string
+{
+    $currency = strtoupper(trim((string) $currency));
+
+    return in_array($currency, allowed_currency_options(), true) ? $currency : 'TRY';
+}
+
+function allowed_currency_options(): array
+{
+    return ['TRY', 'USD', 'EUR'];
+}
+
 function create_iyzico_checkout_url(RenewalRepository $repo, array $renewal, float $amount, string $currency, ?int $createdBy, string $source): string
 {
     $client = new IyzicoClient(new SettingsRepository());
@@ -2265,10 +2512,7 @@ function create_iyzico_checkout_url(RenewalRepository $repo, array $renewal, flo
     }
 
     $renewalId = (int) $renewal['id'];
-    $currency = strtoupper(trim($currency));
-    if (!in_array($currency, ['TRY', 'USD', 'EUR', 'GBP'], true)) {
-        $currency = 'TRY';
-    }
+    $currency = normalize_allowed_currency($currency);
 
     $conversationId = $source . '-renewal-' . $renewalId . '-' . date('YmdHis') . '-' . bin2hex(random_bytes(4));
     $result = $client->initializeCheckout($renewal, $amount, $currency, $conversationId);
@@ -3116,6 +3360,153 @@ function handle_supplier_quote_public(string $method, string $token): void
     });
 }
 
+function handle_customer_offer_public(string $method, string $token): void
+{
+    $repo = new RenewalRepository();
+    $offer = $repo->findCustomerOfferByToken($token);
+    $error = null;
+
+    if (!$offer) {
+        render_public_layout('Müşteri Teklifi', static function (): void {
+            echo '<section class="login-panel"><div class="alert error">Teklif bulunamadı veya bağlantı geçersiz.</div></section>';
+        });
+        return;
+    }
+
+    $lines = $repo->customerOfferLines((int) $offer['id']);
+    $expired = strtotime((string) $offer['expires_at']) < time();
+    if ($expired && !in_array((string) ($offer['status'] ?? ''), ['approved', 'revision_requested', 'rejected'], true)) {
+        render_public_layout('Müşteri Teklifi', static function () use ($offer): void {
+            ?>
+            <section class="login-panel supplier-quote-public">
+                <div class="alert error">Bu teklif bağlantısının süresi dolmuş.</div>
+                <p class="muted compact">Müşteri: <?= h((string) ($offer['company_name'] ?? '-')) ?></p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    if (in_array((string) ($offer['status'] ?? ''), ['sent', 'opened'], true)) {
+        $repo->markCustomerOfferOpened((int) $offer['id']);
+        $offer['status'] = 'opened';
+    }
+
+    if (in_array((string) ($offer['status'] ?? ''), ['approved', 'revision_requested', 'rejected'], true)) {
+        render_public_layout('Müşteri Teklifi', static function () use ($offer): void {
+            $status = (string) ($offer['status'] ?? '');
+            ?>
+            <section class="public-card payment-result-card success">
+                <p class="eyebrow">Teklif yanıtı</p>
+                <h1><?= $status === 'approved' ? 'Bu teklif onaylandı.' : ($status === 'revision_requested' ? 'Bu teklif için revize istendi.' : 'Bu teklif reddedildi.') ?></h1>
+                <p class="muted compact">Yanıt tarihi: <?= h(!empty($offer['responded_at']) ? date('d.m.Y H:i', strtotime((string) $offer['responded_at'])) : '-') ?></p>
+                <?php if (!empty($offer['response_note'])): ?>
+                    <div class="settings-note"><?= nl2br(h((string) $offer['response_note']), false) ?></div>
+                <?php endif; ?>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    if ($method === 'POST') {
+        verify_csrf();
+        $decision = (string) ($_POST['decision'] ?? '');
+        $note = trim((string) ($_POST['response_note'] ?? ''));
+
+        try {
+            if (!in_array($decision, ['approved', 'revision_requested', 'rejected'], true)) {
+                throw new RuntimeException('Lütfen geçerli bir teklif yanıtı seçin.');
+            }
+            if ($decision !== 'approved' && $note === '') {
+                throw new RuntimeException('Revize veya red yanıtı için açıklama yazın.');
+            }
+
+            $repo->respondCustomerOffer(
+                (int) $offer['id'],
+                $decision,
+                $note,
+                (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+                (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
+            );
+
+            $supplierMailSummary = ['sent' => 0, 'failed' => 0];
+            if ($decision === 'approved') {
+                $repo->applyCustomerOfferToRenewal((int) $offer['renewal_id'], (int) $offer['id']);
+                $supplierMailSummary = send_supplier_customer_offer_approval_emails($repo, $offer, $lines);
+            }
+
+            $paymentUrl = $decision === 'approved'
+                ? PaymentLink::urlForRenewal((int) $offer['renewal_id'], 60, (string) ($offer['recipient_email'] ?? ''))
+                : '';
+
+            render_public_layout('Müşteri Teklifi', static function () use ($decision, $paymentUrl, $supplierMailSummary): void {
+                ?>
+                <section class="public-card payment-result-card success">
+                    <p class="eyebrow">Teklif yanıtı</p>
+                    <h1><?= $decision === 'approved' ? 'Teklif onaylandı.' : ($decision === 'revision_requested' ? 'Revize talebiniz alındı.' : 'Red yanıtınız alındı.') ?></h1>
+                    <?php if ($decision === 'approved'): ?>
+                        <p>Teşekkür ederiz. Seçilen tedarikçilere işlem bilgisi iletildi.</p>
+                        <p class="muted compact">Tedarikçi mail durumu: <?= h((string) $supplierMailSummary['sent']) ?> gönderildi, <?= h((string) $supplierMailSummary['failed']) ?> başarısız.</p>
+                        <?php if ($paymentUrl !== ''): ?>
+                            <a class="button primary" href="<?= h($paymentUrl) ?>">Ödeme seçimine geç</a>
+                        <?php endif; ?>
+                    <?php else: ?>
+                        <p>Yanıtınız firma yetkililerine iletilmek üzere kayıt altına alındı.</p>
+                    <?php endif; ?>
+                </section>
+                <?php
+            });
+            return;
+        } catch (Throwable $e) {
+            $error = $e->getMessage();
+        }
+    }
+
+    render_public_layout('Müşteri Teklifi', static function () use ($offer, $lines, $error): void {
+        $currency = (string) ($offer['currency'] ?? 'TRY');
+        ?>
+        <section class="login-panel customer-offer-public">
+            <div class="login-heading">
+                <p class="eyebrow">Yenileme teklifi</p>
+                <h1>Teklifinizi inceleyin.</h1>
+                <p class="muted compact"><?= h((string) ($offer['company_name'] ?? '-')) ?> için hazırlanan yenileme teklifidir.</p>
+            </div>
+
+            <?php if ($error): ?>
+                <div class="alert error"><?= h($error) ?></div>
+            <?php endif; ?>
+
+            <?php if (!empty($offer['message_body'])): ?>
+                <div class="settings-note"><?= nl2br(h((string) $offer['message_body']), false) ?></div>
+            <?php endif; ?>
+
+            <?= render_customer_offer_lines_public($lines, $currency) ?>
+
+            <div class="payment-choice-summary customer-offer-totals">
+                <div><span>Ara toplam</span><strong><?= h(money_format_local($offer['subtotal'] ?? null, $currency)) ?></strong></div>
+                <div><span>KDV</span><strong><?= h(money_format_local($offer['vat_total'] ?? null, $currency)) ?></strong></div>
+                <div><span>KDV dahil toplam</span><strong><?= h(money_format_local($offer['total'] ?? null, $currency)) ?></strong></div>
+            </div>
+
+            <form method="post" class="form-grid">
+                <?= csrf_field() ?>
+                <label class="span-2">
+                    Yanıt notu
+                    <textarea name="response_note" rows="3" placeholder="Revize veya red için açıklamanızı yazın."><?= h((string) ($_POST['response_note'] ?? '')) ?></textarea>
+                </label>
+                <div class="inline-actions span-2">
+                    <button type="submit" name="decision" value="approved" class="button primary">Teklifi onayla</button>
+                    <button type="submit" name="decision" value="revision_requested" class="button secondary">Revize iste</button>
+                    <button type="submit" name="decision" value="rejected" class="button danger">Reddet</button>
+                </div>
+            </form>
+            <p class="muted compact">Bağlantı geçerlilik süresi: <?= h(date('d.m.Y H:i', strtotime((string) $offer['expires_at']))) ?></p>
+        </section>
+        <?php
+    });
+}
+
 function render_supplier_quote_item_form(array $item, string $currency): string
 {
     $id = (int) ($item['id'] ?? 0);
@@ -3145,7 +3536,14 @@ function render_supplier_quote_item_form(array $item, string $currency): string
             <label>Çek / vade <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_check]" value="<?= h($posted['price_check'] ?? '') ?>" placeholder="0.00"></label>
             <label>Özel vade adı <input name="lines[<?= h($key) ?>][custom_term]" value="<?= h($posted['custom_term'] ?? '') ?>" placeholder="Örn: 90 gün"></label>
             <label>Özel vade fiyatı <input type="number" min="0" step="0.01" name="lines[<?= h($key) ?>][price_custom]" value="<?= h($posted['price_custom'] ?? '') ?>" placeholder="0.00"></label>
-            <label>Para birimi <input name="lines[<?= h($key) ?>][currency]" value="<?= h($posted['currency'] ?? $currency) ?>" maxlength="3"></label>
+            <label>
+                Para birimi
+                <select name="lines[<?= h($key) ?>][currency]">
+                    <?php foreach (allowed_currency_options() as $currencyOption): ?>
+                        <?= option($currencyOption, $currencyOption, normalize_allowed_currency($posted['currency'] ?? $currency)) ?>
+                    <?php endforeach; ?>
+                </select>
+            </label>
             <label class="supplier-quote-check">
                 <input type="checkbox" name="lines[<?= h($key) ?>][vat_included]" value="1" <?= !isset($posted['vat_included']) || !empty($posted['vat_included']) ? 'checked' : '' ?>>
                 KDV dahil
@@ -3756,7 +4154,7 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                             <label>
                                 Para birimi
                                 <select name="currency" data-renewal-currency>
-                                    <?php foreach (['TRY', 'EUR', 'USD', 'GBP'] as $currency): ?>
+                                    <?php foreach (allowed_currency_options() as $currency): ?>
                                         <?= option($currency, $currency, (string) ($renewal['currency'] ?? 'TRY')) ?>
                                     <?php endforeach; ?>
                                 </select>
@@ -3995,7 +4393,7 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                         <label>
                             Para birimi
                             <select name="currency">
-                                <?php foreach (['TRY', 'EUR', 'USD', 'GBP'] as $currency): ?>
+                                <?php foreach (allowed_currency_options() as $currency): ?>
                                     <?= option($currency, $currency, (string) ($renewal['currency'] ?? 'TRY')) ?>
                                 <?php endforeach; ?>
                             </select>
@@ -7473,7 +7871,7 @@ function validate_renewal(array $data): array
             $errors[] = 'Eski tarihli giriste tarih bugunden ileri olamaz.';
         }
     }
-    if (!in_array(strtoupper((string) ($data['currency'] ?? 'TRY')), ['TRY', 'EUR', 'USD', 'GBP'], true)) {
+    if (!in_array(strtoupper((string) ($data['currency'] ?? 'TRY')), allowed_currency_options(), true)) {
         $errors[] = 'Para birimi gecersiz.';
     }
     if (!empty($data['supplier_price_request_enabled'])) {
@@ -8222,6 +8620,248 @@ function supplier_quote_generated_links(int $renewalId): array
     return array_values(array_filter($links, static fn ($link): bool => is_array($link) && !empty($link['url'])));
 }
 
+function render_customer_offer_dialog(array $row, array $selectedQuotes): string
+{
+    $id = (int) ($row['id'] ?? 0);
+    if ($id < 1 || $selectedQuotes === []) {
+        return '';
+    }
+
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+    $contacts = renewal_customer_contacts($row);
+    $currency = normalize_allowed_currency($row['currency'] ?? 'TRY');
+    $subject = 'Yenileme teklifiniz: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Ürün / hizmet'));
+    $message = 'Seçilen tedarikçi teklifleri üzerinden yenileme teklifinizi hazırladık. Lütfen fiyatları inceleyip onay, revize veya red tercihinizi iletin.';
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog communication-dialog customer-offer-dialog" id="customer-offer-<?= h((string) $id) ?>">
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <h2>Müşteriye teklif gönder</h2>
+                    <span>Seçili tedarikçi fiyatlarından müşteriye onay/revize/red bağlantılı teklif hazırlayın.</span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+
+            <form method="post" action="<?= h(url('/renewals/' . $id . '/customer-offer/send')) ?>" class="form-grid customer-offer-form" data-customer-offer-form>
+                <?= csrf_field() ?>
+                <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                <div class="recipient-picker span-2">
+                    <strong>Müşteri alıcıları</strong>
+                    <?php $hasRecipient = false; ?>
+                    <?php foreach ($contacts as $contact): ?>
+                        <?php
+                        $email = trim((string) ($contact['email'] ?? ''));
+                        if ($email === '') {
+                            continue;
+                        }
+                        $hasRecipient = true;
+                        ?>
+                        <label class="recipient-card">
+                            <input type="checkbox" name="customer_offer_recipients[]" value="<?= h($email) ?>" <?= !empty($contact['notify_enabled']) ? 'checked' : '' ?>>
+                            <span>
+                                <b><?= h((string) (($contact['full_name'] ?? '') ?: $email)) ?></b>
+                                <em><?= h($email) ?></em>
+                            </span>
+                        </label>
+                    <?php endforeach; ?>
+                    <?php if (!$hasRecipient): ?>
+                        <p class="muted compact">Bu cari için kayıtlı e-posta yetkilisi yok. Manuel alıcı yazabilirsiniz.</p>
+                    <?php endif; ?>
+                </div>
+                <label>
+                    Manuel müşteri e-postası
+                    <input type="email" name="custom_customer_offer_email" placeholder="musteri@firma.com">
+                </label>
+                <label>
+                    Para birimi
+                    <select name="currency" data-customer-offer-currency>
+                        <?php foreach (allowed_currency_options() as $currencyOption): ?>
+                            <?= option($currencyOption, $currencyOption, $currency) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label class="span-2">
+                    Konu
+                    <input name="subject" value="<?= h($subject) ?>" maxlength="240" required>
+                </label>
+                <label class="span-2">
+                    Teklif mesajı
+                    <textarea name="message" rows="4" required><?= h($message) ?></textarea>
+                </label>
+
+                <div class="customer-offer-lines-editor span-2">
+                    <div class="section-head compact">
+                        <div>
+                            <h3>Teklif satırları</h3>
+                            <span>Birim fiyat, toplam ve KDV'li fiyat müşteriye bu şekilde gösterilir.</span>
+                        </div>
+                    </div>
+                    <?php foreach ($selectedQuotes as $index => $selection): ?>
+                        <?= render_customer_offer_line_editor((int) $index, $selection, $currency) ?>
+                    <?php endforeach; ?>
+                </div>
+
+                <div class="customer-offer-total-preview span-2">
+                    <span>Ara toplam: <b data-customer-offer-subtotal>-</b></span>
+                    <span>KDV: <b data-customer-offer-vat>-</b></span>
+                    <span>KDV'li toplam: <b data-customer-offer-total>-</b></span>
+                </div>
+
+                <button type="submit" class="button primary span-2">Müşteriye teklif gönder</button>
+            </form>
+        </div>
+    </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_customer_offer_history(array $offers): string
+{
+    if ($offers === []) {
+        return '';
+    }
+
+    ob_start();
+    ?>
+    <div class="customer-offer-history">
+        <div class="section-head compact">
+            <div>
+                <h3>Müşteri teklif geçmişi</h3>
+                <span>Gönderilen müşteri teklifleri, yanıtları ve satır fiyatları.</span>
+            </div>
+        </div>
+        <div class="customer-offer-history-list">
+            <?php foreach ($offers as $offer): ?>
+                <?php
+                $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
+                $status = (string) ($offer['status'] ?? 'sent');
+                $createdAt = !empty($offer['created_at']) ? date('d.m.Y H:i', strtotime((string) $offer['created_at'])) : '-';
+                ?>
+                <details class="customer-offer-history-card">
+                    <summary>
+                        <span>
+                            <strong><?= h((string) (($offer['recipient_name'] ?? '') ?: ($offer['recipient_email'] ?? 'Müşteri'))) ?></strong>
+                            <em><?= h((string) ($offer['recipient_email'] ?? '-')) ?> · <?= h($createdAt) ?></em>
+                        </span>
+                        <span class="badge <?= h(customer_offer_status_badge($status)) ?>"><?= h(customer_offer_status_label($status)) ?></span>
+                        <b><?= h(money_format_local($offer['total'] ?? null, $currency)) ?></b>
+                    </summary>
+                    <div class="customer-offer-history-lines">
+                        <?php foreach (($offer['lines'] ?? []) as $line): ?>
+                            <?php
+                            $quantity = (float) ($line['quantity'] ?? 1);
+                            $unitPrice = (float) ($line['unit_price'] ?? 0);
+                            $subtotal = (float) ($line['line_subtotal'] ?? ($quantity * $unitPrice));
+                            $total = (float) ($line['line_total'] ?? $subtotal);
+                            ?>
+                            <div>
+                                <strong><?= h((string) ($line['item_title'] ?? '-')) ?></strong>
+                                <span><?= h(number_format($quantity, 2, ',', '.')) ?> adet</span>
+                                <span>Birim: <?= h(money_format_local($unitPrice, $currency)) ?></span>
+                                <span>Toplam: <?= h(money_format_local($subtotal, $currency)) ?></span>
+                                <span>KDV dahil: <?= h(money_format_local($total, $currency)) ?></span>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php if (!empty($offer['response_note'])): ?>
+                        <div class="settings-note compact"><?= nl2br(h((string) $offer['response_note']), false) ?></div>
+                    <?php endif; ?>
+                    <?php if (!empty($offer['responded_at'])): ?>
+                        <p class="muted compact">Yanıt tarihi: <?= h(date('d.m.Y H:i', strtotime((string) $offer['responded_at']))) ?></p>
+                    <?php endif; ?>
+                </details>
+            <?php endforeach; ?>
+        </div>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function customer_offer_status_label(string $status): string
+{
+    return match ($status) {
+        'opened' => 'Açıldı',
+        'approved' => 'Onaylandı',
+        'revision_requested' => 'Revize istendi',
+        'rejected' => 'Reddedildi',
+        'expired' => 'Süresi doldu',
+        default => 'Gönderildi',
+    };
+}
+
+function customer_offer_status_badge(string $status): string
+{
+    return match ($status) {
+        'approved' => 'active',
+        'revision_requested', 'opened' => 'urgency-warning',
+        'rejected', 'expired' => 'overdue',
+        default => 'renewed',
+    };
+}
+
+function render_customer_offer_line_editor(int $index, array $selection, string $currency): string
+{
+    $quantity = (float) ($selection['quantity'] ?? 1);
+    $unitPrice = (float) ($selection['selected_price'] ?? 0);
+    $vatRate = (float) ($selection['vat_rate'] ?? 20);
+    $lineSubtotal = round($quantity * $unitPrice, 2);
+    $lineVat = round($lineSubtotal * $vatRate / 100, 2);
+    $lineTotal = round($lineSubtotal + $lineVat, 2);
+    $termLabel = supplier_quote_term_label((string) ($selection['selected_term'] ?? ''), (string) ($selection['custom_term'] ?? ''));
+
+    ob_start();
+    ?>
+    <div class="customer-offer-line-editor" data-customer-offer-line>
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][renewal_item_id]" value="<?= h($selection['renewal_item_id'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_quote_line_id]" value="<?= h($selection['quote_line_id'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_name]" value="<?= h($selection['supplier_display'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_recipient_email]" value="<?= h($selection['recipient_email'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_contact_name]" value="<?= h($selection['contact_name'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_term]" value="<?= h($selection['selected_term'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_custom_term]" value="<?= h($selection['custom_term'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_price]" value="<?= h($selection['selected_price'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_currency]" value="<?= h(normalize_allowed_currency($selection['selected_currency'] ?? $currency)) ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_vat_included]" value="<?= !empty($selection['vat_included']) ? '1' : '0' ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_delivery_note]" value="<?= h($selection['delivery_note'] ?? '') ?>">
+        <input type="hidden" name="offer_lines[<?= h((string) $index) ?>][supplier_note]" value="<?= h($selection['note'] ?? '') ?>">
+        <div class="customer-offer-line-title">
+            <strong><?= h((string) (($selection['item_title'] ?? '') ?: 'Ürün / hizmet')) ?></strong>
+            <span><?= h((string) (($selection['supplier_display'] ?? '') ?: 'Tedarikçi')) ?> / <?= h($termLabel) ?> / Alış: <?= h(money_format_local($selection['selected_price'] ?? null, (string) ($selection['selected_currency'] ?? $currency))) ?></span>
+        </div>
+        <div class="customer-offer-line-fields">
+            <label>
+                Ürün / hizmet
+                <input name="offer_lines[<?= h((string) $index) ?>][item_title]" value="<?= h((string) (($selection['item_title'] ?? '') ?: 'Ürün / hizmet')) ?>" required>
+            </label>
+            <label>
+                Adet
+                <input type="number" min="0.01" step="0.01" name="offer_lines[<?= h((string) $index) ?>][quantity]" value="<?= h(number_format($quantity, 2, '.', '')) ?>" data-customer-offer-qty>
+            </label>
+            <label>
+                Birim fiyat
+                <input type="number" min="0" step="0.01" name="offer_lines[<?= h((string) $index) ?>][unit_price]" value="<?= h(number_format($unitPrice, 2, '.', '')) ?>" data-customer-offer-unit>
+            </label>
+            <label>
+                KDV %
+                <input type="number" min="0" max="100" step="0.01" name="offer_lines[<?= h((string) $index) ?>][vat_rate]" value="<?= h(number_format($vatRate, 2, '.', '')) ?>" data-customer-offer-vat-rate>
+            </label>
+        </div>
+        <div class="customer-offer-price-preview">
+            <span>Birim fiyat: <b data-customer-offer-unit-preview><?= h(money_format_local($unitPrice, $currency)) ?></b></span>
+            <span>Toplam: <b data-customer-offer-subtotal-preview><?= h(money_format_local($lineSubtotal, $currency)) ?></b></span>
+            <span>KDV'li fiyat: <b data-customer-offer-total-preview><?= h(money_format_local($lineTotal, $currency)) ?></b></span>
+        </div>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
 function render_supplier_quote_comparison(RenewalRepository $repo, array $row): string
 {
     $renewalId = (int) ($row['id'] ?? 0);
@@ -8234,8 +8874,10 @@ function render_supplier_quote_comparison(RenewalRepository $repo, array $row): 
     $lines = $quotes['lines'] ?? [];
     $attachments = $quotes['attachments'] ?? [];
     $selections = $quotes['selections'] ?? [];
+    $selectedQuotes = $repo->selectedSupplierQuotesForRenewal($renewalId);
+    $customerOffers = $repo->customerOffersForRenewal($renewalId);
 
-    if ($requests === [] && $lines === []) {
+    if ($requests === [] && $lines === [] && $customerOffers === []) {
         return '';
     }
 
@@ -8265,36 +8907,45 @@ function render_supplier_quote_comparison(RenewalRepository $repo, array $row): 
                 <h3>Tedarikçi teklifleri</h3>
                 <span><?= h((string) $submitted) ?> / <?= h((string) count($requests)) ?> tedarikçi teklif verdi. Her kalemde ayrı tedarikçi seçebilirsiniz.</span>
             </div>
+            <?php if ($selectedQuotes !== []): ?>
+                <button type="button" class="button small primary" data-dialog-open="customer-offer-<?= h((string) $renewalId) ?>">Müşteriye teklif gönder</button>
+            <?php endif; ?>
         </div>
+        <?php if ($selectedQuotes !== []): ?>
+            <?= render_customer_offer_dialog($row, $selectedQuotes) ?>
+        <?php endif; ?>
+        <?= render_customer_offer_history($customerOffers) ?>
 
-        <?php foreach ($items as $itemId => $item): ?>
-            <div class="supplier-quote-compare-item">
-                <div class="supplier-quote-compare-head">
-                    <div>
-                        <span>Kalem</span>
-                        <strong><?= h((string) (($item['title'] ?? '') ?: 'Ürün / hizmet')) ?></strong>
+        <?php if ($requests !== [] || $lines !== []): ?>
+            <?php foreach ($items as $itemId => $item): ?>
+                <div class="supplier-quote-compare-item">
+                    <div class="supplier-quote-compare-head">
+                        <div>
+                            <span>Kalem</span>
+                            <strong><?= h((string) (($item['title'] ?? '') ?: 'Ürün / hizmet')) ?></strong>
+                        </div>
+                        <?php if (isset($selectionByItem[$itemId])): ?>
+                            <?php $selected = $selectionByItem[$itemId]; ?>
+                            <em>
+                                Seçilen: <?= h((string) ($selected['supplier_display'] ?? '-')) ?>
+                                / <?= h(supplier_quote_term_label((string) $selected['selected_term'])) ?>
+                                / <?= h(money_format_local($selected['selected_price'], (string) $selected['currency'])) ?>
+                            </em>
+                        <?php endif; ?>
                     </div>
-                    <?php if (isset($selectionByItem[$itemId])): ?>
-                        <?php $selected = $selectionByItem[$itemId]; ?>
-                        <em>
-                            Seçilen: <?= h((string) ($selected['supplier_display'] ?? '-')) ?>
-                            / <?= h(supplier_quote_term_label((string) $selected['selected_term'])) ?>
-                            / <?= h(money_format_local($selected['selected_price'], (string) $selected['currency'])) ?>
-                        </em>
+
+                    <?php if (empty($linesByItem[$itemId])): ?>
+                        <p class="muted compact">Bu kalem için henüz fiyat girilmedi.</p>
+                    <?php else: ?>
+                        <div class="supplier-quote-offer-grid">
+                            <?php foreach ($linesByItem[$itemId] as $line): ?>
+                                <?= render_supplier_quote_offer_card($line, $selectionByItem[$itemId] ?? null, $returnTo, $item) ?>
+                            <?php endforeach; ?>
+                        </div>
                     <?php endif; ?>
                 </div>
-
-                <?php if (empty($linesByItem[$itemId])): ?>
-                    <p class="muted compact">Bu kalem için henüz fiyat girilmedi.</p>
-                <?php else: ?>
-                    <div class="supplier-quote-offer-grid">
-                        <?php foreach ($linesByItem[$itemId] as $line): ?>
-                            <?= render_supplier_quote_offer_card($line, $selectionByItem[$itemId] ?? null, $returnTo) ?>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-            </div>
-        <?php endforeach; ?>
+            <?php endforeach; ?>
+        <?php endif; ?>
 
         <?php if ($attachments !== []): ?>
             <div class="supplier-quote-files">
@@ -8310,7 +8961,7 @@ function render_supplier_quote_comparison(RenewalRepository $repo, array $row): 
     return (string) ob_get_clean();
 }
 
-function render_supplier_quote_offer_card(array $line, ?array $selected, string $returnTo): string
+function render_supplier_quote_offer_card(array $line, ?array $selected, string $returnTo, array $item = []): string
 {
     $terms = [
         'cash' => ['label' => 'Peşin', 'field' => 'price_cash'],
@@ -8322,6 +8973,9 @@ function render_supplier_quote_offer_card(array $line, ?array $selected, string 
     $lineId = (int) $line['id'];
     $selectedLineId = (int) ($selected['quote_line_id'] ?? 0);
     $selectedTerm = (string) ($selected['selected_term'] ?? '');
+    $quantity = max(1.0, (float) ($item['quantity'] ?? 1));
+    $vatRate = max(0.0, (float) ($item['vat_rate'] ?? 20));
+    $currency = normalize_allowed_currency($line['currency'] ?? 'TRY');
 
     ob_start();
     ?>
@@ -8341,14 +8995,22 @@ function render_supplier_quote_offer_card(array $line, ?array $selected, string 
                     continue;
                 }
                 $isSelected = $selectedLineId === $lineId && $selectedTerm === $term;
+                $unitPrice = (float) $price;
+                $lineSubtotal = round($unitPrice * $quantity, 2);
+                $lineVatIncludedTotal = !empty($line['vat_included'])
+                    ? $lineSubtotal
+                    : round($lineSubtotal + ($lineSubtotal * $vatRate / 100), 2);
                 ?>
                 <form method="post" action="<?= h(url('/supplier-quotes/' . $lineId . '/select')) ?>" class="supplier-quote-term <?= $isSelected ? 'selected' : '' ?>">
                     <?= csrf_field() ?>
                     <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
                     <input type="hidden" name="term" value="<?= h($term) ?>">
                     <span><?= h((string) $meta['label']) ?></span>
-                    <strong><?= h(money_format_local($price, (string) ($line['currency'] ?? 'TRY'))) ?></strong>
-                    <small><?= !empty($line['vat_included']) ? 'KDV dahil' : 'KDV hariç' ?></small>
+                    <strong><?= h(money_format_local($unitPrice, $currency)) ?></strong>
+                    <small>Birim fiyat</small>
+                    <small>Toplam: <?= h(money_format_local($lineSubtotal, $currency)) ?></small>
+                    <small>KDV'li: <?= h(money_format_local($lineVatIncludedTotal, $currency)) ?></small>
+                    <small><?= !empty($line['vat_included']) ? 'Tedarikçi KDV dahil girdi' : 'Tedarikçi KDV hariç girdi' ?></small>
                     <button type="submit" class="button small <?= $isSelected ? 'primary' : 'secondary' ?>" <?= $isSelected ? 'disabled' : '' ?>><?= $isSelected ? 'Seçildi' : 'Seç' ?></button>
                 </form>
             <?php endforeach; ?>

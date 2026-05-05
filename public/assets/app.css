@@ -3924,6 +3924,170 @@ label {
     line-height: 1.4;
 }
 
+.customer-offer-dialog {
+    width: min(94vw, 980px);
+}
+
+.customer-offer-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.customer-offer-lines-editor {
+    display: grid;
+    gap: 12px;
+}
+
+.customer-offer-line-editor {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #fbfdfc;
+}
+
+.customer-offer-line-title {
+    display: grid;
+    gap: 4px;
+}
+
+.customer-offer-line-title strong {
+    font-size: 14px;
+}
+
+.customer-offer-line-title span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.customer-offer-line-fields,
+.customer-offer-price-preview,
+.customer-offer-total-preview {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+}
+
+.customer-offer-price-preview,
+.customer-offer-total-preview {
+    padding: 10px;
+    border-radius: 8px;
+    background: #eef7f4;
+}
+
+.customer-offer-price-preview span,
+.customer-offer-total-preview span,
+.price-breakdown span {
+    display: grid;
+    gap: 2px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.customer-offer-price-preview b,
+.customer-offer-total-preview b,
+.price-breakdown b {
+    color: var(--text);
+    font-size: 14px;
+}
+
+.customer-offer-public {
+    width: min(1080px, 100%);
+    max-width: 1080px;
+}
+
+.customer-offer-totals {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.customer-offer-line .price-breakdown {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    min-width: min(100%, 560px);
+}
+
+.customer-offer-history {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #f7fbf9;
+}
+
+.customer-offer-history-list {
+    display: grid;
+    gap: 8px;
+}
+
+.customer-offer-history-card {
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.customer-offer-history-card summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    cursor: pointer;
+}
+
+.customer-offer-history-card summary span:first-child {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.customer-offer-history-card summary strong,
+.customer-offer-history-card summary em {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.customer-offer-history-card summary em {
+    color: var(--muted);
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 750;
+}
+
+.customer-offer-history-card summary b {
+    color: var(--text);
+    font-size: 14px;
+}
+
+.customer-offer-history-lines {
+    display: grid;
+    gap: 8px;
+    padding: 0 10px 10px;
+}
+
+.customer-offer-history-lines > div {
+    display: grid;
+    grid-template-columns: minmax(160px, 1fr) repeat(4, auto);
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    background: #f4f7f5;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.customer-offer-history-lines strong {
+    color: var(--text);
+    font-size: 13px;
+}
+
 .supplier-quote-public {
     width: min(1120px, 100%);
     max-width: 1120px;
@@ -4166,7 +4330,13 @@ label {
     .supplier-price-layout,
     .supplier-quote-compare-head,
     .supplier-quote-offer-head,
-    .supplier-quote-item-head {
+    .supplier-quote-item-head,
+    .customer-offer-form,
+    .customer-offer-line-fields,
+    .customer-offer-price-preview,
+    .customer-offer-total-preview,
+    .customer-offer-totals,
+    .customer-offer-line .price-breakdown {
         grid-template-columns: 1fr;
     }
 
@@ -4293,7 +4463,9 @@ label {
     .public-payment-item,
     .supplier-quote-price-grid,
     .supplier-quote-term-grid,
-    .supplier-quote-context {
+    .supplier-quote-context,
+    .customer-offer-history-card summary,
+    .customer-offer-history-lines > div {
         grid-template-columns: 1fr;
     }
 

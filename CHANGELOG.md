@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.24] - 2026-05-05
+
+- Secilen tedarikci tekliflerinden musteriyi onay/revize/red baglantisina yonlendiren musteri teklif akisi eklendi.
+- Para birimi secimleri TRY, USD ve EUR ile sinirlandirildi.
+- Müşteri tekliflerinde ve tedarikçi fiyat kartlarında birim fiyat, toplam ve KDV dahil fiyat birlikte gosterilir hale getirildi.
+- Müşteri teklif gecmisi, durumlari ve satir detaylari takip karti icinde acilir sekilde gorunur hale getirildi.
+- Müşteri teklifi onaylandiginda yenileme tutari satir fiyatlarina gore guncellenir ve secilen tedarikcilere isleme alma maili gonderilir hale getirildi.
+
 ## [1.0.23] - 2026-05-05
 
 - Tedarikci teklifleri arasindan bir kalem/vade secildiginde tedarikciye secim maili gonderilmesi saglandi.
