@@ -1802,6 +1802,11 @@ td.actions {
     background: #ffffff;
 }
 
+.supplier-link-list {
+    display: grid;
+    gap: 10px;
+}
+
 .supplier-link-card strong,
 .supplier-link-card span {
     display: block;

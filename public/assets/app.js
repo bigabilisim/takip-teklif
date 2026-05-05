@@ -324,18 +324,95 @@
         syncBankTransferPanel();
     }
 
-    document.addEventListener('click', (event) => {
-        const supplierFormLink = event.target.closest('[data-supplier-form-link], .supplier-link-results a[href*="/tedarikci-teklif/"]');
-        if (supplierFormLink) {
-            const results = supplierFormLink.closest('[data-supplier-link-results], .supplier-link-results');
-            const readyAt = Number(results?.dataset.navigationReadyAt || '0');
-            if (readyAt && Date.now() < readyAt) {
-                event.preventDefault();
-                event.stopPropagation();
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;',
+    }[character]));
+
+    const supplierLinkCard = (link) => {
+        const url = String(link?.url || '');
+        const label = String(link?.label || 'Tedarikçi');
+        const createdAt = String(link?.created_at || '');
+
+        return `
+            <div class="supplier-link-card">
+                <div>
+                    <strong>${escapeHtml(label)}</strong>
+                    <span>${escapeHtml(createdAt)}</span>
+                </div>
+                <input readonly value="${escapeHtml(url)}" aria-label="Tedarikçi teklif linki">
+                <div class="inline-actions">
+                    <button type="button" class="button small secondary" data-copy-value="${escapeHtml(url)}">Linki kopyala</button>
+                    <a class="button small primary" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Formu aç</a>
+                </div>
+            </div>
+        `;
+    };
+
+    document.querySelectorAll('[data-supplier-link-form]').forEach((form) => {
+        const status = form.querySelector('[data-supplier-link-status]');
+        const submitButton = form.querySelector('button[type="submit"]');
+        const sidePanel = form.closest('.supplier-price-side');
+        const results = sidePanel?.querySelector('[data-supplier-link-results]');
+        const list = sidePanel?.querySelector('[data-supplier-link-list]');
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (!list || !results) {
+                form.submit();
                 return;
             }
-        }
 
+            const previousText = submitButton?.textContent || 'Teklif linki oluştur';
+            if (submitButton) {
+                submitButton.disabled = true;
+                submitButton.textContent = 'Link oluşturuluyor...';
+            }
+            if (status) {
+                status.hidden = false;
+                status.textContent = 'Tedarikçi teklif linki hazırlanıyor.';
+            }
+
+            try {
+                const response = await fetch(form.action, {
+                    method: 'POST',
+                    body: new FormData(form),
+                    headers: {
+                        Accept: 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                });
+                const payload = await response.json().catch(() => ({ ok: false, message: 'Sunucu cevabı okunamadı.' }));
+                if (!response.ok || !payload.ok) {
+                    throw new Error(payload.message || 'Teklif linki oluşturulamadı.');
+                }
+
+                const cards = (payload.links || []).map(supplierLinkCard).join('');
+                if (cards) {
+                    list.insertAdjacentHTML('afterbegin', cards);
+                    results.hidden = false;
+                }
+                if (status) {
+                    status.textContent = payload.message || 'Teklif linki oluşturuldu.';
+                }
+            } catch (error) {
+                if (status) {
+                    status.hidden = false;
+                    status.textContent = error.message || 'Teklif linki oluşturulamadı.';
+                }
+            } finally {
+                if (submitButton) {
+                    submitButton.disabled = false;
+                    submitButton.textContent = previousText;
+                }
+            }
+        });
+    });
+
+    document.addEventListener('click', (event) => {
         const copyButton = event.target.closest('[data-copy-value]');
         if (copyButton) {
             const value = copyButton.dataset.copyValue || '';
@@ -375,15 +452,6 @@
     document.querySelectorAll('dialog[data-auto-open-dialog]').forEach((dialog) => {
         if (dialog.showModal && !dialog.open) {
             dialog.showModal();
-            dialog.querySelectorAll('[data-supplier-link-results], .supplier-link-results').forEach((results) => {
-                const readyAt = Date.now() + 1200;
-                results.dataset.navigationReadyAt = String(readyAt);
-                window.setTimeout(() => {
-                    if (Number(results.dataset.navigationReadyAt || '0') === readyAt) {
-                        delete results.dataset.navigationReadyAt;
-                    }
-                }, 1300);
-            });
         }
     });
 

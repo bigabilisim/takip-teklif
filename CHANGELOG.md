@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.20] - 2026-05-05
+
+- Tedarikci teklif linki olusturma islemi sayfa yonlendirmesi yapmadan ayni pencerede calisir hale getirildi.
+- Teklif linki olusturuldugunda gercek tedarikci form linki panel icinde aninda gosteriliyor.
+- `supplier_price_dialog` parametresiyle dialogu tekrar acma akisi kaldirilarak kilitlenme hissi giderildi.
+
 ## [1.0.19] - 2026-05-04
 
 - Teklif linki olusturma sonrasi pencere tekrar acildiginda ilk form linkinin yanlislikla tetiklenmesi engellendi.

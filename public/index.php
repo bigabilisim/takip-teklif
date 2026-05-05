@@ -323,6 +323,30 @@ function require_json_any_permission(array $permissions): void
     exit;
 }
 
+function wants_json_response(): bool
+{
+    $requestedWith = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? ''));
+    $accept = strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? ''));
+
+    return $requestedWith === 'xmlhttprequest' || str_contains($accept, 'application/json');
+}
+
+function json_response(array $payload, int $status = 200): never
+{
+    http_response_code($status);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function csrf_is_valid(): bool
+{
+    $posted = $_POST['_token'] ?? '';
+    $session = $_SESSION['_csrf_token'] ?? '';
+
+    return is_string($posted) && is_string($session) && hash_equals($session, $posted);
+}
+
 function handle_iyzico_payment_create(RenewalRepository $repo, int $renewalId): void
 {
     verify_csrf();
@@ -570,7 +594,14 @@ function handle_supplier_quote_select(RenewalRepository $repo, int $lineId): voi
 
 function handle_supplier_price_request_link(RenewalRepository $repo, int $renewalId): void
 {
-    verify_csrf();
+    $wantsJson = wants_json_response();
+    $created = [];
+    if (!csrf_is_valid()) {
+        if ($wantsJson) {
+            json_response(['ok' => false, 'message' => 'Oturum dogrulamasi basarisiz. Sayfayi yenileyip tekrar deneyin.'], 419);
+        }
+        verify_csrf();
+    }
 
     try {
         $row = $repo->find($renewalId);
@@ -594,7 +625,6 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
             throw new RuntimeException('Teklif linki olusturmak icin en az bir tedarikci yetkilisi secin veya manuel e-posta yazin.');
         }
 
-        $created = [];
         foreach ($recipients as $recipient) {
             $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $recipient, $subject, $message, 'manual');
             $created[] = [
@@ -611,12 +641,27 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
         }
         $_SESSION['_supplier_quote_links'][$renewalId] = array_slice(array_merge($created, $previous), 0, 12);
 
+        if ($wantsJson) {
+            json_response([
+                'ok' => true,
+                'message' => 'Tedarikci teklif linki olusturuldu.',
+                'links' => $created,
+            ]);
+        }
+
         flash('success', 'Tedarikci teklif linki olusturuldu. Linki pencereden kopyalayabilirsiniz.');
     } catch (Throwable $e) {
+        if ($wantsJson) {
+            json_response(['ok' => false, 'message' => $e->getMessage()], 422);
+        }
         flash('error', $e->getMessage());
     }
 
-    redirect(supplier_price_dialog_return_path(safe_return_path($_POST['return_to'] ?? '/'), $renewalId));
+    if (!empty($created) && count($created) === 1 && !empty($created[0]['url'])) {
+        redirect((string) $created[0]['url']);
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
 }
 
 function handle_supplier_price_request_whatsapp(RenewalRepository $repo, int $renewalId): void
@@ -771,24 +816,6 @@ function supplier_quote_recipient_label(array $recipient): string
     }
 
     return implode(' - ', $parts) ?: 'Tedarikci teklif linki';
-}
-
-function supplier_price_dialog_return_path(string $returnTo, int $renewalId): string
-{
-    $parts = parse_url($returnTo);
-    if (!is_array($parts)) {
-        return '/?supplier_price_dialog=' . $renewalId;
-    }
-
-    $path = (string) ($parts['path'] ?? '/');
-    $query = [];
-    if (!empty($parts['query'])) {
-        parse_str((string) $parts['query'], $query);
-    }
-    $query['supplier_price_dialog'] = (string) $renewalId;
-    $queryString = http_build_query($query);
-
-    return $path . ($queryString !== '' ? '?' . $queryString : '');
 }
 
 function renewal_mail_recipients_from_request(RenewalRepository $repo, array $row): array
@@ -7848,11 +7875,10 @@ function render_supplier_price_request_dialog(array $row): string
     $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
     $defaultMessage = supplier_price_default_message($row);
     $generatedLinks = supplier_quote_generated_links($id);
-    $autoOpen = (int) ($_GET['supplier_price_dialog'] ?? 0) === $id;
 
     ob_start();
     ?>
-    <dialog class="app-dialog communication-dialog supplier-price-dialog" id="supplier-price-<?= h($id) ?>"<?= $autoOpen ? ' data-auto-open-dialog' : '' ?>>
+    <dialog class="app-dialog communication-dialog supplier-price-dialog" id="supplier-price-<?= h($id) ?>">
         <div class="app-dialog-body">
             <div class="section-head dialog-head">
                 <div>
@@ -7905,7 +7931,7 @@ function render_supplier_price_request_dialog(array $row): string
                 </form>
 
                 <div class="supplier-price-side">
-                    <form method="post" action="<?= h(url('/renewals/' . $id . '/supplier-price-link')) ?>" class="supplier-direct-link-panel">
+                    <form method="post" action="<?= h(url('/renewals/' . $id . '/supplier-price-link')) ?>" class="supplier-direct-link-panel" data-supplier-link-form>
                         <?= csrf_field() ?>
                         <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
                         <input type="hidden" name="subject" value="<?= h($subject) ?>">
@@ -7943,16 +7969,17 @@ function render_supplier_price_request_dialog(array $row): string
                             <input type="email" name="custom_supplier_email" placeholder="tedarikci@firma.com">
                         </label>
                         <button type="submit" class="button primary full">Teklif linki oluştur</button>
+                        <p class="muted compact" data-supplier-link-status hidden></p>
                     </form>
 
-                    <?php if ($generatedLinks !== []): ?>
-                        <div class="supplier-link-results">
-                            <div class="section-head compact">
-                                <div>
-                                    <h3>Oluşturulan linkler</h3>
-                                    <span class="muted compact">Tedarikçiye gönderebilir veya formu hemen açabilirsiniz.</span>
-                                </div>
+                    <div class="supplier-link-results" data-supplier-link-results <?= $generatedLinks === [] ? 'hidden' : '' ?>>
+                        <div class="section-head compact">
+                            <div>
+                                <h3>Oluşturulan linkler</h3>
+                                <span class="muted compact">Tedarikçiye gönderebilir veya formu hemen açabilirsiniz.</span>
                             </div>
+                        </div>
+                        <div class="supplier-link-list" data-supplier-link-list>
                             <?php foreach ($generatedLinks as $link): ?>
                                 <?php $linkUrl = (string) ($link['url'] ?? ''); ?>
                                 <?php if ($linkUrl === '') { continue; } ?>
@@ -7969,7 +7996,7 @@ function render_supplier_price_request_dialog(array $row): string
                                 </div>
                             <?php endforeach; ?>
                         </div>
-                    <?php endif; ?>
+                    </div>
 
                     <div class="supplier-whatsapp-panel">
                         <div class="section-head compact">
