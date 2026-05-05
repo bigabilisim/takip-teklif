@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.19] - 2026-05-04
+
+- Teklif linki olusturma sonrasi pencere tekrar acildiginda ilk form linkinin yanlislikla tetiklenmesi engellendi.
+- PWA cache surumu yenilendi.
+
 ## [1.0.18] - 2026-05-04
 
 - Tedarikciden fiyat al penceresine mail gondermeden teklif formu linki olusturma alani eklendi.

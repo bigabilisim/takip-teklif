@@ -325,6 +325,17 @@
     }
 
     document.addEventListener('click', (event) => {
+        const supplierFormLink = event.target.closest('[data-supplier-form-link], .supplier-link-results a[href*="/tedarikci-teklif/"]');
+        if (supplierFormLink) {
+            const results = supplierFormLink.closest('[data-supplier-link-results], .supplier-link-results');
+            const readyAt = Number(results?.dataset.navigationReadyAt || '0');
+            if (readyAt && Date.now() < readyAt) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+        }
+
         const copyButton = event.target.closest('[data-copy-value]');
         if (copyButton) {
             const value = copyButton.dataset.copyValue || '';
@@ -364,6 +375,15 @@
     document.querySelectorAll('dialog[data-auto-open-dialog]').forEach((dialog) => {
         if (dialog.showModal && !dialog.open) {
             dialog.showModal();
+            dialog.querySelectorAll('[data-supplier-link-results], .supplier-link-results').forEach((results) => {
+                const readyAt = Date.now() + 1200;
+                results.dataset.navigationReadyAt = String(readyAt);
+                window.setTimeout(() => {
+                    if (Number(results.dataset.navigationReadyAt || '0') === readyAt) {
+                        delete results.dataset.navigationReadyAt;
+                    }
+                }, 1300);
+            });
         }
     });
 

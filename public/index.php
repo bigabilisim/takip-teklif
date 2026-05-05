@@ -7964,7 +7964,7 @@ function render_supplier_price_request_dialog(array $row): string
                                     <input readonly value="<?= h($linkUrl) ?>" aria-label="Tedarikçi teklif linki">
                                     <div class="inline-actions">
                                         <button type="button" class="button small secondary" data-copy-value="<?= h($linkUrl) ?>">Linki kopyala</button>
-                                        <a class="button small primary" href="<?= h($linkUrl) ?>" target="_blank" rel="noopener">Formu aç</a>
+                                        <a class="button small primary" href="<?= h($linkUrl) ?>" target="_blank" rel="noopener noreferrer">Formu aç</a>
                                     </div>
                                 </div>
                             <?php endforeach; ?>
