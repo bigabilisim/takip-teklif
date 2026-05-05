@@ -568,18 +568,69 @@ function handle_supplier_quote_select(RenewalRepository $repo, int $lineId): voi
     try {
         $term = (string) ($_POST['term'] ?? '');
         $selected = $repo->selectSupplierQuoteLine($lineId, $term, (int) ($_SESSION['user_id'] ?? 0));
+        $mailResult = send_supplier_quote_selection_email($repo, $selected);
+        $mailSuffix = '';
+        if (!empty($mailResult['ok'])) {
+            $mailSuffix = ' Tedarikçiye seçim maili gönderildi.';
+        } elseif (($mailResult['status'] ?? '') === 'skipped') {
+            $mailSuffix = ' Tedarikçi e-postası olmadığı için mail gönderilmedi.';
+        } else {
+            $mailSuffix = ' Fakat seçim maili gönderilemedi: ' . (string) ($mailResult['error'] ?? 'Bilinmeyen hata');
+        }
+
         flash(
-            'success',
+            !empty($mailResult['ok']) || ($mailResult['status'] ?? '') === 'skipped' ? 'success' : 'error',
             'Kalem için tedarikçi teklifi seçildi: '
             . supplier_quote_term_label($selected['term'])
             . ' / '
             . money_format_local($selected['price'], (string) $selected['currency'])
+            . $mailSuffix
         );
     } catch (Throwable $e) {
         flash('error', $e->getMessage());
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function send_supplier_quote_selection_email(RenewalRepository $repo, array $selected): array
+{
+    $email = trim((string) ($selected['recipient_email'] ?? ''));
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return ['ok' => false, 'status' => 'skipped', 'error' => 'Tedarikçi e-postası yok.'];
+    }
+
+    $row = $repo->find((int) ($selected['renewal_id'] ?? 0));
+    if (!$row) {
+        return ['ok' => false, 'status' => 'failed', 'error' => 'Yenileme kaydı bulunamadı.'];
+    }
+
+    $itemTitle = trim((string) ($selected['item_title'] ?? ''));
+    if ($itemTitle === '') {
+        $itemTitle = (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Ürün / hizmet'));
+    }
+
+    $subject = mb_substr(
+        'Teklifiniz seçildi: ' . (string) ($row['company_name'] ?? '-') . ' - ' . $itemTitle,
+        0,
+        240
+    );
+    $body = supplier_quote_selection_body($row, $selected, $itemTitle);
+    $result = Mailer::sendWithResult($email, $subject, $body, true);
+    $ok = !empty($result['ok']);
+    $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+
+    $repo->logMail(
+        (int) $row['id'],
+        $email,
+        $subject,
+        $body,
+        $ok ? 'sent' : 'failed',
+        $error,
+        false
+    );
+
+    return ['ok' => $ok, 'status' => $ok ? 'sent' : 'failed', 'error' => $error];
 }
 
 function handle_supplier_price_request_link(RenewalRepository $repo, int $renewalId): void
@@ -1342,6 +1393,49 @@ function supplier_price_request_body(array $row, string $message, string $quoteU
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
         . ($quoteUrl !== '' ? '<p style="margin:20px 0 0;"><a href="' . h($quoteUrl) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Teklif formunu aç</a></p>' : '')
         . '<p style="margin:14px 0 0;color:#607069;font-size:13px;line-height:1.5;">Formda nakliye, KDV, vade ve teklif notu onayı zorunludur. Fiyat yazmak istemezseniz teklifinizi dosya veya not olarak iletebilirsiniz.</p>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function supplier_quote_selection_body(array $row, array $selected, string $itemTitle): string
+{
+    $contactName = trim((string) ($selected['contact_name'] ?? ''));
+    $termLabel = supplier_quote_term_label((string) ($selected['term'] ?? ''), (string) ($selected['custom_term'] ?? ''));
+    $price = money_format_local($selected['price'] ?? 0, (string) ($selected['currency'] ?? 'TRY'));
+    $rows = [
+        'Müşteri' => (string) ($row['company_name'] ?? '-'),
+        'Ürün / hizmet' => $itemTitle,
+        'Seçilen vade' => $termLabel,
+        'Seçilen fiyat' => $price,
+        'KDV durumu' => !empty($selected['vat_included']) ? 'KDV dahil' : 'KDV hariç',
+        'Yenileme tarihi' => !empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-',
+    ];
+    if (trim((string) ($selected['delivery_note'] ?? '')) !== '') {
+        $rows['Nakliye / teslim'] = (string) $selected['delivery_note'];
+    }
+    if (trim((string) ($selected['note'] ?? '')) !== '') {
+        $rows['Teklif notu'] = (string) $selected['note'];
+    }
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;width:34%;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . nl2br(h($value), false) . '</td>'
+            . '</tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d9e3df;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Tedarikçi teklif seçimi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Teklifiniz seçildi, işleme alabilirsiniz.</h1>'
+        . '<p style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">'
+        . h($contactName !== '' ? 'Merhaba ' . $contactName . ',' : 'Merhaba,')
+        . '<br>Paylaştığınız teklif aşağıdaki şartlarla seçilmiştir. Lütfen ilgili işlem / yenileme sürecini başlatabilirsiniz.</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
+        . '<p style="margin:18px 0 0;color:#607069;font-size:13px;line-height:1.5;">Herhangi bir değişiklik gerekiyorsa lütfen bizimle iletişime geçiniz.</p>'
         . '</td></tr></table></td></tr></table></body></html>';
 }
 
@@ -8255,7 +8349,7 @@ function render_supplier_quote_offer_card(array $line, ?array $selected, string 
                     <span><?= h((string) $meta['label']) ?></span>
                     <strong><?= h(money_format_local($price, (string) ($line['currency'] ?? 'TRY'))) ?></strong>
                     <small><?= !empty($line['vat_included']) ? 'KDV dahil' : 'KDV hariç' ?></small>
-                    <button type="submit" class="button small <?= $isSelected ? 'primary' : 'secondary' ?>"><?= $isSelected ? 'Seçildi' : 'Seç' ?></button>
+                    <button type="submit" class="button small <?= $isSelected ? 'primary' : 'secondary' ?>" <?= $isSelected ? 'disabled' : '' ?>><?= $isSelected ? 'Seçildi' : 'Seç' ?></button>
                 </form>
             <?php endforeach; ?>
         </div>

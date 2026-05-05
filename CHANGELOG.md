@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.23] - 2026-05-05
+
+- Tedarikci teklifleri arasindan bir kalem/vade secildiginde tedarikciye secim maili gonderilmesi saglandi.
+- Secim mailinde musteri, urun/hizmet, secilen vade, fiyat, KDV ve varsa nakliye/not bilgileri yer alir hale getirildi.
+- Zaten secili olan teklif butonu tekrar mail gitmesini engellemek icin pasif hale getirildi.
+
 ## [1.0.22] - 2026-05-05
 
 - Manuel tedarikci teklif linki olustururken linkin e-posta olarak da gonderilmesi saglandi.

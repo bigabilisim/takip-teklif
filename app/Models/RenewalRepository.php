@@ -733,9 +733,14 @@ final class RenewalRepository
         }
 
         $stmt = $this->db->prepare(
-            'SELECT sqln.*, sqr.renewal_id
+            'SELECT sqln.*,
+                    sqr.renewal_id,
+                    sqr.recipient_email,
+                    sqr.contact_name,
+                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
              FROM supplier_quote_lines sqln
              INNER JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
+             LEFT JOIN suppliers s ON s.id = sqr.supplier_id
              WHERE sqln.id = :id
              LIMIT 1'
         );
@@ -781,9 +786,18 @@ final class RenewalRepository
         return [
             'renewal_id' => (int) $line['renewal_id'],
             'renewal_item_id' => $renewalItemId,
+            'quote_line_id' => $lineId,
+            'item_title' => (string) ($line['item_title'] ?? ''),
             'price' => $price,
             'currency' => (string) ($line['currency'] ?? 'TRY'),
             'term' => $term,
+            'custom_term' => (string) ($line['custom_term'] ?? ''),
+            'vat_included' => (int) ($line['vat_included'] ?? 0),
+            'delivery_note' => (string) ($line['delivery_note'] ?? ''),
+            'note' => (string) ($line['note'] ?? ''),
+            'supplier_display' => (string) ($line['supplier_display'] ?? ''),
+            'contact_name' => (string) ($line['contact_name'] ?? ''),
+            'recipient_email' => (string) ($line['recipient_email'] ?? ''),
         ];
     }
 
