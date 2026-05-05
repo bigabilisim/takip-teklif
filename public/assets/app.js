@@ -336,12 +336,15 @@
         const url = String(link?.url || '');
         const label = String(link?.label || 'Tedarikçi');
         const createdAt = String(link?.created_at || '');
+        const mailStatus = String(link?.mail_status || '');
+        const mailStatusType = String(link?.mail_status_type || 'info').replace(/[^a-z0-9_-]/gi, '');
 
         return `
             <div class="supplier-link-card">
                 <div>
                     <strong>${escapeHtml(label)}</strong>
                     <span>${escapeHtml(createdAt)}</span>
+                    ${mailStatus ? `<span class="supplier-link-mail-status ${escapeHtml(mailStatusType)}">${escapeHtml(mailStatus)}</span>` : ''}
                 </div>
                 <input readonly value="${escapeHtml(url)}" aria-label="Tedarikçi teklif linki">
                 <div class="inline-actions">

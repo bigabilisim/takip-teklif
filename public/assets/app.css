@@ -1907,6 +1907,31 @@ td.actions {
     font-size: 12px;
 }
 
+.supplier-link-card .supplier-link-mail-status {
+    width: fit-content;
+    margin-top: 6px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: #eef7f4;
+    color: var(--primary-strong);
+    font-weight: 800;
+}
+
+.supplier-link-card .supplier-link-mail-status.sent {
+    background: #ddf7e7;
+    color: #1f6e3b;
+}
+
+.supplier-link-card .supplier-link-mail-status.failed {
+    background: #fde7e1;
+    color: #9f2c18;
+}
+
+.supplier-link-card .supplier-link-mail-status.skipped {
+    background: #fff3cd;
+    color: #7b4f00;
+}
+
 .supplier-link-card input[readonly] {
     min-width: 0;
     font-size: 13px;

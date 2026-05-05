@@ -531,19 +531,9 @@ function handle_supplier_price_request_mail(RenewalRepository $repo, int $renewa
 
         foreach ($recipients as $recipient) {
             $quoteRequest = $repo->createSupplierQuoteRequest((int) $row['id'], $recipient, $subject, $message, 'mail');
-            $body = supplier_price_request_body($row, $message, (string) $quoteRequest['url']);
-            $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
+            $result = send_supplier_quote_request_email($repo, $row, $recipient, $quoteRequest, $subject, $message);
             $ok = !empty($result['ok']);
             $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
-            $repo->logMail(
-                (int) $row['id'],
-                (string) $recipient['email'],
-                $subject,
-                $body,
-                $ok ? 'sent' : 'failed',
-                $error,
-                false
-            );
 
             if ($ok) {
                 $sent++;
@@ -596,6 +586,7 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
 {
     $wantsJson = wants_json_response();
     $created = [];
+    $redirectToCreatedLink = true;
     if (!csrf_is_valid()) {
         if ($wantsJson) {
             json_response(['ok' => false, 'message' => 'Oturum dogrulamasi basarisiz. Sayfayi yenileyip tekrar deneyin.'], 419);
@@ -625,13 +616,43 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
             throw new RuntimeException('Teklif linki olusturmak icin en az bir tedarikci yetkilisi secin veya manuel e-posta yazin.');
         }
 
+        $sendEmail = !empty($_POST['send_quote_email']);
+        $redirectToCreatedLink = !$sendEmail;
+        $mailSent = 0;
+        $mailFailed = 0;
+        $mailSkipped = 0;
+        $lastMailError = '';
+
         foreach ($recipients as $recipient) {
             $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $recipient, $subject, $message, 'manual');
-            $created[] = [
+            $createdLink = [
                 'label' => supplier_quote_recipient_label($recipient),
                 'url' => (string) $quoteRequest['url'],
                 'created_at' => date('d.m.Y H:i'),
             ];
+
+            if ($sendEmail) {
+                $email = trim((string) ($recipient['email'] ?? ''));
+                if ($email === '') {
+                    $mailSkipped++;
+                    $createdLink['mail_status'] = 'E-posta yok, sadece link oluşturuldu.';
+                    $createdLink['mail_status_type'] = 'skipped';
+                } else {
+                    $mailResult = send_supplier_quote_request_email($repo, $row, $recipient, $quoteRequest, $subject, $message);
+                    if (!empty($mailResult['ok'])) {
+                        $mailSent++;
+                        $createdLink['mail_status'] = 'Mail gönderildi.';
+                        $createdLink['mail_status_type'] = 'sent';
+                    } else {
+                        $mailFailed++;
+                        $lastMailError = (string) ($mailResult['error'] ?? 'transport-failed');
+                        $createdLink['mail_status'] = 'Mail gönderilemedi: ' . $lastMailError;
+                        $createdLink['mail_status_type'] = 'failed';
+                    }
+                }
+            }
+
+            $created[] = $createdLink;
         }
 
         $_SESSION['_supplier_quote_links'] ??= [];
@@ -641,15 +662,21 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
         }
         $_SESSION['_supplier_quote_links'][$renewalId] = array_slice(array_merge($created, $previous), 0, 12);
 
+        if ($sendEmail && $mailSent > 0) {
+            $repo->markSupplierPriceRequested((int) $row['id']);
+        }
+
+        $resultMessage = supplier_quote_link_result_message($sendEmail, $mailSent, $mailFailed, $mailSkipped, $lastMailError);
+
         if ($wantsJson) {
             json_response([
                 'ok' => true,
-                'message' => 'Tedarikci teklif linki olusturuldu.',
+                'message' => $resultMessage,
                 'links' => $created,
             ]);
         }
 
-        flash('success', 'Tedarikci teklif linki olusturuldu. Linki pencereden kopyalayabilirsiniz.');
+        flash($sendEmail && $mailFailed > 0 && $mailSent < 1 ? 'error' : 'success', $resultMessage);
     } catch (Throwable $e) {
         if ($wantsJson) {
             json_response(['ok' => false, 'message' => $e->getMessage()], 422);
@@ -657,11 +684,57 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
         flash('error', $e->getMessage());
     }
 
-    if (!empty($created) && count($created) === 1 && !empty($created[0]['url'])) {
+    if ($redirectToCreatedLink && !empty($created) && count($created) === 1 && !empty($created[0]['url'])) {
         redirect((string) $created[0]['url']);
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function send_supplier_quote_request_email(RenewalRepository $repo, array $row, array $recipient, array $quoteRequest, string $subject, string $message): array
+{
+    $email = trim((string) ($recipient['email'] ?? ''));
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return ['ok' => false, 'error' => 'Geçerli tedarikçi e-postası yok.'];
+    }
+
+    $body = supplier_price_request_body($row, $message, (string) ($quoteRequest['url'] ?? ''));
+    $result = Mailer::sendWithResult($email, $subject, $body, true);
+    $ok = !empty($result['ok']);
+    $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+
+    $repo->logMail(
+        (int) $row['id'],
+        $email,
+        $subject,
+        $body,
+        $ok ? 'sent' : 'failed',
+        $error,
+        false
+    );
+
+    return ['ok' => $ok, 'error' => $error];
+}
+
+function supplier_quote_link_result_message(bool $sendEmail, int $mailSent, int $mailFailed, int $mailSkipped, string $lastError = ''): string
+{
+    if (!$sendEmail) {
+        return 'Tedarikçi teklif linki oluşturuldu. Linki pencereden kopyalayabilirsiniz.';
+    }
+
+    if ($mailSent > 0 && $mailFailed < 1 && $mailSkipped < 1) {
+        return 'Tedarikçi teklif linki oluşturuldu ve mail gönderildi. Alıcı sayısı: ' . $mailSent;
+    }
+
+    if ($mailSent > 0) {
+        return 'Tedarikçi teklif linki oluşturuldu. Mail kısmen gönderildi. Başarılı: ' . $mailSent . ', başarısız: ' . $mailFailed . ', e-postasız: ' . $mailSkipped;
+    }
+
+    if ($mailSkipped > 0 && $mailFailed < 1) {
+        return 'Tedarikçi teklif linki oluşturuldu fakat mail gönderilecek e-posta bulunamadı.';
+    }
+
+    return 'Tedarikçi teklif linki oluşturuldu fakat mail gönderilemedi: ' . ($lastError ?: 'Alici sunucusu kabul etmedi.');
 }
 
 function handle_supplier_price_request_whatsapp(RenewalRepository $repo, int $renewalId): void
@@ -7940,8 +8013,8 @@ function render_supplier_price_request_dialog(array $row): string
                         <input type="hidden" name="message" value="<?= h($defaultMessage) ?>">
                         <div class="section-head compact">
                             <div>
-                                <h3>Teklif linki oluştur</h3>
-                                <span class="muted compact">Mail atmadan tedarikçinin teklif gireceği form linkini alın.</span>
+                                <h3>Manuel teklif linki</h3>
+                                <span class="muted compact">Linki oluşturup isterseniz aynı anda tedarikçiye mail olarak gönderin.</span>
                             </div>
                         </div>
                         <div class="recipient-picker compact">
@@ -7967,10 +8040,14 @@ function render_supplier_price_request_dialog(array $row): string
                             <?php endif; ?>
                         </div>
                         <label>
-                            Manuel e-posta
+                            Manuel e-posta alıcısı
                             <input type="email" name="custom_supplier_email" placeholder="tedarikci@firma.com">
                         </label>
-                        <button type="submit" class="button primary full">Teklif linki oluştur</button>
+                        <label class="checkbox-line supplier-send-mail-option">
+                            <input type="checkbox" name="send_quote_email" value="1" checked>
+                            <span>Oluşturulan linki e-posta olarak da gönder</span>
+                        </label>
+                        <button type="submit" class="button primary full">Link oluştur ve mail gönder</button>
                         <p class="muted compact" data-supplier-link-status hidden></p>
                     </form>
 

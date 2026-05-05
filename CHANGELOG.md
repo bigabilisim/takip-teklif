@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.22] - 2026-05-05
+
+- Manuel tedarikci teklif linki olustururken linkin e-posta olarak da gonderilmesi saglandi.
+- Olusturulan teklif linki kartlarinda mail gonderildi / gonderilemedi / e-posta yok durumlari gosterilmeye baslandi.
+- Tedarikciden fiyat al penceresindeki manuel link bolumu, mail gonderim davranisini daha net anlatacak sekilde duzenlendi.
+
 ## [1.0.21] - 2026-05-05
 
 - Takipteki urun ve hizmet kartlarinda 14 gun ve altinda kalan gun rengi sari-kirmizi skalasina baglandi.
