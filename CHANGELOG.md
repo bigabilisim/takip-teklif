@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.0] - 2026-05-08
+
+- Hızlı Takip ve Teklif Platformu ana sürümü V2 olarak başlatıldı.
+- PWA cache sürümü V2’ye yükseltilerek canlı kullanıcıların yeni arayüz ve ödeme akışı dosyalarını alması sağlandı.
+
 ## [1.0.72] - 2026-05-07
 
 - Sabit “30 gün cari hesap” ödeme yöntemi ödeme tanımlarından, yenileme formundan, tahsilat filtrelerinden ve akış şemasından kaldırıldı.
