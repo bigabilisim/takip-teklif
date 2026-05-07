@@ -4,6 +4,8 @@
 /storage/exchange_rates.json
 /storage/payment_link_secret.key
 /storage/backups/
+/storage/deploy-backups/
+/storage/deploy-verify/
 /storage/config/*.php
 /storage/logs/*.log
 /storage/logs/*.html

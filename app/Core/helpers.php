@@ -217,12 +217,17 @@ function permission_catalog(): array
         'Panel' => [
             'dashboard.view' => 'Dashboard goruntule',
             'dashboard.details' => 'Dashboard detaylarini ac/kapat',
+            'flows.view' => 'Akış şemalarını görüntüle',
         ],
         'Yenilemeler' => [
             'renewals.view' => 'Yenileme listesini goruntule',
             'renewals.details' => 'Yenileme detaylarini ac/kapat',
             'renewals.manage' => 'Yenileme ekle ve duzenle',
             'renewals.delete' => 'Yenileme sil',
+        ],
+        'Tahsilat' => [
+            'collections.view' => 'Tahsilat listesini goruntule',
+            'collections.manage' => 'Tahsilat maili gonder',
         ],
         'Musteriler' => [
             'customers.view' => 'Musterileri goruntule',

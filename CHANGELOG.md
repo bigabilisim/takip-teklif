@@ -1,5 +1,172 @@
 # Changelog
 
+## [1.0.56] - 2026-05-07
+
+- Sol menüye “Akış Şemaları” bölümü eklendi.
+- Müşteri ürün takip, teklif ve tahsilat süreçleri için mevcut kayıtlardan beslenen flowchart ekranı eklendi.
+- Flowchart ekranında bekleyen, tamamlanan ve acil işlem gerektiren adımlar renkli durum kartlarıyla görünür hale getirildi.
+
+## [1.0.55] - 2026-05-07
+
+- Ayarlar ekranındaki ayar düzenleme akışı popup pencereye taşındı.
+- Ayar kutuları pasif seçim kartları olarak kalır; Ayarla butonu ilgili ayarı modal pencerede açar.
+- Popup kapatılınca veya kaydetme sonrası ayar kartları tekrar pasif kutu düzenine döner.
+
+## [1.0.54] - 2026-05-07
+
+- Eski tarihli tamamlanmış kayıtların Tahsilat ekranına düşmesi engellendi.
+- Eski Yenileme giriş açıklaması, tahsilatı alınmış geçmiş kayıt mantığını daha net anlatacak şekilde güncellendi.
+
+## [1.0.53] - 2026-05-07
+
+- Dashboard üzerindeki yeni kayıt aksiyonu “Yeni Takip” menüsüne dönüştürüldü.
+- Yeni Takip menüsünden “Yeni Yenileme” ve “Eski Yenileme” seçenekleri açılır hale getirildi.
+
+## [1.0.52] - 2026-05-07
+
+- Ayarlar ekranında seçilen ayarın düzenleneceği ayrı bir sayfa üstü bölüm eklendi.
+- Ayar kutuları küçük seçim kartları olarak kaldı; Ayarla butonuyla ilgili form düzenleme alanına taşınır.
+- Sürükle-bırak sıralama kutu alanında korunacak şekilde düzenlendi.
+
+## [1.0.51] - 2026-05-07
+
+- Ayarlar ekranı modüler kart yapısına alındı.
+- Her ayar kartı aç/kapat düzeninde çalışır hale getirildi.
+- Ayar kartları sürükle-bırak ile sıralanabilir hale getirildi; sıralama tarayıcıda korunur.
+
+## [1.0.50] - 2026-05-06
+
+- Sol menüye Tahsilat ekranı eklendi.
+- Ödeme bekleyen yenilemeler; ödenmemiş, Havale / EFT, 30 gün cari ve seçim bekleyen filtreleriyle izlenebilir hale getirildi.
+- Tahsilat ekranından müşteri yetkililerine manuel tahsilat hatırlatma maili gönderimi eklendi.
+- Tahsilat mailinde ödeme / tercih linki, PDF özet linki, toplam tutar ve ödeme şartı bilgileri gösterilir.
+
+## [1.0.49] - 2026-05-06
+
+- Müşteri teklif linki görüntüleme sayacı eklendi.
+- Müşteri teklif ekranında “Revize iste” butonu ilk üç görüntülemede gizlendi; dördüncü görüntülemeden itibaren aktif olur.
+- Revize talebi buton gizliyken manuel gönderilmeye çalışılsa da sistem tarafından engellenir.
+
+## [1.0.48] - 2026-05-06
+
+- Müşteri teklif onayından sonra ödeme tamamlanmadan link tekrar açılırsa ödeme adımına devam edilebilir hale getirildi.
+- Kredi kartı seçimi, ödeme sağlayıcısından başarılı ödeme kaydı gelmeden “tamamlandı” kabul edilmez.
+- Ödeme tercih ekranında yarım kalan kredi kartı ödemeleri için müşteriye devam uyarısı gösterilir.
+
+## [1.0.47] - 2026-05-06
+
+- Müşteri yenileme teklifi başlığı Türkçe karakterlerle sabit yazılacak şekilde düzenlendi.
+- Müşteri teklif sayfasındaki başlık alanı daha belirgin, yumuşak çerçeveli bir kart olarak yeniden tasarlandı.
+- PDF/yazdırma görünümünde başlık sade ve Türkçe karakterleri bozmadan görünür hale getirildi.
+
+## [1.0.46] - 2026-05-06
+
+- Yenileme kaydına “Tedarikçiye cari bilgisini gönder” seçeneği eklendi.
+- Seçenek kapalıysa tedarikçi fiyat talebi maili, teklif formu ve onay/okundu akışlarında müşteri adı yerine “Cari bilgisi gizli” gösterilir.
+- Tedarikçi fiyat talebi mesajı, cari gizliliği tercihine göre otomatik hazırlanır.
+
+## [1.0.45] - 2026-05-06
+
+- Müşteri teklif geçmişi kayıtları yenileme kartı üzerinden silinebilir hale getirildi.
+- Silinen müşteri teklifinin satırları da temizlenir ve müşteriye bilgi maili gönderilmez.
+
+## [1.0.44] - 2026-05-06
+
+- Tedarikçiye giden teklif seçim mailindeki “Teklifiniz seçildi” ifadesi “Onaylandı” olarak değiştirildi.
+- Tedarikçi teklif onayı akışındaki panel, buton ve okundu bildirim metinleri onay diliyle tutarlı hale getirildi.
+
+## [1.0.43] - 2026-05-06
+
+- Müşteri teklif/PDF sayfasına şirket anteti eklendi.
+- Teklif çıktısında logo, firma adı, e-posta ve web adresi görünür hale getirildi.
+- Müşteri teklif sayfasının genişliği antet ve kalemler için daha rahat okunacak şekilde sabitlendi.
+
+## [1.0.42] - 2026-05-06
+
+- Müşteri teklif sayfasındaki ana başlık daha kompakt ve tek satır kalacak şekilde düzenlendi.
+- Teklif kalemlerinde ürün adı ve fiyat kolonları yeniden hizalanarak ürün adının dikey kırılması giderildi.
+- Müşteri teklif sayfasına PDF olarak yazdırma butonu ve yazdırma görünümü eklendi.
+
+## [1.0.41] - 2026-05-06
+
+- Tedarikçi teklif karşılaştırma kartında kalem başlığının dikey kırılmasına neden olan kolon sıkışması düzeltildi.
+- Seçili tedarikçi teklifi özeti daha okunur, ayrı bir bilgi kutusu gibi düzenlendi.
+
+## [1.0.40] - 2026-05-06
+
+- Yenileme kartlarındaki müşteri maili ve WhatsApp gönderimleri tek “Müşteriye gönder” butonunda birleştirildi.
+- Müşteriye gönder penceresi, tedarikçi fiyat talebi akışına benzer iki sütunlu mail ve WhatsApp düzenine alındı.
+- Dashboard ve yenileme listesinde ayrı mail/WhatsApp butonları sadeleştirildi.
+
+## [1.0.39] - 2026-05-06
+
+- HTML ve düz metin mail gönderimleri, logo ayarı varsa standart inline logo ile markalı hale getirildi.
+- Mail gövdelerinde logo dış bağlantı yerine CID gömülü görsel olarak kullanılacak şekilde merkezileştirildi.
+- Yeni eklenen mail şablonlarında logo unutulmaması için kontrol `Mailer` katmanına taşındı.
+
+## [1.0.38] - 2026-05-06
+
+- Tedarikçi fiyat talebi maillerine tedarik listesinden çıkış bağlantısı eklendi.
+- Tedarikçiler için kategori bazlı veya tüm kategorilerden çıkış tercihi tutulur hale getirildi.
+- Tedarikçi fiyat talebi alıcıları çıkış tercihlerine göre filtrelenir hale getirildi.
+
+## [1.0.37] - 2026-05-06
+
+- Tedarikçi fiyat talebi mail başlığı Türkçe büyük harflerle sabitlendi.
+- Panel, public formlar ve ayar ekranlarındaki Türkçe karakter eksikleri düzeltildi.
+
+## [1.0.36] - 2026-05-06
+
+- Müşteriler ekranında tüm cariler ve son eklenen cariler alanları yarı yarıya iki sütun olacak şekilde ayarlandı.
+
+## [1.0.35] - 2026-05-06
+
+- Müşteriler ekranı iki sütuna ayrıldı: solda canlı filtrelenen tüm cariler, sağda son eklenen 10 cari kartı gösterilir hale getirildi.
+- Müşteri listesine alfabetik canlı filtre alanı eklendi.
+
+## [1.0.34] - 2026-05-06
+
+- Tedarikçi teklif formunda KDV seçimi checkbox yerine KDV Dahil / KDV Hariç hızlı seçim alanına dönüştürüldü.
+
+## [1.0.33] - 2026-05-06
+
+- Tedarikçi teklif formunda ödeme seçeneği fiyat kartları masaüstünde satır başına iki kart olacak şekilde sıkılaştırıldı.
+
+## [1.0.32] - 2026-05-06
+
+- Tedarikçi teklif formu başlığı tek satıra daha rahat sığacak şekilde küçültüldü.
+
+## [1.0.31] - 2026-05-06
+
+- Tedarikçi teklif formunda nakliye/teslim şartı ve kalem notu alanları KDV dahil seçeneğinin altına taşındı.
+
+## [1.0.30] - 2026-05-06
+
+- Tedarikçi teklif formundaki fiyat girişi açıklaması para birimi seçiminin hemen altına taşındı.
+
+## [1.0.29] - 2026-05-06
+
+- Tedarikçi teklif formu daha kompakt ve yönlendirici bir fiyat giriş akışına dönüştürüldü.
+- Para birimi, birim fiyat, vade seçenekleri, toplam önizleme, KDV ve not alanları daha okunur kart düzeniyle ayrıldı.
+
+## [1.0.28] - 2026-05-06
+
+- Tedarikçi teklif formunda KDV dahil seçeneği varsayılan kapalı hale getirildi.
+- Tedarikçi fiyat alanları seçili para birimini, birim fiyatı ve adetle hesaplanan toplam tutarı aynı kartta gösterecek şekilde düzenlendi.
+
+## [1.0.27] - 2026-05-05
+
+- Tedarikçiye giden "teklifiniz seçildi" mailine kişiye özel Okudum bağlantısı eklendi.
+- Tedarikçi seçim maili okunma durumu, teklif kartlarında okundu / okunmadı olarak görünür hale getirildi.
+- Tedarikçi Okudum bağlantısına ilk kez tıkladığında yöneticilere web push bildirimi gönderilmesi sağlandı.
+
+## [1.0.26] - 2026-05-05
+
+- PayTR iFrame API ile kredi kartı ödeme entegrasyonu eklendi.
+- Ayarlar bölümüne PayTR mağaza no, merchant key, merchant salt, test/canlı mod, taksit ve bildirim URL ayarları eklendi.
+- Kredi kartı ödeme akışı PayTR aktif ve eksiksizse PayTR formuna, aksi durumda mevcut iyzico akışına yönlenecek şekilde düzenlendi.
+- PayTR ödeme callback doğrulaması, ödeme sonucu kaydı ve müşteri ödeme sonucu ekranı eklendi.
+
 ## [1.0.25] - 2026-05-05
 
 - Tedarikçi teklif paneline tüm tedarikçi taleplerini gösteren kompakt talep listesi eklendi.

@@ -9,23 +9,26 @@ final class MailTemplate
     private const LAYOUT_GUARD_START = '/* renewal-template-layout-guard:start */';
     private const LAYOUT_GUARD_END = '/* renewal-template-layout-guard:end */';
     private const TEMPLATE_TEXT_REPLACEMENTS = [
-        'kaydi icin yenileme sureci yaklasiyor.' => 'kaydı için yenileme süreci yaklaşıyor.',
+        'kaydı için yenileme süreci yaklasiyor.' => 'kaydı için yenileme süreci yaklaşıyor.',
         'KALAN SURE' => 'KALAN SÜRE',
-        'Kalan sure' => 'Kalan süre',
-        'kalan sure' => 'kalan süre',
+        'Kalan süre' => 'Kalan süre',
+        'kalan süre' => 'kalan süre',
         'YENILEME TARIHI' => 'YENİLEME TARİHİ',
         'Urun / hizmet' => 'Ürün / hizmet',
         'URUN / HIZMET' => 'ÜRÜN / HİZMET',
         'Lisans / referans' => 'Bir Önceki Fatura Numarası',
         'Bir önceki fatura no' => 'Bir Önceki Fatura Numarası',
         'Bir onceki fatura no' => 'Bir Önceki Fatura Numarası',
-        'Odeme sekli' => 'Ödeme şekli',
+        'Ödeme sekli' => 'Ödeme şekli',
         'ODEME SEKLI' => 'ÖDEME ŞEKLİ',
         'Urun ve Hizmet' => 'Ürün ve Hizmet',
+        'TEDARIKÇI FIYAT TALEBI' => 'TEDARİKÇİ FİYAT TALEBİ',
+        'TEDARIKCI FIYAT TALEBI' => 'TEDARİKÇİ FİYAT TALEBİ',
+        'FIYAT TALEBI' => 'FİYAT TALEBİ',
         '{{license_key}}' => '{{previous_invoice_number}}',
-        'Tedarikci' => 'Tedarikçi',
+        'Tedarikçi' => 'Tedarikçi',
         'TEDARIKCI' => 'TEDARİKÇİ',
-        'otomatik olusturuldu' => 'otomatik oluşturuldu',
+        'otomatik oluşturuldu' => 'otomatik oluşturuldu',
     ];
 
     public static function defaultHtml(): string
@@ -717,6 +720,39 @@ CSS;
         ];
     }
 
+    public static function prepareBrandedMail(array $settings, string $body, bool $isHtml, array $inlineAttachments = []): array
+    {
+        $logoAttachments = self::logoInlineAttachments($settings);
+        if ($logoAttachments === []) {
+            return [
+                'body' => $body,
+                'is_html' => $isHtml,
+                'inline_attachments' => $inlineAttachments,
+            ];
+        }
+
+        if (!$isHtml) {
+            $body = self::plainTextBrandedHtml($settings, $body);
+            $isHtml = true;
+        }
+
+        $logoCid = (string) $logoAttachments[0]['cid'];
+        $logoSrc = 'cid:' . $logoCid;
+        $inlineAttachments = self::mergeInlineAttachments($inlineAttachments, $logoAttachments);
+        $body = str_replace('{{logo_url}}', $logoSrc, $body);
+        $body = self::rewriteTemplateLogoSource($body, $logoSrc);
+
+        if (!self::bodyContainsLogo($body, $logoCid)) {
+            $body = self::injectStandardLogo($settings, $body, $logoSrc);
+        }
+
+        return [
+            'body' => $body,
+            'is_html' => true,
+            'inline_attachments' => $inlineAttachments,
+        ];
+    }
+
     private static function customerInfoContactSummary(array $values): string
     {
         $contacts = $values['contacts'] ?? [];
@@ -995,6 +1031,79 @@ CSS;
             'name' => basename($path),
             'content_type' => $mimeType,
         ]];
+    }
+
+    private static function plainTextBrandedHtml(array $settings, string $body): string
+    {
+        $appName = self::escape((string) \app_config('app.name', 'Yenileme Takip Sistemi'));
+        $content = nl2br(self::escape($body), false);
+
+        return '<!doctype html><html><head><meta charset="UTF-8"><meta name="color-scheme" content="light"></head>'
+            . '<body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+            . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+            . '<tr><td style="padding:26px;">'
+            . '<div style="margin:0 0 18px;text-align:center;"><img data-template-logo="1" src="{{logo_url}}" alt="' . $appName . '" style="display:inline-block;width:auto;max-width:150px;max-height:58px;height:auto;object-fit:contain;"></div>'
+            . '<div style="color:#26322e;font-size:15px;line-height:1.6;white-space:normal;">' . $content . '</div>'
+            . '</td></tr></table>'
+            . '<p style="margin:14px 0 0;color:#607069;font-size:12px;">' . $appName . '</p>'
+            . '</td></tr></table></body></html>';
+    }
+
+    private static function mergeInlineAttachments(array $inlineAttachments, array $logoAttachments): array
+    {
+        $merged = [];
+        foreach (array_merge($inlineAttachments, $logoAttachments) as $attachment) {
+            if (!is_array($attachment)) {
+                continue;
+            }
+
+            $cid = (string) ($attachment['cid'] ?? '');
+            if ($cid === '') {
+                $cid = 'inline_' . substr(hash('sha256', (string) ($attachment['path'] ?? json_encode($attachment))), 0, 16);
+            }
+
+            $merged[$cid] = array_merge($attachment, ['cid' => $cid]);
+        }
+
+        return array_values($merged);
+    }
+
+    private static function rewriteTemplateLogoSource(string $body, string $logoSrc): string
+    {
+        return (string) preg_replace_callback(
+            '#<img\b(?=[^>]*(?:data-template-logo|brand-logo))[^>]*>#i',
+            static function (array $matches) use ($logoSrc): string {
+                $tag = (string) $matches[0];
+                if (preg_match('#\bsrc=(["\'])(.*?)\1#i', $tag) === 1) {
+                    return (string) preg_replace('#\bsrc=(["\'])(.*?)\1#i', 'src="${1}' . $logoSrc . '${1}', $tag, 1);
+                }
+
+                return preg_replace('#<img\b#i', '<img src="' . $logoSrc . '"', $tag, 1) ?? $tag;
+            },
+            $body
+        );
+    }
+
+    private static function bodyContainsLogo(string $body, string $logoCid): bool
+    {
+        return stripos($body, 'cid:' . $logoCid) !== false
+            || stripos($body, 'data-template-logo') !== false;
+    }
+
+    private static function injectStandardLogo(array $settings, string $body, string $logoSrc): string
+    {
+        $appName = self::escape((string) \app_config('app.name', 'Yenileme Takip Sistemi'));
+        $logoBlock = '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:18px 24px 0;"><tr><td align="center">'
+            . '<img data-template-logo="1" src="' . self::escape($logoSrc) . '" alt="' . $appName . '" style="display:inline-block;width:auto;max-width:150px;max-height:58px;height:auto;object-fit:contain;">'
+            . '</td></tr></table>';
+
+        if (preg_match('#<body\b[^>]*>#i', $body) === 1) {
+            return (string) preg_replace('#(<body\b[^>]*>)#i', '$1' . $logoBlock, $body, 1);
+        }
+
+        return $logoBlock . $body;
     }
 
     private static function localLogoPath(array $settings): ?string

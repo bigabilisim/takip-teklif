@@ -99,17 +99,17 @@ foreach ($priceRequestRows as $row) {
     $days = days_until($row['renewal_date']);
     $subject = sprintf('Lisans fiyat talebi: %s', $row['title']);
     $statusLine = $days !== null && $days < 0
-        ? sprintf('Yenileme tarihi %d gun once gecti.', abs($days))
-        : sprintf('Yenilemeye kalan sure: %d gun.', max(0, (int) $days));
+        ? sprintf('Yenileme tarihi %d gün önce geçti.', abs($days))
+        : sprintf('Yenilemeye kalan süre: %d gün.', max(0, (int) $days));
     $anySent = false;
 
     foreach ($recipients as $recipient) {
-        $body = implode("\n", [
+        $message = implode("\n", [
             'Merhaba ' . ($recipient['name'] ?: ''),
             '',
-            sprintf('%s icin asagidaki lisans yenilemesi yaklasiyor. Guncel yenileme fiyatini ve varsa yenileme kosullarini iletebilir misiniz?', $row['company_name']),
+            sprintf('%s için aşağıdaki lisans yenilemesi yaklaşıyor. Güncel yenileme fiyatını ve varsa yenileme koşullarını iletebilir misiniz?', $row['company_name']),
             '',
-            'Urun: ' . $row['title'],
+            'Ürün: ' . $row['title'],
             'Marka: ' . (string) ($row['brand'] ?: '-'),
             'Lisans / referans no: ' . (string) ($row['license_key'] ?: '-'),
             'Yenileme tarihi: ' . date('d.m.Y', strtotime($row['renewal_date'])),
@@ -118,8 +118,15 @@ foreach ($priceRequestRows as $row) {
             'Notlar:',
             (string) ($row['notes'] ?: '-'),
             '',
-            'Tesekkurler,',
+            'Teşekkürler,',
             'Yenileme Takip Sistemi',
+        ]);
+        $quoteRequest = $repo->createSupplierQuoteRequest((int) $row['id'], $recipient, $subject, $message, 'mail');
+        $body = implode("\n", [
+            $message,
+            '',
+            'Teklif formu: ' . (string) ($quoteRequest['url'] ?? ''),
+            'Tedarik listesinden çık: ' . (string) ($quoteRequest['unsubscribe_url'] ?? ''),
         ]);
 
         $ok = Mailer::send($recipient['email'], $subject, $body);

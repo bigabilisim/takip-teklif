@@ -421,6 +421,8 @@ ensure_table($pdo, 'push_subscriptions', "
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
 
+new App\Models\RenewalRepository();
+
 echo "Migration tamamlandi.\n";
 
 function ensure_table(PDO $pdo, string $table, string $sql): void

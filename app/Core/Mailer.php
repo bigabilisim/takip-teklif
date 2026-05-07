@@ -19,6 +19,10 @@ final class Mailer
         try {
             $settings = self::settings();
             $driver = $settings['mail.driver'] ?? 'log';
+            $branded = MailTemplate::prepareBrandedMail($settings, $body, $isHtml, $inlineAttachments);
+            $body = (string) $branded['body'];
+            $isHtml = (bool) $branded['is_html'];
+            $inlineAttachments = is_array($branded['inline_attachments'] ?? null) ? $branded['inline_attachments'] : [];
             $inlineAttachments = $isHtml ? self::prepareInlineAttachments($inlineAttachments) : [];
             $attachments = self::prepareAttachments($attachments);
 
@@ -48,7 +52,7 @@ final class Mailer
         [$headers, $message] = self::mailHeadersAndBody($settings, $body, $isHtml, $inlineAttachments, $attachments);
 
         if (!mail($to, $subject, $message, implode("\r\n", $headers))) {
-            throw new RuntimeException('PHP mail() gonderimi basarisiz.');
+            throw new RuntimeException('PHP mail() gönderimi başarısız.');
         }
     }
 
@@ -73,7 +77,7 @@ final class Mailer
         );
 
         if (file_put_contents($path, $entry, FILE_APPEND | LOCK_EX) === false) {
-            throw new RuntimeException('Mail log dosyasina yazilamadi.');
+            throw new RuntimeException('Mail log dosyasına yazılamadı.');
         }
     }
 
@@ -85,13 +89,13 @@ final class Mailer
         $timeout = max(5, (int) ($settings['smtp.timeout'] ?? 20));
 
         if ($host === '') {
-            throw new RuntimeException('SMTP host bos olamaz.');
+            throw new RuntimeException('SMTP host boş olamaz.');
         }
 
         $remote = ($encryption === 'ssl' ? 'ssl://' : 'tcp://') . $host . ':' . $port;
         $socket = @stream_socket_client($remote, $errno, $errstr, $timeout, STREAM_CLIENT_CONNECT);
         if (!is_resource($socket)) {
-            throw new RuntimeException('SMTP baglantisi kurulamadi: ' . $errstr);
+            throw new RuntimeException('SMTP bağlantısı kurulamadı: ' . $errstr);
         }
 
         stream_set_timeout($socket, $timeout);
@@ -103,7 +107,7 @@ final class Mailer
             if ($encryption === 'tls') {
                 self::smtpCommand($socket, 'STARTTLS', [220]);
                 if (!stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
-                    throw new RuntimeException('SMTP TLS baslatilamadi.');
+                    throw new RuntimeException('SMTP TLS başlatılamadı.');
                 }
                 self::smtpCommand($socket, 'EHLO ' . self::hostname(), [250]);
             }
@@ -190,13 +194,13 @@ final class Mailer
         curl_close($ch);
 
         if ($response === false || $error !== '') {
-            throw new RuntimeException('Microsoft Graph baglantisi basarisiz: ' . $error);
+            throw new RuntimeException('Microsoft Graph bağlantısı başarısız: ' . $error);
         }
 
         if ($status < 200 || $status >= 300) {
             $decoded = json_decode((string) $response, true);
             $message = $decoded['error']['message'] ?? ('HTTP ' . $status);
-            throw new RuntimeException('Microsoft 365 mail gonderimi basarisiz: ' . $message);
+            throw new RuntimeException('Microsoft 365 mail gönderimi başarısız: ' . $message);
         }
     }
 
@@ -210,7 +214,7 @@ final class Mailer
         }
 
         if (empty($token['refresh_token'])) {
-            throw new RuntimeException('Microsoft 365 baglantisi yapilmamis.');
+            throw new RuntimeException('Microsoft 365 bağlantısı yapılmamış.');
         }
 
         $fresh = self::microsoftTokenRequest($settings, [
@@ -246,12 +250,12 @@ final class Mailer
         curl_close($ch);
 
         if ($response === false || $error !== '') {
-            throw new RuntimeException('Microsoft token baglantisi basarisiz: ' . $error);
+            throw new RuntimeException('Microsoft token bağlantısı başarısız: ' . $error);
         }
 
         $decoded = json_decode((string) $response, true);
         if (!is_array($decoded)) {
-            throw new RuntimeException('Microsoft token yaniti okunamadi.');
+            throw new RuntimeException('Microsoft token yanıtı okunamadı.');
         }
 
         if ($status >= 400) {
@@ -286,7 +290,7 @@ final class Mailer
 
         $code = (int) substr($response, 0, 3);
         if (!in_array($code, $expected, true)) {
-            throw new RuntimeException('SMTP hata yaniti: ' . trim($response));
+            throw new RuntimeException('SMTP hata yanıtı: ' . trim($response));
         }
 
         return $response;
@@ -336,7 +340,7 @@ final class Mailer
             foreach ($attachments as $attachment) {
                 $content = file_get_contents($attachment['path']);
                 if ($content === false) {
-                    throw new RuntimeException('Mail eki okunamadi: ' . $attachment['name']);
+                    throw new RuntimeException('Mail eki okunamadı: ' . $attachment['name']);
                 }
 
                 $parts[] = '--' . $boundary;
@@ -384,7 +388,7 @@ final class Mailer
         foreach ($inlineAttachments as $attachment) {
             $content = file_get_contents($attachment['path']);
             if ($content === false) {
-                throw new RuntimeException('Gomulu mail gorseli okunamadi: ' . $attachment['name']);
+                throw new RuntimeException('Gömülü mail görseli okunamadı: ' . $attachment['name']);
             }
 
             $parts[] = '--' . $boundary;
@@ -498,7 +502,7 @@ final class Mailer
     {
         $email = trim((string) ($settings['mail.from_email'] ?? ''));
         if ($email === '') {
-            throw new RuntimeException('Gonderen e-posta adresi bos olamaz.');
+            throw new RuntimeException('Gönderen e-posta adresi boş olamaz.');
         }
 
         return $email;

@@ -32,13 +32,318 @@
         });
     }
 
+    const initSettingsBoard = () => {
+        const board = document.querySelector('[data-settings-board]');
+        if (!board) {
+            return;
+        }
+
+        const orderKey = 'takip.settings.cardOrder';
+
+        const readJson = (key, fallback) => {
+            try {
+                const value = window.localStorage?.getItem(key);
+                return value ? JSON.parse(value) : fallback;
+            } catch (error) {
+                return fallback;
+            }
+        };
+
+        const writeJson = (key, value) => {
+            try {
+                window.localStorage?.setItem(key, JSON.stringify(value));
+            } catch (error) {
+                // Tarayıcı depolaması kapalıysa ayarlar yine normal çalışır.
+            }
+        };
+
+        try {
+            window.localStorage?.removeItem('takip.settings.activeCard');
+            window.localStorage?.removeItem('takip.settings.cardOpen');
+        } catch (error) {
+            // Eski ayarlar görünümü kayıtları temizlenemese de ekran çalışmaya devam eder.
+        }
+
+        const allCards = () => Array.from(document.querySelectorAll('[data-settings-card]'));
+        const boardCards = () => Array.from(board.querySelectorAll(':scope > [data-settings-card]'));
+
+        const flattenCards = () => {
+            Array.from(board.querySelectorAll('[data-settings-card]')).forEach((card) => board.appendChild(card));
+            board.querySelectorAll('.settings-side').forEach((side) => {
+                if (!side.querySelector('[data-settings-card]')) {
+                    side.remove();
+                }
+            });
+        };
+
+        const dialog = document.createElement('dialog');
+        dialog.className = 'app-dialog settings-dialog';
+        dialog.innerHTML = `
+            <div class="app-dialog-body settings-dialog-body">
+                <div class="section-head dialog-head">
+                    <div>
+                        <h2 data-settings-dialog-title>Ayar</h2>
+                        <span>Ayarları düzenleyip kaydettiğinizde pencere kapanır ve kutular pasif hale döner.</span>
+                    </div>
+                    <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+                </div>
+                <div class="settings-dialog-slot" data-settings-dialog-slot></div>
+            </div>
+        `;
+        document.body.appendChild(dialog);
+        const dialogSlot = dialog.querySelector('[data-settings-dialog-slot]');
+        const dialogTitle = dialog.querySelector('[data-settings-dialog-title]');
+
+        const savedOrder = readJson(orderKey, []);
+        flattenCards();
+        const cardsByKey = new Map(boardCards().map((card) => [card.dataset.settingsKey || '', card]));
+        savedOrder.forEach((key) => {
+            const card = cardsByKey.get(key);
+            if (card) {
+                board.appendChild(card);
+            }
+        });
+        boardCards().forEach((card) => {
+            if (!savedOrder.includes(card.dataset.settingsKey || '')) {
+                board.appendChild(card);
+            }
+        });
+
+        const saveOrder = () => {
+            const currentOrder = readJson(orderKey, []);
+            const visibleKeys = boardCards().map((card) => card.dataset.settingsKey || '').filter(Boolean);
+            const activeCard = dialogSlot.querySelector('[data-settings-card]');
+            const selectedKey = activeCard?.dataset.settingsKey || '';
+            const ordered = currentOrder.filter((key) => key === selectedKey || visibleKeys.includes(key));
+            visibleKeys.forEach((key) => {
+                if (!ordered.includes(key)) {
+                    ordered.push(key);
+                }
+            });
+            if (selectedKey && !ordered.includes(selectedKey)) {
+                ordered.push(selectedKey);
+            }
+            writeJson(orderKey, ordered);
+        };
+
+        const restoreBoardOrder = () => {
+            const order = readJson(orderKey, []);
+            const map = new Map(boardCards().map((card) => [card.dataset.settingsKey || '', card]));
+            order.forEach((key) => {
+                const card = map.get(key);
+                if (card) {
+                    board.appendChild(card);
+                }
+            });
+            boardCards().forEach((card) => {
+                if (!order.includes(card.dataset.settingsKey || '')) {
+                    board.appendChild(card);
+                }
+            });
+        };
+
+        const collapseCard = (card) => {
+            const toggleButton = card.querySelector('.settings-toggle');
+            card.classList.add('settings-card-collapsed');
+            card.classList.remove('settings-card-active');
+            if (toggleButton) {
+                toggleButton.textContent = 'Ayarla';
+                toggleButton.setAttribute('aria-expanded', 'false');
+            }
+        };
+
+        const closeActiveCard = () => {
+            const activeCard = dialogSlot.querySelector('[data-settings-card]');
+            if (!activeCard) {
+                return;
+            }
+
+            collapseCard(activeCard);
+            board.appendChild(activeCard);
+            restoreBoardOrder();
+        };
+
+        const openCard = (card) => {
+            const currentActive = dialogSlot.querySelector('[data-settings-card]');
+            if (currentActive === card) {
+                dialog.close();
+                return;
+            }
+
+            if (currentActive) {
+                collapseCard(currentActive);
+                board.appendChild(currentActive);
+            }
+
+            allCards().forEach((item) => {
+                if (item !== card) {
+                    collapseCard(item);
+                }
+            });
+
+            card.classList.remove('settings-card-collapsed');
+            card.classList.add('settings-card-active');
+            const toggleButton = card.querySelector('.settings-toggle');
+            toggleButton.textContent = 'Kapat';
+            toggleButton.setAttribute('aria-expanded', 'true');
+            const title = card.querySelector(':scope > .section-head h2')?.textContent?.trim() || 'Ayar';
+            if (dialogTitle) {
+                dialogTitle.textContent = title;
+            }
+            dialogSlot.appendChild(card);
+            restoreBoardOrder();
+            if (dialog.showModal && !dialog.open) {
+                dialog.showModal();
+            }
+        };
+
+        dialog.addEventListener('close', closeActiveCard);
+
+        allCards().forEach((card) => {
+            if (card.dataset.settingsPrepared === '1') {
+                return;
+            }
+
+            const key = card.dataset.settingsKey || '';
+            const header = Array.from(card.children).find((child) => child.classList?.contains('section-head'));
+            if (!header) {
+                return;
+            }
+
+            const body = document.createElement('div');
+            body.className = 'settings-card-body';
+            while (header.nextSibling) {
+                body.appendChild(header.nextSibling);
+            }
+            card.appendChild(body);
+
+            const tools = document.createElement('div');
+            tools.className = 'settings-card-tools';
+
+            const dragHandle = document.createElement('button');
+            dragHandle.type = 'button';
+            dragHandle.className = 'settings-drag-handle';
+            dragHandle.setAttribute('aria-label', 'Ayar kartını sırala');
+            dragHandle.textContent = 'Sırala';
+
+            const toggleButton = document.createElement('button');
+            toggleButton.type = 'button';
+            toggleButton.className = 'settings-toggle';
+            toggleButton.setAttribute('aria-expanded', 'false');
+
+            tools.append(dragHandle, toggleButton);
+            header.appendChild(tools);
+
+            collapseCard(card);
+
+            header.addEventListener('click', (event) => {
+                if (event.target.closest('a, button, input, select, textarea, label')) {
+                    return;
+                }
+                if (card.parentElement === dialogSlot) {
+                    return;
+                }
+                openCard(card);
+            });
+
+            toggleButton.addEventListener('click', () => {
+                openCard(card);
+            });
+
+            let dragFromHandle = false;
+            dragHandle.addEventListener('pointerdown', () => {
+                dragFromHandle = true;
+            });
+            dragHandle.addEventListener('pointerup', () => {
+                dragFromHandle = false;
+            });
+            dragHandle.addEventListener('pointercancel', () => {
+                dragFromHandle = false;
+            });
+            dragHandle.addEventListener('keydown', () => {
+                dragFromHandle = true;
+            });
+            dragHandle.addEventListener('keyup', () => {
+                dragFromHandle = false;
+            });
+
+            card.draggable = true;
+            card.addEventListener('dragstart', (event) => {
+                if (card.parentElement !== board) {
+                    event.preventDefault();
+                    return;
+                }
+
+                if (!dragFromHandle && !event.target.closest('.settings-drag-handle')) {
+                    event.preventDefault();
+                    return;
+                }
+
+                card.classList.add('settings-card-dragging');
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', key);
+            });
+
+            card.addEventListener('dragend', () => {
+                dragFromHandle = false;
+                card.classList.remove('settings-card-dragging');
+                boardCards().forEach((item) => item.classList.remove('settings-card-drag-over'));
+                saveOrder();
+            });
+
+            card.dataset.settingsPrepared = '1';
+        });
+
+        const hashTarget = window.location.hash ? document.querySelector(window.location.hash) : null;
+        if (hashTarget?.matches('[data-settings-card]')) {
+            openCard(hashTarget);
+        }
+
+        const getDragAfterElement = (y) => boardCards()
+            .filter((card) => !card.classList.contains('settings-card-dragging'))
+            .reduce((closest, child) => {
+                const box = child.getBoundingClientRect();
+                const offset = y - box.top - (box.height / 2);
+                if (offset < 0 && offset > closest.offset) {
+                    return { offset, element: child };
+                }
+                return closest;
+            }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
+
+        board.addEventListener('dragover', (event) => {
+            const dragging = board.querySelector(':scope > .settings-card-dragging');
+            if (!dragging) {
+                return;
+            }
+
+            event.preventDefault();
+            const afterElement = getDragAfterElement(event.clientY);
+            boardCards().forEach((card) => card.classList.remove('settings-card-drag-over'));
+            if (afterElement) {
+                afterElement.classList.add('settings-card-drag-over');
+                board.insertBefore(dragging, afterElement);
+            } else {
+                board.appendChild(dragging);
+            }
+        });
+
+        board.addEventListener('drop', (event) => {
+            if (board.querySelector(':scope > .settings-card-dragging')) {
+                event.preventDefault();
+                saveOrder();
+            }
+        });
+    };
+
+    initSettingsBoard();
+
     const contactRow = (index) => `
         <div class="contact-entry" data-contact-row>
-            <label>Yetkili adi <input name="contacts[${index}][full_name]" data-contact-name></label>
+            <label>Yetkili adı <input name="contacts[${index}][full_name]" data-contact-name></label>
             <label>E-posta <input type="email" name="contacts[${index}][email]" data-contact-email></label>
             <label>Telefon <input name="contacts[${index}][phone]" data-contact-phone></label>
-            <label class="checkline"><input type="checkbox" name="contacts[${index}][notify_enabled]" value="1" checked> Bilgilendirme gonder</label>
-            <button type="button" class="button small danger" data-remove-contact>Kaldir</button>
+            <label class="checkline"><input type="checkbox" name="contacts[${index}][notify_enabled]" value="1" checked> Bilgilendirme gönder</label>
+            <button type="button" class="button small danger" data-remove-contact>Kaldır</button>
         </div>
     `;
 
@@ -76,6 +381,53 @@
                 addContactRow(contactEditor);
             }
         });
+    });
+
+    document.querySelectorAll('[data-customer-board]').forEach((board) => {
+        const input = board.querySelector('[data-customer-filter-input]');
+        const cards = Array.from(board.querySelectorAll('[data-customer-card]'));
+        const emptyState = board.querySelector('[data-customer-empty]');
+        const status = board.querySelector('[data-customer-filter-status]');
+        const normalizeText = (value) => String(value || '')
+            .toLocaleLowerCase('tr-TR')
+            .replaceAll('ı', 'i')
+            .replaceAll('ğ', 'g')
+            .replaceAll('ü', 'u')
+            .replaceAll('ş', 's')
+            .replaceAll('ö', 'o')
+            .replaceAll('ç', 'c')
+            .replaceAll('İ', 'i')
+            .replaceAll('Ğ', 'g')
+            .replaceAll('Ü', 'u')
+            .replaceAll('Ş', 's')
+            .replaceAll('Ö', 'o')
+            .replaceAll('Ç', 'c')
+            .trim();
+
+        const syncCustomerFilter = () => {
+            const query = normalizeText(input?.value || '');
+            let visible = 0;
+            cards.forEach((card) => {
+                const name = normalizeText(card.dataset.customerName || '');
+                const haystack = normalizeText(card.dataset.customerFilter || '');
+                const matches = query === ''
+                    || name.startsWith(query)
+                    || (query.length > 1 && haystack.includes(query));
+                card.hidden = !matches;
+                if (matches) {
+                    visible += 1;
+                }
+            });
+            if (emptyState) {
+                emptyState.hidden = visible !== 0;
+            }
+            if (status) {
+                status.textContent = `${visible} cari listeleniyor`;
+            }
+        };
+
+        input?.addEventListener('input', syncCustomerFilter);
+        syncCustomerFilter();
     });
 
     const reminderEditor = document.querySelector('[data-reminder-editor]');
@@ -289,6 +641,44 @@
         offerForm.addEventListener('input', syncCustomerOfferTotals);
         offerForm.addEventListener('change', syncCustomerOfferTotals);
         syncCustomerOfferTotals();
+    });
+
+    document.querySelectorAll('[data-supplier-quote-card]').forEach((quoteCard) => {
+        const currencySelect = quoteCard.querySelector('[data-supplier-price-currency]');
+        const quantity = Math.max(0, Number(String(quoteCard.dataset.quantity || '1').replace(',', '.')) || 1);
+        const quantityFormatter = new Intl.NumberFormat('tr-TR', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+        const numberValue = (input) => {
+            const value = String(input?.value || '').replace(',', '.');
+            const parsed = Number(value);
+
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const moneyFormatter = () => new Intl.NumberFormat('tr-TR', {
+            style: 'currency',
+            currency: currencySelect?.value || 'TRY',
+        });
+
+        const syncSupplierQuotePrices = () => {
+            const currency = currencySelect?.value || 'TRY';
+            quoteCard.querySelectorAll('[data-supplier-currency-label]').forEach((label) => {
+                label.textContent = currency;
+            });
+            quoteCard.querySelectorAll('[data-supplier-unit-price]').forEach((input) => {
+                input.placeholder = 'Birim fiyat';
+                const preview = input.closest('.supplier-price-label')?.querySelector('[data-supplier-total-preview]');
+                const unitPrice = Math.max(0, numberValue(input));
+                preview.textContent = unitPrice > 0
+                    ? `Toplam: ${moneyFormatter().format(unitPrice * quantity)} (${quantityFormatter.format(quantity)} adet)`
+                    : 'Toplam: -';
+            });
+        };
+
+        quoteCard.addEventListener('input', syncSupplierQuotePrices);
+        quoteCard.addEventListener('change', syncSupplierQuotePrices);
+        syncSupplierQuotePrices();
     });
 
     const formatDateTR = (date) => date.toLocaleDateString('tr-TR', {
@@ -924,7 +1314,7 @@
                 projectInput.value = JSON.stringify(editor.getProjectData());
             });
         } else {
-            grapesEditorElement.innerHTML = '<div class="empty">GrapesJS kutuphanesi yuklenemedi. Internet baglantisini kontrol edin.</div>';
+            grapesEditorElement.innerHTML = '<div class="empty">GrapesJS kütüphanesi yüklenemedi. İnternet bağlantısını kontrol edin.</div>';
         }
     }
 
@@ -939,7 +1329,7 @@
             pushStatus.innerHTML = `<strong>${title}</strong><span>${message}</span>`;
         }
         if (pushBadge) {
-            pushBadge.textContent = active ? 'Acik' : 'Kapali';
+            pushBadge.textContent = active ? 'Açık' : 'Kapalı';
             pushBadge.classList.toggle('active', active);
             pushBadge.classList.toggle('cancelled', !active);
         }
@@ -976,7 +1366,7 @@
     }).then(async (response) => {
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.ok === false) {
-            throw new Error(data.message || 'Web push islemi tamamlanamadi.');
+            throw new Error(data.message || 'Web push işlemi tamamlanamadı.');
         }
 
         return data;
@@ -984,14 +1374,14 @@
 
     const initPwa = async () => {
         if ((pushSubscribeButton || pushTestButton) && !window.isSecureContext) {
-            setPushStatus('HTTPS gerekli', 'Web push icin domainin gecerli SSL sertifikasi ile acilmasi gerekiyor.');
+            setPushStatus('HTTPS gerekli', 'Web push için domainin geçerli SSL sertifikası ile açılması gerekiyor.');
             pushSubscribeButton && (pushSubscribeButton.disabled = true);
             pushTestButton && (pushTestButton.disabled = true);
             return null;
         }
 
         if (!('serviceWorker' in navigator)) {
-            setPushStatus('Desteklenmiyor', 'Bu tarayici PWA bildirimlerini desteklemiyor.');
+            setPushStatus('Desteklenmiyor', 'Bu tarayıcı PWA bildirimlerini desteklemiyor.');
             return null;
         }
 
@@ -1002,13 +1392,13 @@
         }
 
         if (!('PushManager' in window) || !('Notification' in window)) {
-            setPushStatus('Desteklenmiyor', 'Bu tarayici web push bildirimlerini desteklemiyor.');
+            setPushStatus('Desteklenmiyor', 'Bu tarayıcı web push bildirimlerini desteklemiyor.');
             return registration;
         }
 
         const keyResponse = await fetch('/api/push/public-key').then((response) => response.json());
         if (!keyResponse.ok || !keyResponse.publicKey) {
-            throw new Error(keyResponse.message || 'Web push anahtari alinamadi.');
+            throw new Error(keyResponse.message || 'Web push anahtarı alınamadı.');
         }
 
         let existing = await registration.pushManager.getSubscription();
@@ -1023,8 +1413,8 @@
         }
 
         setPushStatus(
-            existing ? 'Bildirimler acik' : 'Bildirimler kapali',
-            existing ? 'Bu cihaz yenileme bildirimlerini alacak.' : 'Bu cihazda bildirim almak icin izin verin.',
+            existing ? 'Bildirimler açık' : 'Bildirimler kapalı',
+            existing ? 'Bu cihaz yenileme bildirimlerini alacak.' : 'Bu cihazda bildirim almak için izin verin.',
             Boolean(existing)
         );
 
@@ -1032,7 +1422,7 @@
     };
 
     const pwaRegistrationPromise = initPwa().catch(() => {
-        setPushStatus('Hazir degil', 'PWA bildirimi baslatilamadi.');
+        setPushStatus('Hazır değil', 'PWA bildirimi başlatılamadı.');
         return null;
     });
 
@@ -1043,16 +1433,16 @@
                 return;
             }
 
-            setPushStatus('Hazirlaniyor', 'Tarayici bildirimi icin izin isteniyor.');
+            setPushStatus('Hazırlanıyor', 'Tarayıcı bildirimi için izin isteniyor.');
             const permission = await Notification.requestPermission();
             if (permission !== 'granted') {
-                setPushStatus('Izin verilmedi', 'Tarayici bildirim izni verilmedi.');
+                setPushStatus('İzin verilmedi', 'Tarayıcı bildirim izni verilmedi.');
                 return;
             }
 
             const keyResponse = await fetch('/api/push/public-key').then((response) => response.json());
             if (!keyResponse.ok || !keyResponse.publicKey) {
-                throw new Error(keyResponse.message || 'Web push anahtari alinamadi.');
+                throw new Error(keyResponse.message || 'Web push anahtarı alınamadı.');
             }
 
             const existing = await registration.pushManager.getSubscription();
@@ -1070,9 +1460,9 @@
             const payload = subscription.toJSON();
             payload.contentEncoding = (PushManager.supportedContentEncodings || ['aes128gcm'])[0];
             await pushPost('/api/push/subscribe', payload);
-            setPushStatus('Bildirimler acik', 'Bu cihaz yenileme bildirimlerini alacak.', true);
+            setPushStatus('Bildirimler açık', 'Bu cihaz yenileme bildirimlerini alacak.', true);
         } catch (error) {
-            setPushStatus('Bildirim acilamadi', error.message || 'Tarayici aboneligi kaydedilemedi.');
+            setPushStatus('Bildirim açılamadı', error.message || 'Tarayıcı aboneliği kaydedilemedi.');
         }
     });
 
@@ -1080,12 +1470,12 @@
         try {
             const result = await pushPost('/api/push/test');
             setPushStatus(
-                'Test gonderildi',
-                result.message || 'Birkaç saniye icinde tarayici bildirimi gelmeli.',
+                'Test gönderildi',
+                result.message || 'Birkaç saniye içinde tarayıcı bildirimi gelmeli.',
                 true
             );
         } catch (error) {
-            setPushStatus('Test gonderilemedi', error.message || 'Aktif web push aboneligi bulunamadi.');
+            setPushStatus('Test gönderilemedi', error.message || 'Aktif web push aboneliği bulunamadı.');
         }
     });
 
@@ -1247,7 +1637,7 @@
             results.replaceChildren();
 
             if (!contacts.length) {
-                renderMessage('Eslesen cari bulunamadi.');
+                renderMessage('Eşleşen cari bulunamadı.');
                 return;
             }
 
@@ -1304,13 +1694,13 @@
                     const payload = await response.json();
 
                     if (!response.ok || !payload.ok) {
-                        renderMessage(payload.message || 'Parasut aramasi yapilamadi.');
+                        renderMessage(payload.message || 'Paraşüt araması yapılamadı.');
                         return;
                     }
 
                     renderContacts(payload.data || []);
                 } catch (error) {
-                    renderMessage('Parasut API baglantisi kurulamadi.');
+                    renderMessage('Paraşüt API bağlantısı kurulamadı.');
                 }
             }, 650);
         });

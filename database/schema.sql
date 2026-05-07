@@ -440,6 +440,39 @@ CREATE TABLE supplier_quote_selections (
     INDEX idx_supplier_quote_selections_line (quote_line_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE supplier_quote_selection_deliveries (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    renewal_id INT UNSIGNED NOT NULL,
+    renewal_item_id INT UNSIGNED NULL,
+    quote_line_id INT UNSIGNED NULL,
+    selection_id INT UNSIGNED NULL,
+    supplier_name VARCHAR(190) NULL,
+    item_title VARCHAR(190) NULL,
+    recipient_email VARCHAR(190) NOT NULL,
+    recipient_name VARCHAR(190) NULL,
+    token_hash CHAR(64) NOT NULL,
+    selected_term VARCHAR(30) NULL,
+    selected_price DECIMAL(12,2) NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    status ENUM('pending', 'sent', 'failed', 'read') NOT NULL DEFAULT 'pending',
+    mail_log_id INT UNSIGNED NULL,
+    error_message TEXT NULL,
+    sent_at DATETIME NULL,
+    read_at DATETIME NULL,
+    read_ip VARCHAR(45) NULL,
+    read_user_agent VARCHAR(255) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supplier_quote_selection_deliveries_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
+    CONSTRAINT fk_supplier_quote_selection_deliveries_item FOREIGN KEY (renewal_item_id) REFERENCES renewal_items(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_quote_selection_deliveries_line FOREIGN KEY (quote_line_id) REFERENCES supplier_quote_lines(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_quote_selection_deliveries_selection FOREIGN KEY (selection_id) REFERENCES supplier_quote_selections(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_supplier_quote_selection_delivery_token (token_hash),
+    INDEX idx_supplier_quote_selection_delivery_selection (selection_id, status, read_at),
+    INDEX idx_supplier_quote_selection_delivery_renewal (renewal_id, sent_at),
+    INDEX idx_supplier_quote_selection_delivery_recipient (recipient_email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE supplier_quote_attachments (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     request_id INT UNSIGNED NOT NULL,
@@ -450,6 +483,27 @@ CREATE TABLE supplier_quote_attachments (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_supplier_quote_attachments_request FOREIGN KEY (request_id) REFERENCES supplier_quote_requests(id) ON DELETE CASCADE,
     INDEX idx_supplier_quote_attachments_request (request_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE supplier_unsubscriptions (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    supplier_id INT UNSIGNED NULL,
+    supplier_contact_id INT UNSIGNED NULL,
+    supplier_group_id INT UNSIGNED NULL,
+    recipient_email VARCHAR(190) NOT NULL,
+    scope ENUM('group', 'all') NOT NULL DEFAULT 'group',
+    source_request_id INT UNSIGNED NULL,
+    ip_address VARCHAR(45) NULL,
+    user_agent VARCHAR(255) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supplier_unsubscriptions_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_unsubscriptions_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_unsubscriptions_group FOREIGN KEY (supplier_group_id) REFERENCES supplier_groups(id) ON DELETE SET NULL,
+    CONSTRAINT fk_supplier_unsubscriptions_request FOREIGN KEY (source_request_id) REFERENCES supplier_quote_requests(id) ON DELETE SET NULL,
+    INDEX idx_supplier_unsubscriptions_email (recipient_email),
+    INDEX idx_supplier_unsubscriptions_scope (scope, supplier_group_id),
+    INDEX idx_supplier_unsubscriptions_supplier (supplier_id, supplier_contact_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE mail_logs (

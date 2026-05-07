@@ -61,6 +61,137 @@ final class RenewalRepository
         ];
     }
 
+    public function flowOverview(): array
+    {
+        $stats = $this->stats();
+        $collectionRows = $this->collectionRows('all');
+
+        $collection = [
+            'awaiting' => count($collectionRows),
+            'choice' => 0,
+            'bank' => 0,
+            'term30' => 0,
+        ];
+
+        foreach ($collectionRows as $row) {
+            $method = mb_strtolower(trim((string) ($row['payment_method'] ?? '')));
+            if (!empty($row['payment_customer_choice']) || trim((string) ($row['payment_method'] ?? '')) === '') {
+                $collection['choice']++;
+            }
+            if (str_contains($method, 'havale') || str_contains($method, 'eft')) {
+                $collection['bank']++;
+            }
+            if (str_contains($method, '30')) {
+                $collection['term30']++;
+            }
+        }
+
+        $supplierRequestStatus = $this->groupCounts(
+            'SELECT status, COUNT(*) AS total FROM supplier_quote_requests GROUP BY status'
+        );
+        $customerOfferStatus = $this->groupCounts(
+            'SELECT status, COUNT(*) AS total FROM customer_offer_requests GROUP BY status'
+        );
+
+        return [
+            'renewal' => [
+                'total' => (int) $stats['total'],
+                'active' => (int) $stats['active'],
+                'due_soon' => (int) $stats['due_soon'],
+                'overdue' => (int) $stats['overdue'],
+                'reminder_configured' => $this->countValue(
+                    "SELECT COUNT(*)
+                     FROM renewals r
+                     INNER JOIN customers c ON c.id = r.customer_id AND c.deleted_at IS NULL
+                     WHERE r.status = 'active'
+                       AND (
+                           r.reminder_days > 0
+                           OR EXISTS (
+                               SELECT 1
+                               FROM renewal_reminder_rules rrr
+                               WHERE rrr.renewal_id = r.id
+                           )
+                       )"
+                ),
+                'notifications_sent' => $this->countValue(
+                    "SELECT COUNT(DISTINCT renewal_id)
+                     FROM renewal_notification_deliveries
+                     WHERE status <> 'failed'
+                       AND sent_at IS NOT NULL"
+                ),
+                'notifications_read' => $this->countValue(
+                    "SELECT COUNT(DISTINCT renewal_id)
+                     FROM renewal_notification_deliveries
+                     WHERE status <> 'failed'
+                       AND read_at IS NOT NULL"
+                ),
+                'invoice_periods' => $this->countValue('SELECT COUNT(*) FROM renewal_invoice_periods'),
+            ],
+            'offer' => [
+                'supplier_requests' => array_sum($supplierRequestStatus),
+                'supplier_pending' => (int) ($supplierRequestStatus['pending'] ?? 0),
+                'supplier_opened' => (int) ($supplierRequestStatus['opened'] ?? 0),
+                'supplier_submitted' => (int) ($supplierRequestStatus['submitted'] ?? 0),
+                'supplier_expired' => (int) ($supplierRequestStatus['expired'] ?? 0),
+                'supplier_price_lines' => $this->countValue(
+                    "SELECT COUNT(*)
+                     FROM supplier_quote_lines
+                     WHERE price_cash IS NOT NULL
+                        OR price_30 IS NOT NULL
+                        OR price_60 IS NOT NULL
+                        OR price_check IS NOT NULL
+                        OR price_custom IS NOT NULL"
+                ),
+                'supplier_selections' => $this->countValue('SELECT COUNT(*) FROM supplier_quote_selections'),
+                'supplier_selection_sent' => $this->countValue(
+                    "SELECT COUNT(*)
+                     FROM supplier_quote_selection_deliveries
+                     WHERE status IN ('sent', 'read')
+                        OR sent_at IS NOT NULL"
+                ),
+                'supplier_selection_read' => $this->countValue(
+                    "SELECT COUNT(*)
+                     FROM supplier_quote_selection_deliveries
+                     WHERE read_at IS NOT NULL"
+                ),
+                'renewals_waiting_selection' => $this->countValue(
+                    "SELECT COUNT(DISTINCT sqr.renewal_id)
+                     FROM supplier_quote_requests sqr
+                     WHERE sqr.status = 'submitted'
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM supplier_quote_selections sqs
+                           WHERE sqs.renewal_id = sqr.renewal_id
+                       )"
+                ),
+                'renewals_waiting_customer_offer' => $this->countValue(
+                    "SELECT COUNT(DISTINCT sqs.renewal_id)
+                     FROM supplier_quote_selections sqs
+                     WHERE NOT EXISTS (
+                         SELECT 1
+                         FROM customer_offer_requests cor
+                         WHERE cor.renewal_id = sqs.renewal_id
+                     )"
+                ),
+                'customer_offers' => array_sum($customerOfferStatus),
+                'customer_sent' => (int) ($customerOfferStatus['sent'] ?? 0),
+                'customer_opened' => (int) ($customerOfferStatus['opened'] ?? 0),
+                'customer_approved' => (int) ($customerOfferStatus['approved'] ?? 0),
+                'customer_revision' => (int) ($customerOfferStatus['revision_requested'] ?? 0),
+                'customer_rejected' => (int) ($customerOfferStatus['rejected'] ?? 0),
+            ],
+            'collection' => [
+                'awaiting' => $collection['awaiting'],
+                'choice' => $collection['choice'],
+                'bank' => $collection['bank'],
+                'term30' => $collection['term30'],
+                'receipts' => $this->countValue('SELECT COUNT(*) FROM renewal_payment_receipts'),
+                'paid_card' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'paid'"),
+                'card_pending' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'pending'"),
+            ],
+        ];
+    }
+
     public function upcoming(int $limit = 8): array
     {
         $stmt = $this->db->prepare($this->baseSelect() . "
@@ -101,6 +232,63 @@ final class RenewalRepository
             LIMIT :limit
         ");
         $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    public function collectionRows(string $filter = 'all'): array
+    {
+        $method = "LOWER(COALESCE(r.payment_method, ''))";
+        $where = [
+            "r.status = 'active'",
+            "COALESCE(ri_stats.item_total, r.amount, 0) > 0",
+            "NOT EXISTS (
+                SELECT 1
+                FROM renewal_payments rp_paid_filter
+                WHERE rp_paid_filter.renewal_id = r.id
+                  AND rp_paid_filter.status = 'paid'
+            )",
+            "NOT EXISTS (
+                SELECT 1
+                FROM renewal_decisions rd_legacy_filter
+                WHERE rd_legacy_filter.renewal_id = r.id
+                  AND rd_legacy_filter.decision = 'approved'
+                  AND rd_legacy_filter.note = 'Eski tarihli giriş olarak kaydedildi.'
+            )",
+            "(
+                r.payment_customer_choice = 1
+                OR COALESCE(r.payment_method, '') <> ''
+                OR EXISTS (
+                    SELECT 1
+                    FROM customer_offer_requests cor_collection
+                    WHERE cor_collection.renewal_id = r.id
+                      AND cor_collection.status = 'approved'
+                )
+            )",
+        ];
+
+        if ($filter === 'bank') {
+            $where[] = "({$method} LIKE '%havale%' OR {$method} LIKE '%eft%')";
+        } elseif ($filter === 'term30') {
+            $where[] = "{$method} LIKE '%30%'";
+        } elseif ($filter === 'choice') {
+            $where[] = "(r.payment_customer_choice = 1 OR COALESCE(r.payment_method, '') = '')";
+        }
+
+        $stmt = $this->db->prepare($this->baseSelect() . '
+            WHERE ' . implode(' AND ', $where) . '
+            ORDER BY
+                CASE
+                    WHEN r.payment_customer_choice = 1 OR COALESCE(r.payment_method, \'\') = \'\' THEN 0
+                    WHEN ' . $method . ' LIKE \'%havale%\' OR ' . $method . ' LIKE \'%eft%\' THEN 1
+                    WHEN ' . $method . ' LIKE \'%30%\' THEN 2
+                    ELSE 3
+                END ASC,
+                r.payment_selected_at ASC,
+                r.renewal_date ASC,
+                r.id DESC
+        ');
         $stmt->execute();
 
         return $stmt->fetchAll();
@@ -213,9 +401,9 @@ final class RenewalRepository
         try {
             $stmt = $this->db->prepare(
                 'INSERT INTO renewals
-                    (customer_id, supplier_id, supplier_group_id, definition_id, renewal_period_id, title, brand, kind, supplier, license_key, payment_method, payment_customer_choice, start_date, renewal_date, reminder_days, supplier_price_request_enabled, supplier_price_request_days, amount, currency, status, notes)
+                    (customer_id, supplier_id, supplier_group_id, definition_id, renewal_period_id, title, brand, kind, supplier, license_key, payment_method, payment_customer_choice, start_date, renewal_date, reminder_days, supplier_price_request_enabled, supplier_price_request_days, supplier_share_customer_info, amount, currency, status, notes)
                  VALUES
-                    (:customer_id, :supplier_id, :supplier_group_id, :definition_id, :renewal_period_id, :title, :brand, :kind, :supplier, :license_key, :payment_method, :payment_customer_choice, :start_date, :renewal_date, :reminder_days, :supplier_price_request_enabled, :supplier_price_request_days, :amount, :currency, :status, :notes)'
+                    (:customer_id, :supplier_id, :supplier_group_id, :definition_id, :renewal_period_id, :title, :brand, :kind, :supplier, :license_key, :payment_method, :payment_customer_choice, :start_date, :renewal_date, :reminder_days, :supplier_price_request_enabled, :supplier_price_request_days, :supplier_share_customer_info, :amount, :currency, :status, :notes)'
             );
             $stmt->execute($this->normalize($data));
             $id = (int) $this->db->lastInsertId();
@@ -258,6 +446,7 @@ final class RenewalRepository
                     reminder_days = :reminder_days,
                     supplier_price_request_enabled = :supplier_price_request_enabled,
                     supplier_price_request_days = :supplier_price_request_days,
+                    supplier_share_customer_info = :supplier_share_customer_info,
                     amount = :amount,
                     currency = :currency,
                     status = :status,
@@ -515,6 +704,7 @@ final class RenewalRepository
             'id' => (int) $this->db->lastInsertId(),
             'token' => $token,
             'url' => \url('/tedarikci-teklif/' . $token),
+            'unsubscribe_url' => \url('/tedarikci-listeden-cik/' . $token),
         ];
     }
 
@@ -536,14 +726,18 @@ final class RenewalRepository
                     r.renewal_date,
                     r.start_date,
                     r.renewal_period_id,
+                    r.supplier_share_customer_info,
+                    COALESCE(s.supplier_group_id, r.supplier_group_id) AS supplier_group_id,
                     rp.name AS renewal_period_name,
                     c.company_name,
+                    sg.name AS supplier_group_name,
                     COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
              FROM supplier_quote_requests sqr
              INNER JOIN renewals r ON r.id = sqr.renewal_id
              INNER JOIN customers c ON c.id = r.customer_id
              LEFT JOIN renewal_periods rp ON rp.id = r.renewal_period_id
              LEFT JOIN suppliers s ON s.id = sqr.supplier_id
+             LEFT JOIN supplier_groups sg ON sg.id = COALESCE(s.supplier_group_id, r.supplier_group_id)
              WHERE sqr.token_hash = :token_hash
              LIMIT 1"
         );
@@ -551,6 +745,115 @@ final class RenewalRepository
         $row = $stmt->fetch();
 
         return $row ?: null;
+    }
+
+    public function supplierUnsubscribeContext(string $token): ?array
+    {
+        return $this->findSupplierQuoteRequestByToken($token);
+    }
+
+    public function recordSupplierUnsubscribe(string $token, string $scope, string $ipAddress = '', string $userAgent = ''): array
+    {
+        $request = $this->findSupplierQuoteRequestByToken($token);
+        if (!$request) {
+            throw new \RuntimeException('Liste çıkış bağlantısı geçersiz.');
+        }
+
+        $scope = $scope === 'all' ? 'all' : 'group';
+        $email = trim(mb_strtolower((string) ($request['recipient_email'] ?? '')));
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new \RuntimeException('Bu talepte geçerli tedarikçi e-posta adresi bulunamadı.');
+        }
+
+        $supplierGroupId = empty($request['supplier_group_id']) ? null : (int) $request['supplier_group_id'];
+        if ($scope === 'group' && $supplierGroupId === null) {
+            throw new \RuntimeException('Bu talep için tedarikçi kategorisi bulunamadı.');
+        }
+
+        $select = $this->db->prepare(
+            'SELECT id
+             FROM supplier_unsubscriptions
+             WHERE recipient_email = :recipient_email
+               AND scope = :scope
+               AND (supplier_group_id <=> :supplier_group_id)
+             LIMIT 1'
+        );
+        $select->execute([
+            'recipient_email' => $email,
+            'scope' => $scope,
+            'supplier_group_id' => $scope === 'all' ? null : $supplierGroupId,
+        ]);
+        $existingId = (int) $select->fetchColumn();
+
+        $payload = [
+            'supplier_id' => empty($request['supplier_id']) ? null : (int) $request['supplier_id'],
+            'supplier_contact_id' => empty($request['supplier_contact_id']) ? null : (int) $request['supplier_contact_id'],
+            'supplier_group_id' => $scope === 'all' ? null : $supplierGroupId,
+            'recipient_email' => $email,
+            'scope' => $scope,
+            'source_request_id' => (int) $request['id'],
+            'ip_address' => $this->nullableString($ipAddress),
+            'user_agent' => $this->nullableString(mb_substr($userAgent, 0, 255)),
+        ];
+
+        if ($existingId > 0) {
+            $stmt = $this->db->prepare(
+                'UPDATE supplier_unsubscriptions
+                 SET supplier_id = :supplier_id,
+                     supplier_contact_id = :supplier_contact_id,
+                     source_request_id = :source_request_id,
+                     ip_address = :ip_address,
+                     user_agent = :user_agent,
+                     updated_at = NOW()
+                 WHERE id = :id'
+            );
+            $payload = [
+                'supplier_id' => $payload['supplier_id'],
+                'supplier_contact_id' => $payload['supplier_contact_id'],
+                'source_request_id' => $payload['source_request_id'],
+                'ip_address' => $payload['ip_address'],
+                'user_agent' => $payload['user_agent'],
+                'id' => $existingId,
+            ];
+        } else {
+            $stmt = $this->db->prepare(
+                'INSERT INTO supplier_unsubscriptions
+                    (supplier_id, supplier_contact_id, supplier_group_id, recipient_email, scope, source_request_id, ip_address, user_agent)
+                 VALUES
+                    (:supplier_id, :supplier_contact_id, :supplier_group_id, :recipient_email, :scope, :source_request_id, :ip_address, :user_agent)'
+            );
+        }
+
+        $stmt->execute($payload);
+
+        return array_merge($request, [
+            'unsubscribed_scope' => $scope,
+            'unsubscribed_email' => $email,
+        ]);
+    }
+
+    public function isSupplierEmailUnsubscribed(string $email, ?int $supplierGroupId = null): bool
+    {
+        $email = trim(mb_strtolower($email));
+        if ($email === '') {
+            return false;
+        }
+
+        $stmt = $this->db->prepare(
+            "SELECT COUNT(*)
+             FROM supplier_unsubscriptions
+             WHERE recipient_email = :recipient_email
+               AND (
+                    scope = 'all'
+                    OR (scope = 'group' AND supplier_group_id <=> :supplier_group_id)
+               )"
+        );
+        $stmt->execute([
+            'recipient_email' => $email,
+            'supplier_group_id' => $supplierGroupId,
+        ]);
+
+        return (int) $stmt->fetchColumn() > 0;
     }
 
     public function markSupplierQuoteRequestOpened(int $requestId, string $ipAddress = '', string $userAgent = ''): void
@@ -721,6 +1024,7 @@ final class RenewalRepository
                     COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
                     r.title,
                     r.renewal_date,
+                    r.supplier_share_customer_info,
                     c.company_name
              FROM supplier_quote_requests sqr
              INNER JOIN renewals r ON r.id = sqr.renewal_id
@@ -790,7 +1094,42 @@ final class RenewalRepository
         $attachments = $attachmentStmt->fetchAll();
 
         $selectionStmt = $this->db->prepare(
-            'SELECT sqs.*, sqln.item_title, COALESCE(sqr.supplier_name, s.company_name) AS supplier_display, u.name AS selected_by_name
+            'SELECT sqs.*,
+                    sqln.item_title,
+                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    u.name AS selected_by_name,
+                    (
+                        SELECT COUNT(*)
+                        FROM supplier_quote_selection_deliveries sqsd_count
+                        WHERE sqsd_count.selection_id = sqs.id
+                          AND sqsd_count.status IN (\'sent\', \'read\')
+                    ) AS selection_delivery_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM supplier_quote_selection_deliveries sqsd_read_count
+                        WHERE sqsd_read_count.selection_id = sqs.id
+                          AND sqsd_read_count.read_at IS NOT NULL
+                    ) AS selection_read_count,
+                    (
+                        SELECT MAX(sqsd_sent.sent_at)
+                        FROM supplier_quote_selection_deliveries sqsd_sent
+                        WHERE sqsd_sent.selection_id = sqs.id
+                          AND sqsd_sent.status IN (\'sent\', \'read\')
+                    ) AS selection_sent_at,
+                    (
+                        SELECT MAX(sqsd_read.read_at)
+                        FROM supplier_quote_selection_deliveries sqsd_read
+                        WHERE sqsd_read.selection_id = sqs.id
+                          AND sqsd_read.read_at IS NOT NULL
+                    ) AS selection_read_at,
+                    (
+                        SELECT COALESCE(NULLIF(sqsd_reader.recipient_name, \'\'), sqsd_reader.recipient_email)
+                        FROM supplier_quote_selection_deliveries sqsd_reader
+                        WHERE sqsd_reader.selection_id = sqs.id
+                          AND sqsd_reader.read_at IS NOT NULL
+                        ORDER BY sqsd_reader.read_at DESC, sqsd_reader.id DESC
+                        LIMIT 1
+                    ) AS selection_reader
              FROM supplier_quote_selections sqs
              LEFT JOIN supplier_quote_lines sqln ON sqln.id = sqs.quote_line_id
              LEFT JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
@@ -867,8 +1206,10 @@ final class RenewalRepository
             'currency' => (string) ($line['currency'] ?? 'TRY'),
             'selected_by' => $userId > 0 ? $userId : null,
         ]);
+        $selectionId = $this->findSupplierQuoteSelectionId((int) $line['renewal_id'], $renewalItemId, $lineId);
 
         return [
+            'selection_id' => $selectionId,
             'renewal_id' => (int) $line['renewal_id'],
             'renewal_item_id' => $renewalItemId,
             'quote_line_id' => $lineId,
@@ -918,6 +1259,152 @@ final class RenewalRepository
         $stmt->execute(['renewal_id' => $renewalId]);
 
         return $stmt->fetchAll();
+    }
+
+    public function createSupplierQuoteSelectionDelivery(array $selected): array
+    {
+        $token = bin2hex(random_bytes(32));
+        $renewalId = (int) ($selected['renewal_id'] ?? 0);
+        $quoteLineId = (int) ($selected['quote_line_id'] ?? $selected['supplier_quote_line_id'] ?? 0);
+        $renewalItemId = (int) ($selected['renewal_item_id'] ?? 0);
+
+        if ($renewalItemId < 1 && $quoteLineId > 0) {
+            $stmt = $this->db->prepare('SELECT renewal_item_id FROM supplier_quote_lines WHERE id = :id LIMIT 1');
+            $stmt->execute(['id' => $quoteLineId]);
+            $renewalItemId = (int) $stmt->fetchColumn();
+        }
+
+        $selectionId = (int) ($selected['selection_id'] ?? 0);
+        if ($selectionId < 1) {
+            $selectionId = $this->findSupplierQuoteSelectionId($renewalId, $renewalItemId, $quoteLineId);
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO supplier_quote_selection_deliveries
+                (renewal_id, renewal_item_id, quote_line_id, selection_id, supplier_name, item_title, recipient_email, recipient_name, token_hash, selected_term, selected_price, currency, status, created_at, updated_at)
+             VALUES
+                (:renewal_id, :renewal_item_id, :quote_line_id, :selection_id, :supplier_name, :item_title, :recipient_email, :recipient_name, :token_hash, :selected_term, :selected_price, :currency, \'pending\', NOW(), NOW())'
+        );
+        $stmt->execute([
+            'renewal_id' => $renewalId,
+            'renewal_item_id' => $renewalItemId > 0 ? $renewalItemId : null,
+            'quote_line_id' => $quoteLineId > 0 ? $quoteLineId : null,
+            'selection_id' => $selectionId > 0 ? $selectionId : null,
+            'supplier_name' => $this->nullableString($selected['supplier_display'] ?? $selected['supplier_name'] ?? ''),
+            'item_title' => $this->nullableString($selected['item_title'] ?? ''),
+            'recipient_email' => trim((string) ($selected['recipient_email'] ?? '')),
+            'recipient_name' => $this->nullableString($selected['contact_name'] ?? ''),
+            'token_hash' => hash('sha256', $token),
+            'selected_term' => $this->nullableString($selected['term'] ?? $selected['supplier_term'] ?? ''),
+            'selected_price' => $this->nullableDecimalValue($selected['price'] ?? $selected['supplier_price'] ?? null),
+            'currency' => self::normalizeCurrency($selected['currency'] ?? $selected['supplier_currency'] ?? 'TRY'),
+        ]);
+
+        return [
+            'id' => (int) $this->db->lastInsertId(),
+            'token' => $token,
+            'read_url' => \url('/tedarikci-secim-okudum/' . rawurlencode($token)),
+        ];
+    }
+
+    public function updateSupplierQuoteSelectionDeliveryStatus(int $deliveryId, ?int $mailLogId, string $status, ?string $error = null): void
+    {
+        $status = in_array($status, ['pending', 'sent', 'failed', 'read'], true) ? $status : 'pending';
+        $stmt = $this->db->prepare(
+            'UPDATE supplier_quote_selection_deliveries
+             SET mail_log_id = :mail_log_id,
+                 status = :status,
+                 error_message = :error_message,
+                 sent_at = CASE WHEN :status_sent = \'sent\' THEN COALESCE(sent_at, NOW()) ELSE sent_at END,
+                 updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $deliveryId,
+            'mail_log_id' => $mailLogId ?: null,
+            'status' => $status,
+            'status_sent' => $status,
+            'error_message' => $this->nullableString($error),
+        ]);
+    }
+
+    public function markSupplierQuoteSelectionRead(string $token, string $ipAddress = '', string $userAgent = ''): ?array
+    {
+        $token = trim($token);
+        if ($token === '' || !preg_match('/^[a-f0-9]{64}$/i', $token)) {
+            return null;
+        }
+
+        $hash = hash('sha256', strtolower($token));
+        $stmt = $this->db->prepare(
+            "SELECT sqsd.*,
+                    sqs.selected_by,
+                    r.title,
+                    r.supplier_share_customer_info,
+                    COALESCE(ri.title, sqsd.item_title, r.title) AS display_item_title,
+                    c.company_name
+             FROM supplier_quote_selection_deliveries sqsd
+             INNER JOIN renewals r ON r.id = sqsd.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             LEFT JOIN renewal_items ri ON ri.id = sqsd.renewal_item_id
+             LEFT JOIN supplier_quote_selections sqs ON sqs.id = sqsd.selection_id
+             WHERE sqsd.token_hash = :token_hash
+             LIMIT 1"
+        );
+        $stmt->execute(['token_hash' => $hash]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+
+        $alreadyRead = !empty($row['read_at']);
+        $this->db->prepare(
+            'UPDATE supplier_quote_selection_deliveries
+             SET status = \'read\',
+                 read_at = COALESCE(read_at, NOW()),
+                 read_ip = :read_ip,
+                 read_user_agent = :read_user_agent,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => (int) $row['id'],
+            'read_ip' => $this->nullableString(substr($ipAddress, 0, 45)),
+            'read_user_agent' => $this->nullableString(substr($userAgent, 0, 255)),
+        ]);
+
+        $row['already_read'] = $alreadyRead ? '1' : '0';
+        $row['read_at'] = $row['read_at'] ?: date('Y-m-d H:i:s');
+
+        return $row;
+    }
+
+    private function findSupplierQuoteSelectionId(int $renewalId, int $renewalItemId, int $quoteLineId): int
+    {
+        if ($renewalId < 1) {
+            return 0;
+        }
+
+        $where = ['renewal_id = :renewal_id'];
+        $params = ['renewal_id' => $renewalId];
+        if ($quoteLineId > 0) {
+            $where[] = 'quote_line_id = :quote_line_id';
+            $params['quote_line_id'] = $quoteLineId;
+        } elseif ($renewalItemId > 0) {
+            $where[] = 'renewal_item_id = :renewal_item_id';
+            $params['renewal_item_id'] = $renewalItemId;
+        } else {
+            return 0;
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT id FROM supplier_quote_selections
+             WHERE ' . implode(' AND ', $where) . '
+             ORDER BY selected_at DESC, id DESC
+             LIMIT 1'
+        );
+        $stmt->execute($params);
+
+        return (int) $stmt->fetchColumn();
     }
 
     public function createCustomerOffer(int $renewalId, array $recipient, array $data, int $createdBy = 0): array
@@ -1081,15 +1568,48 @@ final class RenewalRepository
         return $offers;
     }
 
-    public function markCustomerOfferOpened(int $offerId): void
+    public function deleteCustomerOffer(int $offerId): ?array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id, renewal_id, recipient_email, recipient_name, total, currency, created_at
+             FROM customer_offer_requests
+             WHERE id = :id
+             LIMIT 1'
+        );
+        $stmt->execute(['id' => $offerId]);
+        $offer = $stmt->fetch();
+        if (!$offer) {
+            return null;
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare('DELETE FROM customer_offer_lines WHERE offer_id = :id')->execute(['id' => $offerId]);
+            $this->db->prepare('DELETE FROM customer_offer_requests WHERE id = :id')->execute(['id' => $offerId]);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+
+        return $offer;
+    }
+
+    public function markCustomerOfferOpened(int $offerId): int
     {
         $this->db->prepare(
             "UPDATE customer_offer_requests
              SET status = CASE WHEN status = 'sent' THEN 'opened' ELSE status END,
                  opened_at = COALESCE(opened_at, NOW()),
+                 view_count = view_count + 1,
                  updated_at = NOW()
              WHERE id = :id"
         )->execute(['id' => $offerId]);
+
+        $stmt = $this->db->prepare('SELECT view_count FROM customer_offer_requests WHERE id = :id LIMIT 1');
+        $stmt->execute(['id' => $offerId]);
+
+        return (int) $stmt->fetchColumn();
     }
 
     public function respondCustomerOffer(int $offerId, string $decision, string $note = '', string $ipAddress = '', string $userAgent = ''): void
@@ -1183,6 +1703,30 @@ final class RenewalRepository
 
     public function iyzicoPayments(int $renewalId): array
     {
+        return $this->providerPayments($renewalId, 'iyzico');
+    }
+
+    public function paytrPayments(int $renewalId): array
+    {
+        return $this->providerPayments($renewalId, 'paytr');
+    }
+
+    public function cardPayments(int $renewalId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM renewal_payments
+             WHERE renewal_id = :renewal_id
+               AND provider IN (\'iyzico\', \'paytr\')
+             ORDER BY created_at DESC, id DESC'
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+
+        return $stmt->fetchAll();
+    }
+
+    public function providerPayments(int $renewalId, string $provider): array
+    {
         $stmt = $this->db->prepare(
             'SELECT *
              FROM renewal_payments
@@ -1192,13 +1736,27 @@ final class RenewalRepository
         );
         $stmt->execute([
             'renewal_id' => $renewalId,
-            'provider' => 'iyzico',
+            'provider' => $provider,
         ]);
 
         return $stmt->fetchAll();
     }
 
     public function createIyzicoPayment(array $data): int
+    {
+        $data['provider'] = 'iyzico';
+
+        return $this->createCardPayment($data);
+    }
+
+    public function createPaytrPayment(array $data): int
+    {
+        $data['provider'] = 'paytr';
+
+        return $this->createCardPayment($data);
+    }
+
+    private function createCardPayment(array $data): int
     {
         $stmt = $this->db->prepare(
             'INSERT INTO renewal_payments
@@ -1208,7 +1766,7 @@ final class RenewalRepository
         );
         $stmt->execute([
             'renewal_id' => (int) $data['renewal_id'],
-            'provider' => 'iyzico',
+            'provider' => (string) ($data['provider'] ?? 'iyzico'),
             'conversation_id' => (string) $data['conversation_id'],
             'token' => $this->nullableString($data['token'] ?? ''),
             'amount' => (float) $data['amount'],
@@ -1246,6 +1804,40 @@ final class RenewalRepository
         return $row ?: null;
     }
 
+    public function findPaytrPaymentByToken(string $token): ?array
+    {
+        return $this->findPaymentByProviderField('paytr', 'token', $token);
+    }
+
+    public function findPaytrPaymentByMerchantOid(string $merchantOid): ?array
+    {
+        return $this->findPaymentByProviderField('paytr', 'conversation_id', $merchantOid);
+    }
+
+    private function findPaymentByProviderField(string $provider, string $field, string $value): ?array
+    {
+        if (!in_array($field, ['token', 'conversation_id'], true)) {
+            throw new \InvalidArgumentException('Gecersiz odeme arama alani.');
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT rp.*, r.title, r.brand, c.company_name
+             FROM renewal_payments rp
+             INNER JOIN renewals r ON r.id = rp.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             WHERE rp.provider = :provider
+               AND rp.' . $field . ' = :value
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'provider' => $provider,
+            'value' => $value,
+        ]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
     public function updateIyzicoPaymentResult(int $paymentId, array $request, array $response, string $status): void
     {
         $stmt = $this->db->prepare(
@@ -1267,6 +1859,32 @@ final class RenewalRepository
             'payment_status' => $this->nullableString($response['paymentStatus'] ?? ''),
             'provider_payment_id' => $this->nullableString($response['paymentId'] ?? ''),
             'error_message' => $this->nullableString($response['errorMessage'] ?? ''),
+            'raw_request' => $this->jsonOrNull($request),
+            'raw_response' => $this->jsonOrNull($response),
+        ]);
+    }
+
+    public function updatePaytrPaymentResult(int $paymentId, array $request, array $response, string $status): void
+    {
+        $stmt = $this->db->prepare(
+            'UPDATE renewal_payments SET
+                status = :status,
+                payment_status = :payment_status,
+                payment_id = :provider_payment_id,
+                error_message = :error_message,
+                raw_request = :raw_request,
+                raw_response = :raw_response,
+                paid_at = CASE WHEN :paid_status = \'paid\' AND paid_at IS NULL THEN NOW() ELSE paid_at END,
+                updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $paymentId,
+            'status' => $status,
+            'paid_status' => $status,
+            'payment_status' => $this->nullableString($response['status'] ?? ''),
+            'provider_payment_id' => $this->nullableString($response['merchant_oid'] ?? ''),
+            'error_message' => $this->nullableString($response['failed_reason_msg'] ?? $response['reason'] ?? ''),
             'raw_request' => $this->jsonOrNull($request),
             'raw_response' => $this->jsonOrNull($response),
         ]);
@@ -1827,6 +2445,8 @@ final class RenewalRepository
             $this->db->exec('ALTER TABLE renewals ADD payment_selected_at DATETIME NULL AFTER payment_selected_email');
         }
 
+        $this->ensureColumn('renewals', 'supplier_share_customer_info', 'TINYINT(1) NOT NULL DEFAULT 1 AFTER supplier_price_request_days');
+
         self::$renewalSchemaEnsured = true;
     }
 
@@ -2062,6 +2682,41 @@ final class RenewalRepository
         );
 
         $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS supplier_quote_selection_deliveries (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                renewal_id INT UNSIGNED NOT NULL,
+                renewal_item_id INT UNSIGNED NULL,
+                quote_line_id INT UNSIGNED NULL,
+                selection_id INT UNSIGNED NULL,
+                supplier_name VARCHAR(190) NULL,
+                item_title VARCHAR(190) NULL,
+                recipient_email VARCHAR(190) NOT NULL,
+                recipient_name VARCHAR(190) NULL,
+                token_hash CHAR(64) NOT NULL,
+                selected_term VARCHAR(30) NULL,
+                selected_price DECIMAL(12,2) NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                status ENUM('pending', 'sent', 'failed', 'read') NOT NULL DEFAULT 'pending',
+                mail_log_id INT UNSIGNED NULL,
+                error_message TEXT NULL,
+                sent_at DATETIME NULL,
+                read_at DATETIME NULL,
+                read_ip VARCHAR(45) NULL,
+                read_user_agent VARCHAR(255) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_supplier_quote_selection_deliveries_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
+                CONSTRAINT fk_supplier_quote_selection_deliveries_item FOREIGN KEY (renewal_item_id) REFERENCES renewal_items(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_quote_selection_deliveries_line FOREIGN KEY (quote_line_id) REFERENCES supplier_quote_lines(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_quote_selection_deliveries_selection FOREIGN KEY (selection_id) REFERENCES supplier_quote_selections(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_supplier_quote_selection_delivery_token (token_hash),
+                INDEX idx_supplier_quote_selection_delivery_selection (selection_id, status, read_at),
+                INDEX idx_supplier_quote_selection_delivery_renewal (renewal_id, sent_at),
+                INDEX idx_supplier_quote_selection_delivery_recipient (recipient_email)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
             "CREATE TABLE IF NOT EXISTS supplier_quote_attachments (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 request_id INT UNSIGNED NOT NULL,
@@ -2072,6 +2727,29 @@ final class RenewalRepository
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT fk_supplier_quote_attachments_request FOREIGN KEY (request_id) REFERENCES supplier_quote_requests(id) ON DELETE CASCADE,
                 INDEX idx_supplier_quote_attachments_request (request_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS supplier_unsubscriptions (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                supplier_id INT UNSIGNED NULL,
+                supplier_contact_id INT UNSIGNED NULL,
+                supplier_group_id INT UNSIGNED NULL,
+                recipient_email VARCHAR(190) NOT NULL,
+                scope ENUM('group', 'all') NOT NULL DEFAULT 'group',
+                source_request_id INT UNSIGNED NULL,
+                ip_address VARCHAR(45) NULL,
+                user_agent VARCHAR(255) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_supplier_unsubscriptions_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_unsubscriptions_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_unsubscriptions_group FOREIGN KEY (supplier_group_id) REFERENCES supplier_groups(id) ON DELETE SET NULL,
+                CONSTRAINT fk_supplier_unsubscriptions_request FOREIGN KEY (source_request_id) REFERENCES supplier_quote_requests(id) ON DELETE SET NULL,
+                INDEX idx_supplier_unsubscriptions_email (recipient_email),
+                INDEX idx_supplier_unsubscriptions_scope (scope, supplier_group_id),
+                INDEX idx_supplier_unsubscriptions_supplier (supplier_id, supplier_contact_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
 
@@ -2100,6 +2778,7 @@ final class RenewalRepository
                 total DECIMAL(12,2) NOT NULL DEFAULT 0,
                 expires_at DATETIME NOT NULL,
                 opened_at DATETIME NULL,
+                view_count INT UNSIGNED NOT NULL DEFAULT 0,
                 responded_at DATETIME NULL,
                 response_note TEXT NULL,
                 response_ip VARCHAR(45) NULL,
@@ -2114,6 +2793,7 @@ final class RenewalRepository
                 INDEX idx_customer_offer_requests_email (recipient_email)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('customer_offer_requests', 'view_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER opened_at');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS customer_offer_lines (
@@ -2345,7 +3025,7 @@ final class RenewalRepository
     public static function defaultPaymentMethods(): array
     {
         return [
-            ['name' => 'Kredi kartı', 'description' => 'Güvenli iyzico ödeme sayfasına yönlendirir.'],
+            ['name' => 'Kredi kartı', 'description' => 'Güvenli kredi kartı ödeme sayfasına yönlendirir.'],
             ['name' => 'Havale / EFT', 'description' => 'Banka transferi ile ödeme alınır; dekont sonrası işlem tamamlanır.'],
             ['name' => '30 gün cari hesap', 'description' => 'Fatura kesildikten sonra 30 gün vadeli cari hesap olarak takip edilir.'],
             ['name' => 'Cari hesap', 'description' => 'Ödeme cari hesap mutabakatına göre takip edilir.'],
@@ -2391,7 +3071,16 @@ final class RenewalRepository
         $where = 's.deleted_at IS NULL
                   AND sc.notify_enabled = 1
                   AND sc.email IS NOT NULL
-                  AND sc.email <> \'\'';
+                  AND sc.email <> \'\'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM supplier_unsubscriptions su
+                    WHERE su.recipient_email = LOWER(sc.email)
+                      AND (
+                        su.scope = \'all\'
+                        OR (su.scope = \'group\' AND su.supplier_group_id <=> s.supplier_group_id)
+                      )
+                  )';
         $params = [];
 
         if (($supplierId ?? 0) > 0) {
@@ -2403,12 +3092,17 @@ final class RenewalRepository
         }
 
         $stmt = $this->db->prepare(
-            "SELECT s.company_name AS supplier_name,
+            "SELECT s.id AS supplier_id,
+                    s.supplier_group_id,
+                    sg.name AS supplier_group_name,
+                    sc.id AS contact_id,
+                    s.company_name AS supplier_name,
                     sc.full_name,
                     sc.email,
                     sc.phone
              FROM suppliers s
              INNER JOIN supplier_contacts sc ON sc.supplier_id = s.id
+             LEFT JOIN supplier_groups sg ON sg.id = s.supplier_group_id
              WHERE {$where}
              ORDER BY s.company_name ASC, sc.full_name ASC"
         );
@@ -2418,6 +3112,10 @@ final class RenewalRepository
         foreach ($stmt->fetchAll() as $row) {
             $key = mb_strtolower((string) $row['email']);
             $recipients[$key] = [
+                'supplier_id' => (int) ($row['supplier_id'] ?? 0),
+                'supplier_group_id' => empty($row['supplier_group_id']) ? null : (int) $row['supplier_group_id'],
+                'supplier_group_name' => (string) ($row['supplier_group_name'] ?? ''),
+                'contact_id' => (int) ($row['contact_id'] ?? 0),
                 'supplier_name' => (string) $row['supplier_name'],
                 'name' => (string) $row['full_name'],
                 'email' => (string) $row['email'],
@@ -2439,6 +3137,19 @@ final class RenewalRepository
                   AND (
                     (sc.email IS NOT NULL AND sc.email <> \'\')
                     OR (sc.phone IS NOT NULL AND sc.phone <> \'\')
+                  )
+                  AND (
+                    sc.email IS NULL
+                    OR sc.email = \'\'
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM supplier_unsubscriptions su
+                        WHERE su.recipient_email = LOWER(sc.email)
+                          AND (
+                            su.scope = \'all\'
+                            OR (su.scope = \'group\' AND su.supplier_group_id <=> s.supplier_group_id)
+                          )
+                    )
                   )';
         $params = [];
 
@@ -2452,6 +3163,8 @@ final class RenewalRepository
 
         $stmt = $this->db->prepare(
             "SELECT s.id AS supplier_id,
+                    s.supplier_group_id,
+                    sg.name AS supplier_group_name,
                     s.company_name AS supplier_name,
                     sc.id AS contact_id,
                     sc.full_name,
@@ -2459,6 +3172,7 @@ final class RenewalRepository
                     sc.phone
              FROM suppliers s
              INNER JOIN supplier_contacts sc ON sc.supplier_id = s.id
+             LEFT JOIN supplier_groups sg ON sg.id = s.supplier_group_id
              WHERE {$where}
              ORDER BY s.company_name ASC, sc.full_name ASC"
         );
@@ -2477,6 +3191,8 @@ final class RenewalRepository
 
             $recipients[$key] = [
                 'supplier_id' => (int) $row['supplier_id'],
+                'supplier_group_id' => empty($row['supplier_group_id']) ? null : (int) $row['supplier_group_id'],
+                'supplier_group_name' => (string) ($row['supplier_group_name'] ?? ''),
                 'supplier_name' => (string) $row['supplier_name'],
                 'contact_id' => (int) $row['contact_id'],
                 'name' => (string) $row['full_name'],
@@ -2695,6 +3411,7 @@ final class RenewalRepository
             'reminder_days' => max($reminderDays),
             'supplier_price_request_enabled' => $supplierPriceEnabled ? 1 : 0,
             'supplier_price_request_days' => $supplierPriceEnabled ? max(1, (int) ($data['supplier_price_request_days'] ?? 30)) : null,
+            'supplier_share_customer_info' => !empty($data['supplier_share_customer_info']) ? 1 : 0,
             'amount' => $total > 0 ? $total : null,
             'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
             'status' => $status,
@@ -3372,6 +4089,7 @@ final class RenewalRepository
                 rp.name AS renewal_period_name,
                 rp.interval_count AS renewal_period_count,
                 rp.interval_unit AS renewal_period_unit,
+                r.supplier_share_customer_info,
                 COALESCE(ri_stats.item_count, 0) AS item_count,
                 COALESCE(ri_stats.items_summary, r.title) AS item_summary,
                 COALESCE(ri_stats.first_title, r.title) AS first_item_title,
@@ -3400,6 +4118,26 @@ final class RenewalRepository
                 c.district AS customer_district,
                 s.company_name AS supplier_company_name,
                 COALESCE(s.company_name, sg.name, r.supplier) AS supplier_display,
+                EXISTS (
+                    SELECT 1
+                    FROM renewal_payments rp_paid
+                    WHERE rp_paid.renewal_id = r.id
+                      AND rp_paid.status = 'paid'
+                ) AS has_paid_card_payment,
+                (
+                    SELECT rp_latest.status
+                    FROM renewal_payments rp_latest
+                    WHERE rp_latest.renewal_id = r.id
+                    ORDER BY rp_latest.created_at DESC, rp_latest.id DESC
+                    LIMIT 1
+                ) AS latest_card_payment_status,
+                (
+                    SELECT rp_latest.created_at
+                    FROM renewal_payments rp_latest
+                    WHERE rp_latest.renewal_id = r.id
+                    ORDER BY rp_latest.created_at DESC, rp_latest.id DESC
+                    LIMIT 1
+                ) AS latest_card_payment_at,
                 EXISTS (
                     SELECT 1
                     FROM renewal_notification_reads rnr
@@ -3491,6 +4229,24 @@ final class RenewalRepository
             INNER JOIN customers c ON c.id = r.customer_id AND c.deleted_at IS NULL
             LEFT JOIN suppliers s ON s.id = r.supplier_id AND s.deleted_at IS NULL
             LEFT JOIN supplier_groups sg ON sg.id = r.supplier_group_id";
+    }
+
+    private function countValue(string $sql, array $params = []): int
+    {
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    private function groupCounts(string $sql): array
+    {
+        $counts = [];
+        foreach ($this->db->query($sql)->fetchAll() as $row) {
+            $counts[(string) ($row['status'] ?? '')] = (int) ($row['total'] ?? 0);
+        }
+
+        return $counts;
     }
 
     private function supplierSelect(): string
