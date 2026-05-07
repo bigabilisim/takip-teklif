@@ -2363,7 +2363,9 @@ function handle_public_renewal_payment(string $method, int $renewalId): void
     $paymentMethods = $repo->paymentMethods();
     $error = null;
     $notice = null;
+    $allowOtherPaymentMethod = !empty($renewal['payment_customer_choice']);
     $selectedMethod = trim((string) ($renewal['payment_method'] ?? ''));
+    $otherPaymentMethod = '';
     $directCreditCard = $method === 'GET' && (string) ($_GET['method'] ?? '') === 'credit_card';
 
     if ($selectedMethod !== '' && payment_method_is_credit_card($selectedMethod) && !renewal_has_paid_card_payment($repo, $renewalId, (string) ($renewal['payment_selected_at'] ?? ''))) {
@@ -2393,11 +2395,24 @@ function handle_public_renewal_payment(string $method, int $renewalId): void
     if ($method === 'POST') {
         verify_csrf();
         $selectedMethod = trim((string) ($_POST['payment_method'] ?? ''));
-        $methodRow = payment_method_row_by_name($paymentMethods, $selectedMethod);
+        $isOtherPaymentMethod = $selectedMethod === payment_method_other_value();
+        $otherPaymentMethod = trim((string) ($_POST['other_payment_method'] ?? ''));
 
         try {
-            if (!$methodRow) {
-                throw new RuntimeException('Lütfen geçerli bir ödeme yöntemi seçin.');
+            if ($isOtherPaymentMethod) {
+                if (!$allowOtherPaymentMethod) {
+                    throw new RuntimeException('Diğer ödeme şartı yalnızca müşteri ödeme şeklini kendi seçecekse kullanılabilir.');
+                }
+                if ($otherPaymentMethod === '') {
+                    throw new RuntimeException('Lütfen diğer ödeme şartını yazın.');
+                }
+
+                $selectedMethod = mb_substr($otherPaymentMethod, 0, 120);
+            } else {
+                $methodRow = payment_method_row_by_name($paymentMethods, $selectedMethod);
+                if (!$methodRow) {
+                    throw new RuntimeException('Lütfen geçerli bir ödeme yöntemi seçin.');
+                }
             }
 
             if (payment_method_is_credit_card($selectedMethod)) {
@@ -2453,11 +2468,14 @@ function handle_public_renewal_payment(string $method, int $renewalId): void
             $repo->setRenewalPaymentMethod($renewalId, $selectedMethod, $linkEmail);
             redirect(url('/renewals/' . $renewalId . '/payment/thanks?' . public_payment_link_query($expires, $signature, $linkEmail)));
         } catch (Throwable $e) {
+            if ($isOtherPaymentMethod) {
+                $selectedMethod = payment_method_other_value();
+            }
             $error = $e->getMessage();
         }
     }
 
-    render_public_layout('Ödeme seçimi', static function () use ($renewal, $items, $totalAmount, $currency, $exchangeRates, $settings, $paymentMethods, $expires, $signature, $linkEmail, $error, $notice, $selectedMethod): void {
+    render_public_layout('Ödeme seçimi', static function () use ($renewal, $items, $totalAmount, $currency, $exchangeRates, $settings, $paymentMethods, $expires, $signature, $linkEmail, $error, $notice, $selectedMethod, $allowOtherPaymentMethod, $otherPaymentMethod): void {
         $ibanInfo = trim((string) ($settings['bank_transfer.iban_info'] ?? ''));
         ?>
         <section class="login-panel customer-info-public payment-choice-public">
@@ -2502,8 +2520,26 @@ function handle_public_renewal_payment(string $method, int $renewalId): void
                         <?php foreach ($paymentMethods as $paymentMethod): ?>
                             <?= option((string) $paymentMethod['name'], (string) $paymentMethod['name'], $selectedMethod) ?>
                         <?php endforeach; ?>
+                        <?php if ($allowOtherPaymentMethod): ?>
+                            <?= option(payment_method_other_value(), 'Diğer', $selectedMethod) ?>
+                        <?php endif; ?>
                     </select>
                 </label>
+                <?php if ($allowOtherPaymentMethod): ?>
+                    <div class="other-payment-public" data-other-payment-panel hidden>
+                        <label>
+                            Diğer ödeme şartı
+                            <input
+                                name="other_payment_method"
+                                maxlength="120"
+                                value="<?= h($otherPaymentMethod) ?>"
+                                placeholder="Örn: 45 gün vade, iki taksit, özel mutabakat"
+                                data-other-payment-input
+                            >
+                            <span class="field-help">Bu metin ödeme tercihiniz olarak kaydedilir ve tahsilat ekranında aynen görünür.</span>
+                        </label>
+                    </div>
+                <?php endif; ?>
                 <div class="bank-transfer-public" data-bank-transfer-panel hidden>
                     <div class="section-head">
                         <h2>Havale / EFT bilgileri</h2>
@@ -2537,6 +2573,12 @@ function handle_public_renewal_payment(string $method, int $renewalId): void
                                 <span><?= h($paymentMethod['description'] ?: 'Açıklama girilmedi.') ?></span>
                             </div>
                         <?php endforeach; ?>
+                        <?php if ($allowOtherPaymentMethod): ?>
+                            <div>
+                                <strong>Diğer</strong>
+                                <span>Listede olmayan ödeme şartını kendiniz yazabilirsiniz.</span>
+                            </div>
+                        <?php endif; ?>
                     </div>
                 <?php endif; ?>
                 <button type="submit" class="button primary">Devam et</button>
@@ -2933,6 +2975,25 @@ function payment_method_row_by_name(array $methods, string $name): ?array
     }
 
     return null;
+}
+
+function payment_method_other_value(): string
+{
+    return '__other_payment_terms__';
+}
+
+function payment_method_is_removed_30_day(string $name): bool
+{
+    $normalized = strtr(mb_strtolower(trim($name)), [
+        'ı' => 'i',
+        'ğ' => 'g',
+        'ü' => 'u',
+        'ş' => 's',
+        'ö' => 'o',
+        'ç' => 'c',
+    ]);
+
+    return str_contains($normalized, '30') && str_contains($normalized, 'cari');
 }
 
 function payment_method_is_credit_card(string $name): bool
@@ -4926,7 +4987,7 @@ function render_supplier_quote_item_form(array $item, string $currency): string
     $quantityLabel = number_format($quantity, 2, ',', '.');
     $priceFields = [
         ['field' => 'price_cash', 'label' => 'Peşin', 'hint' => 'Nakit / hemen ödeme'],
-        ['field' => 'price_30', 'label' => '30 gün', 'hint' => '30 gün cari hesap'],
+        ['field' => 'price_30', 'label' => '30 gün', 'hint' => '30 gün vade'],
         ['field' => 'price_60', 'label' => '60 gün', 'hint' => '60 gün vadeli'],
         ['field' => 'price_check', 'label' => 'Çek / vade', 'hint' => 'Çek veya vadeli ödeme'],
     ];
@@ -5337,7 +5398,6 @@ function render_flows(RenewalRepository $repo): void
         ['title' => 'Ödeme yöntemi seçimi', 'count' => $collection['choice'], 'tone' => $collection['choice'] > 0 ? 'warning' : 'muted', 'text' => 'Müşteri ödeme tipini seçmediyse tahsilat bu adımda bekler.'],
         ['title' => 'Tahsilat bekleyen', 'count' => $collection['awaiting'], 'tone' => $collection['awaiting'] > 0 ? 'warning' : 'done', 'text' => 'Ödeme bekleyen aktif yenilemeler tahsilat merkezine düşer.'],
         ['title' => 'Havale / EFT', 'count' => $collection['bank'], 'tone' => $collection['bank'] > 0 ? 'active' : 'muted', 'text' => 'Banka havalesi seçenlerde IBAN ve dekont akışı takip edilir.'],
-        ['title' => '30 gün cari hesap', 'count' => $collection['term30'], 'tone' => $collection['term30'] > 0 ? 'active' : 'muted', 'text' => 'Vadeli ödeme seçen kayıtlar ayrı takip edilir.'],
         ['title' => 'Dekont alındı', 'count' => $collection['receipts'], 'tone' => $collection['receipts'] > 0 ? 'done' : 'muted', 'text' => 'Müşteri dekont yüklediyse muhasebe kontrolü yapılır.'],
         ['title' => 'Kart ödemesi tamamlandı', 'count' => $collection['paid_card'], 'tone' => $collection['paid_card'] > 0 ? 'done' : 'muted', 'text' => 'Kredi kartı ödemesi başarılı kayıtlar burada kapanır.'],
     ];
@@ -5499,7 +5559,6 @@ function render_collections(RenewalRepository $repo): void
             <?= stat_card('Bekleyen', $stats['total'], 'warning') ?>
             <?= stat_card('Ödenmemiş', $stats['unpaid'], 'danger') ?>
             <?= stat_card('Havale / EFT', $stats['bank'], '') ?>
-            <?= stat_card('30 gün cari', $stats['term30'], '') ?>
         </section>
 
         <div class="collection-filter-tabs">
@@ -6174,6 +6233,10 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                         </label>
                         <?php
                         $paymentMethod = (string) ($renewal['payment_method'] ?? '');
+                        $removedPaymentMethod = payment_method_is_removed_30_day($paymentMethod);
+                        if ($removedPaymentMethod) {
+                            $paymentMethod = '';
+                        }
                         $paymentOptions = payment_method_options();
                         ?>
                         <div class="field-block payment-choice">
@@ -6181,7 +6244,7 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                                 Ödeme şekli
                                 <select name="payment_method" data-payment-method-select>
                                     <?= option('', 'Ödeme şeklini seçin', $paymentMethod) ?>
-                                    <?php if ($paymentMethod !== '' && !in_array($paymentMethod, $paymentOptions, true)): ?>
+                                    <?php if ($paymentMethod !== '' && !payment_method_is_removed_30_day($paymentMethod) && !in_array($paymentMethod, $paymentOptions, true)): ?>
                                         <?= option($paymentMethod, $paymentMethod, $paymentMethod) ?>
                                     <?php endif; ?>
                                     <?php foreach ($paymentOptions as $paymentOption): ?>
@@ -6195,7 +6258,7 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                                     name="payment_customer_choice"
                                     value="1"
                                     data-payment-customer-choice
-                                    <?= !empty($renewal['payment_customer_choice']) || (!$id && $paymentMethod === '') ? 'checked' : '' ?>
+                                    <?= !empty($renewal['payment_customer_choice']) || $removedPaymentMethod || (!$id && $paymentMethod === '') ? 'checked' : '' ?>
                                 >
                                 Müşteri ödeme şeklini kendi seçsin
                             </label>
@@ -11524,7 +11587,7 @@ function render_renewal_decision_dialogs(array $row): string
             <p class="muted compact"><?= h($row['company_name']) ?> için ödeme şartını kaydedin.</p>
             <label>
                 Ödeme şartları
-                <textarea name="payment_terms" rows="3" required placeholder="Örn: 30 gün cari hesap / Peşin / Havale EFT"><?= h($paymentDefault) ?></textarea>
+                <textarea name="payment_terms" rows="3" required placeholder="Örn: Peşin / Havale EFT / Özel vade"><?= h($paymentDefault) ?></textarea>
             </label>
             <button type="submit" class="button primary full">Onayla</button>
         </form>
@@ -11816,7 +11879,6 @@ function collection_filter_options(): array
         'all' => 'Tümü',
         'unpaid' => 'Ödenmemiş',
         'bank' => 'Havale / EFT',
-        'term30' => '30 gün cari',
         'choice' => 'Seçim bekleyen',
     ];
 }
@@ -11832,7 +11894,6 @@ function collection_stats(array $rows): array
         'total' => count($rows),
         'unpaid' => 0,
         'bank' => 0,
-        'term30' => 0,
     ];
 
     foreach ($rows as $row) {
@@ -11842,9 +11903,6 @@ function collection_stats(array $rows): array
         }
         if (str_contains($method, 'havale') || str_contains($method, 'eft')) {
             $stats['bank']++;
-        }
-        if (str_contains($method, '30')) {
-            $stats['term30']++;
         }
     }
 
@@ -11872,10 +11930,6 @@ function collection_payment_state(array $row): array
         return ['label' => 'Havale / dekont bekleniyor', 'tone' => 'warning'];
     }
 
-    if (str_contains($method, '30')) {
-        return ['label' => '30 gün cari hesap', 'tone' => 'due_soon'];
-    }
-
     return ['label' => 'Tahsilat bekliyor', 'tone' => 'warning'];
 }
 
@@ -11886,6 +11940,9 @@ function renewal_payment_label(array $row): string
     }
 
     $paymentMethod = trim((string) ($row['payment_method'] ?? ''));
+    if (payment_method_is_removed_30_day($paymentMethod)) {
+        return '-';
+    }
 
     return $paymentMethod !== '' ? $paymentMethod : '-';
 }

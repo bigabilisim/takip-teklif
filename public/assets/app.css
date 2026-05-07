@@ -4486,6 +4486,19 @@ td.actions {
     display: none;
 }
 
+.other-payment-public {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid rgba(20, 124, 114, 0.22);
+    border-radius: 8px;
+    background: #f7fbfa;
+}
+
+.other-payment-public[hidden] {
+    display: none;
+}
+
 .bank-transfer-public .section-head {
     margin: 0;
 }

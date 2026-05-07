@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.72] - 2026-05-07
+
+- Sabit “30 gün cari hesap” ödeme yöntemi ödeme tanımlarından, yenileme formundan, tahsilat filtrelerinden ve akış şemasından kaldırıldı.
+- Müşteri ödeme şeklini kendi seçsin açık olan ödeme bağlantılarında “Diğer” seçeneği eklendi; müşteri kendi ödeme şartını yazıp kaydedebilir hale geldi.
+
 ## [1.0.71] - 2026-05-07
 
 - Manuel fiyat seçimi tedarikçi teklifleri olan kartlarda da “Manuel fiyat” etiketiyle gösterilecek şekilde düzeltildi.

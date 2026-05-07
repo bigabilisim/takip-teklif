@@ -70,7 +70,6 @@ final class RenewalRepository
             'awaiting' => count($collectionRows),
             'choice' => 0,
             'bank' => 0,
-            'term30' => 0,
         ];
 
         foreach ($collectionRows as $row) {
@@ -80,9 +79,6 @@ final class RenewalRepository
             }
             if (str_contains($method, 'havale') || str_contains($method, 'eft')) {
                 $collection['bank']++;
-            }
-            if (str_contains($method, '30')) {
-                $collection['term30']++;
             }
         }
 
@@ -184,7 +180,6 @@ final class RenewalRepository
                 'awaiting' => $collection['awaiting'],
                 'choice' => $collection['choice'],
                 'bank' => $collection['bank'],
-                'term30' => $collection['term30'],
                 'receipts' => $this->countValue('SELECT COUNT(*) FROM renewal_payment_receipts'),
                 'paid_card' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'paid' AND COALESCE(payment_id, '') <> ''"),
                 'card_pending' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'pending'"),
@@ -271,8 +266,6 @@ final class RenewalRepository
 
         if ($filter === 'bank') {
             $where[] = "({$method} LIKE '%havale%' OR {$method} LIKE '%eft%')";
-        } elseif ($filter === 'term30') {
-            $where[] = "{$method} LIKE '%30%'";
         } elseif ($filter === 'choice') {
             $where[] = "(r.payment_customer_choice = 1 OR COALESCE(r.payment_method, '') = '')";
         }
@@ -283,8 +276,7 @@ final class RenewalRepository
                 CASE
                     WHEN r.payment_customer_choice = 1 OR COALESCE(r.payment_method, \'\') = \'\' THEN 0
                     WHEN ' . $method . ' LIKE \'%havale%\' OR ' . $method . ' LIKE \'%eft%\' THEN 1
-                    WHEN ' . $method . ' LIKE \'%30%\' THEN 2
-                    ELSE 3
+                    ELSE 2
                 END ASC,
                 r.payment_selected_at ASC,
                 r.renewal_date ASC,
@@ -636,11 +628,18 @@ final class RenewalRepository
         }
         $sql .= ' ORDER BY sort_order ASC, name ASC';
 
-        return $this->db->query($sql)->fetchAll();
+        return array_values(array_filter(
+            $this->db->query($sql)->fetchAll(),
+            static fn (array $method): bool => !self::isRemovedPaymentMethodName((string) ($method['name'] ?? ''))
+        ));
     }
 
     public function findPaymentMethodByName(string $name): ?array
     {
+        if (self::isRemovedPaymentMethodName($name)) {
+            return null;
+        }
+
         $stmt = $this->db->prepare('SELECT * FROM payment_methods WHERE name = :name AND is_active = 1 LIMIT 1');
         $stmt->execute(['name' => trim($name)]);
         $row = $stmt->fetch();
@@ -2148,6 +2147,9 @@ final class RenewalRepository
         if ($name === '') {
             throw new \RuntimeException('Odeme yontemi adi zorunlu.');
         }
+        if (self::isRemovedPaymentMethodName($name)) {
+            throw new \RuntimeException('Bu ödeme yöntemi kaldırıldı. Özel ödeme şartı için müşteri seçiminde Diğer alanını kullanın.');
+        }
 
         $stmt = $this->db->prepare(
             'INSERT INTO payment_methods (name, description, sort_order, is_active)
@@ -2171,6 +2173,9 @@ final class RenewalRepository
 
         if ($name === '') {
             throw new \RuntimeException('Odeme yontemi adi zorunlu.');
+        }
+        if (self::isRemovedPaymentMethodName($name)) {
+            throw new \RuntimeException('Bu ödeme yöntemi kaldırıldı. Özel ödeme şartı için müşteri seçiminde Diğer alanını kullanın.');
         }
 
         $stmt = $this->db->prepare(
@@ -3018,12 +3023,25 @@ final class RenewalRepository
         return [
             ['name' => 'Kredi kartı', 'description' => 'Güvenli kredi kartı ödeme sayfasına yönlendirir.'],
             ['name' => 'Havale / EFT', 'description' => 'Banka transferi ile ödeme alınır; dekont sonrası işlem tamamlanır.'],
-            ['name' => '30 gün cari hesap', 'description' => 'Fatura kesildikten sonra 30 gün vadeli cari hesap olarak takip edilir.'],
             ['name' => 'Cari hesap', 'description' => 'Ödeme cari hesap mutabakatına göre takip edilir.'],
             ['name' => 'Online ödeme', 'description' => 'Online ödeme kanalı üzerinden tahsilat yapılır.'],
             ['name' => 'Otomatik ödeme', 'description' => 'Tanımlı otomatik ödeme talimatı ile tahsil edilir.'],
             ['name' => 'Nakit', 'description' => 'Nakit ödeme olarak tahsil edilir.'],
         ];
+    }
+
+    private static function isRemovedPaymentMethodName(string $name): bool
+    {
+        $normalized = strtr(mb_strtolower(trim($name)), [
+            'ı' => 'i',
+            'ğ' => 'g',
+            'ü' => 'u',
+            'ş' => 's',
+            'ö' => 'o',
+            'ç' => 'c',
+        ]);
+
+        return str_contains($normalized, '30') && str_contains($normalized, 'cari');
     }
 
     public function notificationRecipients(int $customerId): array
@@ -3378,6 +3396,9 @@ final class RenewalRepository
         }
         $supplierPriceEnabled = $hasProduct && !empty($data['supplier_price_request_enabled']);
         $paymentMethod = trim((string) ($data['payment_method'] ?? ''));
+        if (self::isRemovedPaymentMethodName($paymentMethod)) {
+            $paymentMethod = '';
+        }
         $total = $this->itemsTotal($items);
         $status = (string) ($data['status'] ?? 'active');
         if (!in_array($status, ['active', 'renewed', 'cancelled'], true)) {

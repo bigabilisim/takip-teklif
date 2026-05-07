@@ -756,23 +756,34 @@
         const methodSelect = publicPaymentForm.querySelector('[data-public-payment-method]');
         const bankPanel = publicPaymentForm.querySelector('[data-bank-transfer-panel]');
         const receiptInput = publicPaymentForm.querySelector('[data-bank-transfer-receipt]');
+        const otherPanel = publicPaymentForm.querySelector('[data-other-payment-panel]');
+        const otherInput = publicPaymentForm.querySelector('[data-other-payment-input]');
         const isBankTransfer = (value) => {
             const normalized = String(value || '').toLocaleLowerCase('tr-TR');
 
             return normalized.includes('havale') || normalized.includes('eft');
         };
-        const syncBankTransferPanel = () => {
-            const active = isBankTransfer(methodSelect?.value);
+        const isOtherPayment = (value) => value === '__other_payment_terms__';
+        const syncPaymentPanels = () => {
+            const value = methodSelect?.value;
+            const otherActive = isOtherPayment(value);
+            const bankActive = isBankTransfer(value) && !otherActive;
             if (bankPanel) {
-                bankPanel.hidden = !active;
+                bankPanel.hidden = !bankActive;
             }
             if (receiptInput) {
-                receiptInput.required = active;
+                receiptInput.required = bankActive;
+            }
+            if (otherPanel) {
+                otherPanel.hidden = !otherActive;
+            }
+            if (otherInput) {
+                otherInput.required = otherActive;
             }
         };
 
-        methodSelect?.addEventListener('change', syncBankTransferPanel);
-        syncBankTransferPanel();
+        methodSelect?.addEventListener('change', syncPaymentPanels);
+        syncPaymentPanels();
     }
 
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
