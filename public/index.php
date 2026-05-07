@@ -546,6 +546,8 @@ function handle_manual_payment_request_create(): void
             'created_by' => (int) ($_SESSION['user_id'] ?? 0),
         ]);
 
+        notify_manual_payment_request_created($request);
+
         flash('success', 'Manuel ödeme talebi oluşturuldu.');
         redirect('/payment-requests?created=' . (int) ($request['id'] ?? 0));
     } catch (Throwable $e) {
@@ -3616,6 +3618,9 @@ function handle_iyzico_callback(string $method): void
         $localStatus = iyzico_local_status($response, (float) ($payment['amount'] ?? 0));
         $message = iyzico_result_message($localStatus, $response);
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
+        if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
+            notify_payment_received($payment, $response, 'renewal');
+        }
     } catch (Throwable $e) {
         $message = $e->getMessage();
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, ['errorMessage' => $message], 'failed');
@@ -3661,6 +3666,9 @@ function handle_manual_iyzico_callback_result(PaymentRequestRepository $repo, ar
         $localStatus = iyzico_local_status($response, (float) ($payment['amount'] ?? 0));
         $message = iyzico_result_message($localStatus, $response);
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
+        if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
+            notify_payment_received($payment, $response, 'manual');
+        }
     } catch (Throwable $e) {
         $message = $e->getMessage();
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, ['errorMessage' => $message], 'failed');
@@ -3733,6 +3741,163 @@ function iyzico_result_message(string $status, array $response): string
     }
 
     return 'Ödeme tamamlanamadı veya iptal edildi.';
+}
+
+function notify_manual_payment_request_created(array $request): void
+{
+    try {
+        $amount = money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'));
+        $customer = trim((string) (($request['customer_name'] ?? '') ?: ($request['customer_email'] ?? '') ?: 'Müşteri bilgisi yok'));
+        send_internal_push_notification(
+            'Ödeme talebi oluşturuldu',
+            trim((string) ($request['title'] ?? 'Ödeme talebi')) . ' · ' . $amount . ' · ' . $customer,
+            '/payment-requests?created=' . (int) ($request['id'] ?? 0)
+        );
+    } catch (Throwable $e) {
+        error_log('Ödeme talebi push bildirimi gönderilemedi: ' . $e->getMessage());
+    }
+}
+
+function notify_payment_received(array $payment, array $response, string $source): void
+{
+    try {
+        $context = payment_received_notification_context($payment, $response, $source);
+        send_internal_push_notification(
+            'Ödeme geldi',
+            $context['customer'] . ' · ' . $context['amount'],
+            $context['url']
+        );
+        send_internal_mail_notification(
+            'Ödeme geldi: ' . $context['title'],
+            payment_received_mail_body($context)
+        );
+    } catch (Throwable $e) {
+        error_log('Ödeme alındı bildirimi gönderilemedi: ' . $e->getMessage());
+    }
+}
+
+function payment_received_notification_context(array $payment, array $response, string $source): array
+{
+    $isManual = $source === 'manual';
+    $id = (int) ($isManual ? ($payment['request_id'] ?? 0) : ($payment['renewal_id'] ?? 0));
+    $title = trim((string) ($payment['title'] ?? ($isManual ? 'Manuel ödeme talebi' : 'Yenileme')));
+    $customer = trim((string) (
+        $isManual
+            ? (($payment['customer_name'] ?? '') ?: ($payment['customer_email'] ?? ''))
+            : ($payment['company_name'] ?? '')
+    ));
+    $currency = normalize_allowed_currency((string) ($payment['currency'] ?? 'TRY'));
+    $amount = money_format_local($payment['amount'] ?? null, $currency);
+    $paymentId = trim((string) (($response['paymentId'] ?? '') ?: ($payment['payment_id'] ?? '')));
+
+    return [
+        'title' => $title !== '' ? $title : ($isManual ? 'Manuel ödeme talebi' : 'Yenileme'),
+        'customer' => $customer !== '' ? $customer : 'Müşteri bilgisi yok',
+        'amount' => $amount,
+        'currency' => $currency,
+        'payment_id' => $paymentId !== '' ? $paymentId : '-',
+        'conversation_id' => (string) ($payment['conversation_id'] ?? '-'),
+        'source_label' => $isManual ? 'Manuel ödeme talebi' : 'Yenileme kaydı',
+        'url' => $isManual ? '/payment-requests?created=' . $id : '/renewals/' . $id . '/edit#card-payment',
+    ];
+}
+
+function payment_received_mail_body(array $context): string
+{
+    $rows = [
+        'Kaynak' => $context['source_label'],
+        'Müşteri' => $context['customer'],
+        'Kayıt' => $context['title'],
+        'Tutar' => $context['amount'],
+        'iyzico ödeme no' => $context['payment_id'],
+        'Conversation ID' => $context['conversation_id'],
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:800;">' . h((string) $value) . '</td>'
+            . '</tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+        . '<table role="presentation" width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="padding:28px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:13px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">Ödeme bildirimi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#17201c;">Ödeme geldi.</h1>'
+        . '<p style="margin:0 0 20px;color:#607069;font-size:16px;line-height:1.5;">Sistemde başarılı kredi kartı ödemesi kaydedildi.</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 22px;">' . $htmlRows . '</table>'
+        . '<a href="' . h(url((string) $context['url'])) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;font-weight:800;padding:13px 18px;border-radius:8px;">Panelde görüntüle</a>'
+        . '</td></tr></table>'
+        . '</td></tr></table></body></html>';
+}
+
+function send_internal_push_notification(string $title, string $body, string $urlPath): void
+{
+    $recipient = internal_notification_recipient();
+    if ($recipient === null) {
+        return;
+    }
+
+    $result = WebPush::sendToUser((int) $recipient['id'], [
+        'title' => $title,
+        'body' => $body,
+        'url' => $urlPath,
+    ]);
+
+    if ((int) ($result['sent'] ?? 0) < 1) {
+        error_log('İç bildirim push gönderilemedi: ' . json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+}
+
+function send_internal_mail_notification(string $subject, string $body): void
+{
+    $recipient = internal_notification_recipient();
+    $email = trim((string) ($recipient['email'] ?? ''));
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        error_log('İç bildirim maili için geçerli Bilal e-postası bulunamadı.');
+        return;
+    }
+
+    $result = Mailer::sendWithResult($email, $subject, $body, true);
+    if (empty($result['ok'])) {
+        error_log('İç bildirim maili gönderilemedi: ' . (string) ($result['error'] ?? 'transport-failed'));
+    }
+}
+
+function internal_notification_recipient(): ?array
+{
+    static $recipient = false;
+    if ($recipient !== false) {
+        return $recipient;
+    }
+
+    try {
+        $stmt = Database::connection()->query(
+            "SELECT id, name, email, role
+             FROM users
+             WHERE is_active = 1
+               AND deleted_at IS NULL
+             ORDER BY
+               CASE
+                 WHEN LOWER(name) LIKE '%bilal%' AND LOWER(name) LIKE '%bozduman%' THEN 0
+                 WHEN LOWER(email) LIKE '%bilal%' THEN 1
+                 WHEN role = 'admin' THEN 2
+                 ELSE 3
+               END,
+               id ASC
+             LIMIT 1"
+        );
+        $row = $stmt->fetch();
+        $recipient = $row ?: null;
+    } catch (Throwable $e) {
+        error_log('İç bildirim alıcısı bulunamadı: ' . $e->getMessage());
+        $recipient = null;
+    }
+
+    return $recipient;
 }
 
 function handle_push_public_key(): void

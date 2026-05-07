@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.69] - 2026-05-07
+
+- Başarılı iyzico ödemelerinde Bilal Bozduman kullanıcısına web push ve mail bildirimi gönderimi eklendi.
+- Manuel Ödeme Talep Et kaydı oluştuğunda Bilal Bozduman kullanıcısına web push bildirimi gönderimi eklendi.
+- Ödeme bildirimleri tekrar eden iyzico callbacklerinde yalnızca ilk başarılı geçişte gönderilecek şekilde sınırlandı.
+
 ## [1.0.68] - 2026-05-07
 
 - iyzico kredi kartı linklerinde USD/EUR seçildiğinde tutar TCMB satış kuruyla TL’ye çevrilip TRY POS üzerinden ödeme linki oluşturulacak şekilde düzeltildi.
