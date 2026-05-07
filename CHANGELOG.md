@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.71] - 2026-05-07
+
+- Manuel fiyat seçimi tedarikçi teklifleri olan kartlarda da “Manuel fiyat” etiketiyle gösterilecek şekilde düzeltildi.
+
+## [1.0.70] - 2026-05-07
+
+- Takipteki ürün ve hizmet kartlarına “Manuel fiyat ver” aksiyonu eklendi.
+- Tedarikçi teklifi gelmeden ürün kalemlerine manuel satış fiyatı girilip müşteri teklif ekranına aktarılabilir hale getirildi.
+- Manuel fiyatla hazırlanan kayıtlar mevcut müşteri teklif gönderme akışına bağlandı.
+
 ## [1.0.69] - 2026-05-07
 
 - Başarılı iyzico ödemelerinde Bilal Bozduman kullanıcısına web push ve mail bildirimi gönderimi eklendi.

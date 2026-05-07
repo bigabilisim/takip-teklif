@@ -205,6 +205,9 @@ try {
     } elseif (preg_match('#^/supplier-quotes/(\d+)/delete$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_supplier_quote_delete($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/renewals/(\d+)/manual-price$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_manual_customer_price($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/customer-offer/send$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_customer_offer_send($repo, (int) $matches[1]);
@@ -796,6 +799,36 @@ function handle_supplier_quote_delete(RenewalRepository $repo, int $requestId): 
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
 }
 
+function handle_manual_customer_price(RenewalRepository $repo, int $renewalId): void
+{
+    verify_csrf();
+
+    try {
+        $row = $repo->find($renewalId);
+        if (!$row) {
+            throw new RuntimeException('Yenileme kaydı bulunamadı.');
+        }
+
+        $currency = normalize_allowed_currency($_POST['manual_price_currency'] ?? ($row['currency'] ?? 'TRY'));
+        $result = $repo->selectManualCustomerPrices(
+            $renewalId,
+            $_POST['manual_prices'] ?? [],
+            (int) ($_SESSION['user_id'] ?? 0),
+            $currency
+        );
+
+        flash(
+            'success',
+            (int) ($result['count'] ?? 0)
+            . ' kalem için manuel fiyat kaydedildi. Müşteriye teklif gönder butonundan fiyatı iletebilirsiniz.'
+        );
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
 function send_supplier_quote_selection_email(RenewalRepository $repo, array $selected): array
 {
     $email = trim((string) ($selected['recipient_email'] ?? ''));
@@ -860,7 +893,7 @@ function handle_customer_offer_send(RenewalRepository $repo, int $renewalId): vo
         }
         $message = trim((string) ($_POST['message'] ?? ''));
         if ($message === '') {
-            $message = 'Seçilen tedarikçi teklifleri üzerinden yenileme teklifinizi hazırladık. Lütfen fiyatları inceleyip onay, revize veya red tercihinizi iletin.';
+            $message = 'Seçilen fiyatlar üzerinden yenileme teklifinizi hazırladık. Lütfen fiyatları inceleyip onay, revize veya red tercihinizi iletin.';
         }
 
         $sent = 0;
@@ -5883,9 +5916,11 @@ function render_dashboard_lane(array $rows, string $variant, bool $canManage, bo
                     <div class="track-actions">
                         <?php if ($canManage && $variant !== 'offers'): ?>
                             <button type="button" class="button small primary" data-dialog-open="renewal-customer-send-<?= h($row['id']) ?>">Müşteriye gönder</button>
+                            <button type="button" class="button small secondary" data-dialog-open="manual-price-<?= h($row['id']) ?>">Manuel fiyat ver</button>
                             <button type="button" class="button small supplier-price" data-dialog-open="supplier-price-<?= h($row['id']) ?>">Tedarikçiden fiyat al</button>
                             <a href="<?= h(url('/renewals/' . $row['id'] . '/edit')) ?>" class="button small secondary">Düzenle</a>
                             <?= render_renewal_communication_dialogs($row) ?>
+                            <?= render_manual_price_dialog($row) ?>
                             <?= render_supplier_price_request_dialog($row) ?>
                         <?php endif; ?>
                         <?php if ($variant === 'offers'): ?>
@@ -10443,6 +10478,7 @@ function render_renewal_actions(array $row, bool $canManage, bool $canDelete, bo
         <?php endif; ?>
         <?php if ($canManage): ?>
             <button type="button" class="button small primary" data-dialog-open="renewal-customer-send-<?= h($row['id']) ?>">Müşteriye gönder</button>
+            <button type="button" class="button small secondary" data-dialog-open="manual-price-<?= h($row['id']) ?>">Manuel fiyat ver</button>
             <button type="button" class="button small supplier-price" data-dialog-open="supplier-price-<?= h($row['id']) ?>">Tedarikçiden fiyat al</button>
             <a href="<?= h(url('/renewals/' . $row['id'] . '/edit')) ?>" class="button small">Düzenle</a>
             <button type="button" class="button small primary" data-dialog-open="renewal-decision-approved-<?= h($row['id']) ?>">Onaylandı</button>
@@ -10450,6 +10486,7 @@ function render_renewal_actions(array $row, bool $canManage, bool $canDelete, bo
             <button type="button" class="button small secondary" data-dialog-open="renewal-decision-postponed-<?= h($row['id']) ?>">Ertelendi</button>
             <button type="button" class="button small secondary" data-dialog-open="renewal-decision-revision-<?= h($row['id']) ?>">Revize istendi</button>
             <?= render_renewal_communication_dialogs($row) ?>
+            <?= render_manual_price_dialog($row) ?>
             <?= render_supplier_price_request_dialog($row) ?>
             <?= render_renewal_decision_dialogs($row) ?>
         <?php endif; ?>
@@ -10748,6 +10785,92 @@ function render_supplier_price_request_dialog(array $row): string
     return (string) ob_get_clean();
 }
 
+function render_manual_price_dialog(array $row): string
+{
+    $id = (int) ($row['id'] ?? 0);
+    if ($id < 1) {
+        return '';
+    }
+
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+    $currency = normalize_allowed_currency($row['currency'] ?? 'TRY');
+    $items = [];
+    try {
+        $items = (new RenewalRepository())->renewalItems($id);
+    } catch (Throwable) {
+        $items = [];
+    }
+
+    if ($items === []) {
+        $items = [[
+            'id' => 0,
+            'title' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Ürün / hizmet')),
+            'brand' => (string) ($row['brand'] ?? ''),
+            'quantity' => 1,
+            'unit_price' => $row['amount'] ?? '',
+        ]];
+    }
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog communication-dialog manual-price-dialog" id="manual-price-<?= h((string) $id) ?>">
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <h2>Manuel fiyat ver</h2>
+                    <span>Tedarikçi teklifini beklemeden kalemlere satış fiyatı girip müşteri teklif ekranını hazırlayın.</span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+
+            <form method="post" action="<?= h(url('/renewals/' . $id . '/manual-price')) ?>" class="form-grid manual-price-form">
+                <?= csrf_field() ?>
+                <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                <label class="span-2">
+                    Para birimi
+                    <select name="manual_price_currency">
+                        <?php foreach (allowed_currency_options() as $currencyOption): ?>
+                            <?= option($currencyOption, $currencyOption, $currency) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+
+                <div class="manual-price-lines span-2">
+                    <?php foreach ($items as $item): ?>
+                        <?php
+                        $itemId = (int) ($item['id'] ?? 0);
+                        $quantity = max(1.0, (float) ($item['quantity'] ?? 1));
+                        $unitPrice = ($item['unit_price'] ?? null) === null ? '' : (string) $item['unit_price'];
+                        ?>
+                        <div class="manual-price-line">
+                            <div>
+                                <strong><?= h((string) (($item['title'] ?? '') ?: 'Ürün / hizmet')) ?></strong>
+                                <span>
+                                    <?= h(number_format($quantity, 2, ',', '.')) ?> adet
+                                    <?php if (!empty($item['brand'])): ?>
+                                        · <?= h((string) $item['brand']) ?>
+                                    <?php endif; ?>
+                                </span>
+                            </div>
+                            <label>
+                                Birim satış fiyatı
+                                <input type="number" min="0" step="0.01" name="manual_prices[<?= h((string) $itemId) ?>][unit_price]" value="<?= h($unitPrice) ?>" placeholder="Örn: 1200.00">
+                            </label>
+                            <input type="hidden" name="manual_prices[<?= h((string) $itemId) ?>][renewal_item_id]" value="<?= h((string) $itemId) ?>">
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+
+                <p class="muted compact span-2">Boş bıraktığınız kalemler değişmez. Kaydettikten sonra kart içindeki “Müşteriye teklif gönder” butonu aktif olur; teklif ekranında fiyatı, KDV oranını ve mesajı tekrar düzenleyebilirsiniz.</p>
+                <button type="submit" class="button primary span-2">Manuel fiyatı kaydet</button>
+            </form>
+        </div>
+    </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
 function supplier_quote_generated_links(int $renewalId): array
 {
     $links = $_SESSION['_supplier_quote_links'][$renewalId] ?? [];
@@ -10769,7 +10892,7 @@ function render_customer_offer_dialog(array $row, array $selectedQuotes): string
     $contacts = renewal_customer_contacts($row);
     $currency = normalize_allowed_currency($row['currency'] ?? 'TRY');
     $subject = 'Yenileme teklifiniz: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Ürün / hizmet'));
-    $message = 'Seçilen tedarikçi teklifleri üzerinden yenileme teklifinizi hazırladık. Lütfen fiyatları inceleyip onay, revize veya red tercihinizi iletin.';
+    $message = 'Seçilen fiyatlar üzerinden yenileme teklifinizi hazırladık. Lütfen fiyatları inceleyip onay, revize veya red tercihinizi iletin.';
 
     ob_start();
     ?>
@@ -10778,7 +10901,7 @@ function render_customer_offer_dialog(array $row, array $selectedQuotes): string
             <div class="section-head dialog-head">
                 <div>
                     <h2>Müşteriye teklif gönder</h2>
-                    <span>Seçili tedarikçi fiyatlarından müşteriye onay/revize/red bağlantılı teklif hazırlayın.</span>
+                    <span>Seçili fiyatlardan müşteriye onay/revize/red bağlantılı teklif hazırlayın.</span>
                 </div>
                 <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
             </div>
@@ -11087,7 +11210,7 @@ function render_supplier_quote_comparison(RenewalRepository $repo, array $row): 
     $selectedQuotes = $repo->selectedSupplierQuotesForRenewal($renewalId);
     $customerOffers = $repo->customerOffersForRenewal($renewalId);
 
-    if ($requests === [] && $lines === [] && $customerOffers === []) {
+    if ($requests === [] && $lines === [] && $selectedQuotes === [] && $customerOffers === []) {
         return '';
     }
 
@@ -11114,14 +11237,29 @@ function render_supplier_quote_comparison(RenewalRepository $repo, array $row): 
     <div class="supplier-quotes-panel">
         <div class="section-head compact">
             <div>
-                <h3>Tedarikçi teklifleri</h3>
-                <span><?= h((string) $submitted) ?> / <?= h((string) count($requests)) ?> tedarikçi teklif verdi. Her kalemde ayrı tedarikçi seçebilirsiniz.</span>
+                <h3>Fiyat teklifleri</h3>
+                <span>
+                    <?php if ($requests !== []): ?>
+                        <?= h((string) $submitted) ?> / <?= h((string) count($requests)) ?> tedarikçi teklif verdi. Her kalemde ayrı tedarikçi seçebilirsiniz.
+                    <?php else: ?>
+                        Manuel fiyatla müşteri teklif ekranı hazırlanabilir.
+                    <?php endif; ?>
+                </span>
             </div>
             <?php if ($selectedQuotes !== []): ?>
                 <button type="button" class="button small primary" data-dialog-open="customer-offer-<?= h((string) $renewalId) ?>">Müşteriye teklif gönder</button>
             <?php endif; ?>
         </div>
         <?php if ($selectedQuotes !== []): ?>
+            <div class="supplier-selected-manual-list">
+                <?php foreach ($selectedQuotes as $selection): ?>
+                    <span>
+                        <b><?= h((string) (($selection['item_title'] ?? '') ?: 'Ürün / hizmet')) ?></b>
+                        <?= h(supplier_quote_term_label((string) ($selection['selected_term'] ?? ''), (string) ($selection['custom_term'] ?? ''))) ?>
+                        · <?= h(money_format_local($selection['selected_price'] ?? null, (string) ($selection['selected_currency'] ?? 'TRY'))) ?>
+                    </span>
+                <?php endforeach; ?>
+            </div>
             <?= render_customer_offer_dialog($row, $selectedQuotes) ?>
         <?php endif; ?>
         <?= render_supplier_quote_request_manager($requests, $returnTo) ?>
@@ -11478,6 +11616,7 @@ function supplier_quote_term_label(string $term, string $customTerm = ''): strin
         '30' => '30 gün',
         '60' => '60 gün',
         'check' => 'Çek / vade',
+        'manual' => 'Manuel fiyat',
         'custom' => $customTerm !== '' ? $customTerm : 'Özel vade',
         default => $term,
     };

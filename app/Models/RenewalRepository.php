@@ -1022,7 +1022,7 @@ final class RenewalRepository
 
         $stmt = $this->db->prepare(
             "SELECT sqr.*,
-                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    COALESCE(sqr.supplier_name, s.company_name, CASE WHEN sqs.quote_line_id IS NULL THEN \'Manuel fiyat\' ELSE NULL END) AS supplier_display,
                     r.title,
                     r.renewal_date,
                     r.supplier_share_customer_info,
@@ -1228,6 +1228,68 @@ final class RenewalRepository
         ];
     }
 
+    public function selectManualCustomerPrices(int $renewalId, mixed $rows, int $userId, string $currency = 'TRY'): array
+    {
+        if (!is_array($rows)) {
+            throw new \RuntimeException('Manuel fiyat satırı bulunamadı.');
+        }
+
+        $items = [];
+        foreach ($this->renewalItems($renewalId) as $item) {
+            $items[(int) $item['id']] = $item;
+        }
+        if ($items === []) {
+            throw new \RuntimeException('Fiyat girilecek ürün / hizmet kalemi bulunamadı.');
+        }
+
+        $currency = self::normalizeCurrency($currency);
+        $stmt = $this->db->prepare(
+            'INSERT INTO supplier_quote_selections
+                (renewal_id, renewal_item_id, quote_line_id, selected_term, selected_price, currency, selected_by, selected_at)
+             VALUES
+                (:renewal_id, :renewal_item_id, NULL, \'manual\', :selected_price, :currency, :selected_by, NOW())
+             ON DUPLICATE KEY UPDATE
+                quote_line_id = NULL,
+                selected_term = VALUES(selected_term),
+                selected_price = VALUES(selected_price),
+                currency = VALUES(currency),
+                selected_by = VALUES(selected_by),
+                selected_at = NOW()'
+        );
+
+        $saved = 0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $itemId = (int) ($row['renewal_item_id'] ?? 0);
+            if ($itemId < 1 || !isset($items[$itemId])) {
+                continue;
+            }
+
+            $price = $this->nullableDecimalValue($row['unit_price'] ?? null);
+            if ($price === null || $price <= 0) {
+                continue;
+            }
+
+            $stmt->execute([
+                'renewal_id' => $renewalId,
+                'renewal_item_id' => $itemId,
+                'selected_price' => round($price, 2),
+                'currency' => $currency,
+                'selected_by' => $userId > 0 ? $userId : null,
+            ]);
+            $saved++;
+        }
+
+        if ($saved < 1) {
+            throw new \RuntimeException('En az bir kalem için geçerli manuel fiyat yazın.');
+        }
+
+        return ['count' => $saved, 'currency' => $currency];
+    }
+
     public function selectedSupplierQuotesForRenewal(int $renewalId): array
     {
         $stmt = $this->db->prepare(
@@ -1243,10 +1305,10 @@ final class RenewalRepository
                     ri.quantity,
                     ri.vat_rate,
                     sqln.custom_term,
-                    sqln.vat_included,
+                    COALESCE(sqln.vat_included, 1) AS vat_included,
                     sqln.delivery_note,
                     sqln.note,
-                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    COALESCE(sqr.supplier_name, s.company_name, CASE WHEN sqs.quote_line_id IS NULL THEN \'Manuel fiyat\' ELSE NULL END) AS supplier_display,
                     sqr.recipient_email,
                     sqr.contact_name
              FROM supplier_quote_selections sqs

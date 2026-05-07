@@ -5492,6 +5492,57 @@ label {
     gap: 12px;
 }
 
+.manual-price-dialog {
+    width: min(94vw, 820px);
+}
+
+.manual-price-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.manual-price-lines,
+.supplier-selected-manual-list {
+    display: grid;
+    gap: 10px;
+}
+
+.manual-price-line,
+.supplier-selected-manual-list span {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(180px, .8fr);
+    gap: 12px;
+    align-items: center;
+    padding: 12px;
+    border: 1px solid #d9e4e0;
+    border-radius: 8px;
+    background: #fbfdfc;
+}
+
+.manual-price-line strong,
+.supplier-selected-manual-list b {
+    display: block;
+    font-size: 14px;
+}
+
+.manual-price-line span {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.supplier-selected-manual-list {
+    margin-bottom: 12px;
+}
+
+.supplier-selected-manual-list span {
+    grid-template-columns: minmax(0, 1fr);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 800;
+}
+
 .customer-offer-line-editor {
     display: grid;
     gap: 10px;
@@ -6050,6 +6101,8 @@ label {
     .supplier-quote-item-head,
     .supplier-quote-pricing-head,
     .supplier-quote-extra-grid,
+    .manual-price-form,
+    .manual-price-line,
     .customer-offer-line,
     .company-letterhead,
     .customer-offer-form,
@@ -6242,6 +6295,8 @@ label {
     .payment-request-summary,
     .payment-request-actions,
     .manual-payment-row,
+    .manual-price-form,
+    .manual-price-line,
     .manual-payment-contact-option,
     .manual-payment-recipient-card,
     .customer-offer-history-card summary,
