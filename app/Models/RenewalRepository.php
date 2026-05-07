@@ -1567,7 +1567,13 @@ final class RenewalRepository
                     c.company_name,
                     c.contact_name,
                     c.email AS customer_email,
-                    c.phone AS customer_phone
+                    c.phone AS customer_phone,
+                    c.tax_office AS customer_tax_office,
+                    c.tax_number AS customer_tax_number,
+                    c.city AS customer_city,
+                    c.district AS customer_district,
+                    c.address AS customer_address,
+                    c.parasut_contact_id
              FROM customer_offer_requests cor
              INNER JOIN renewals r ON r.id = cor.renewal_id
              INNER JOIN customers c ON c.id = r.customer_id
@@ -1575,6 +1581,39 @@ final class RenewalRepository
              LIMIT 1"
         );
         $stmt->execute(['token_hash' => hash('sha256', strtolower($token))]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function findCustomerOfferById(int $offerId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT cor.*,
+                    r.customer_id,
+                    r.title,
+                    r.brand,
+                    r.kind,
+                    r.license_key,
+                    r.renewal_date,
+                    r.start_date,
+                    c.company_name,
+                    c.contact_name,
+                    c.email AS customer_email,
+                    c.phone AS customer_phone,
+                    c.tax_office AS customer_tax_office,
+                    c.tax_number AS customer_tax_number,
+                    c.city AS customer_city,
+                    c.district AS customer_district,
+                    c.address AS customer_address,
+                    c.parasut_contact_id
+             FROM customer_offer_requests cor
+             INNER JOIN renewals r ON r.id = cor.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             WHERE cor.id = :id
+             LIMIT 1"
+        );
+        $stmt->execute(['id' => $offerId]);
         $row = $stmt->fetch();
 
         return $row ?: null;
@@ -1707,6 +1746,40 @@ final class RenewalRepository
         if ($stmt->rowCount() < 1) {
             throw new \RuntimeException('Bu teklif daha once yanitlanmis veya artik yanitlanamaz.');
         }
+    }
+
+    public function markCustomerOfferParasutInvoice(int $offerId, array $invoice): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE customer_offer_requests
+             SET parasut_invoice_id = :invoice_id,
+                 parasut_invoice_no = :invoice_no,
+                 parasut_invoice_status = 'created',
+                 parasut_invoice_error = NULL,
+                 parasut_invoice_created_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = :id"
+        );
+        $stmt->execute([
+            'id' => $offerId,
+            'invoice_id' => trim((string) ($invoice['id'] ?? '')),
+            'invoice_no' => $this->nullableString($invoice['invoice_no'] ?? ''),
+        ]);
+    }
+
+    public function markCustomerOfferParasutInvoiceError(int $offerId, string $error): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE customer_offer_requests
+             SET parasut_invoice_status = 'failed',
+                 parasut_invoice_error = :error,
+                 updated_at = NOW()
+             WHERE id = :id"
+        );
+        $stmt->execute([
+            'id' => $offerId,
+            'error' => mb_substr(trim($error), 0, 2000),
+        ]);
     }
 
     public function applyCustomerOfferToRenewal(int $renewalId, int $offerId): void
@@ -2790,6 +2863,12 @@ final class RenewalRepository
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
         $this->ensureColumn('customer_offer_requests', 'view_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER opened_at');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_id', 'VARCHAR(64) NULL AFTER total');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_no', 'VARCHAR(120) NULL AFTER parasut_invoice_id');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_status', "VARCHAR(30) NULL AFTER parasut_invoice_no");
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_error', 'TEXT NULL AFTER parasut_invoice_status');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_created_at', 'DATETIME NULL AFTER parasut_invoice_error');
+        $this->ensureIndex('customer_offer_requests', 'idx_customer_offer_parasut_invoice', 'INDEX idx_customer_offer_parasut_invoice (parasut_invoice_id)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS customer_offer_lines (

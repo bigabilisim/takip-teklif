@@ -211,6 +211,9 @@ try {
     } elseif (preg_match('#^/renewals/(\d+)/customer-offer/send$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_customer_offer_send($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/customer-offers/(\d+)/parasut-invoice$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_customer_offer_parasut_invoice($repo, (int) $matches[1]);
     } elseif (preg_match('#^/customer-offers/(\d+)/delete$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_customer_offer_delete($repo, (int) $matches[1]);
@@ -958,6 +961,61 @@ function handle_customer_offer_delete(RenewalRepository $repo, int $offerId): vo
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function handle_customer_offer_parasut_invoice(RenewalRepository $repo, int $offerId): void
+{
+    verify_csrf();
+    $result = create_parasut_invoice_for_customer_offer($repo, $offerId);
+
+    if (!empty($result['ok'])) {
+        $invoice = (array) ($result['invoice'] ?? []);
+        $label = trim((string) ($invoice['invoice_no'] ?? '')) ?: trim((string) ($invoice['id'] ?? ''));
+        flash('success', $label !== '' ? 'Paraşüt faturası oluşturuldu: ' . $label : 'Paraşüt faturası oluşturuldu.');
+    } else {
+        flash('error', 'Paraşüt faturası oluşturulamadı: ' . (string) ($result['error'] ?? 'Bilinmeyen hata'));
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function create_parasut_invoice_for_customer_offer(RenewalRepository $repo, int $offerId): array
+{
+    $offer = $repo->findCustomerOfferById($offerId);
+    if (!$offer) {
+        return ['ok' => false, 'error' => 'Müşteri teklifi bulunamadı.'];
+    }
+
+    if ((string) ($offer['status'] ?? '') !== 'approved') {
+        return ['ok' => false, 'error' => 'Sadece onaylanan teklifler Paraşüt faturası oluşturabilir.'];
+    }
+
+    if (trim((string) ($offer['parasut_invoice_id'] ?? '')) !== '') {
+        return [
+            'ok' => true,
+            'already_created' => true,
+            'invoice' => [
+                'id' => (string) ($offer['parasut_invoice_id'] ?? ''),
+                'invoice_no' => (string) ($offer['parasut_invoice_no'] ?? ''),
+            ],
+        ];
+    }
+
+    try {
+        $lines = $repo->customerOfferLines($offerId);
+        $invoice = (new ParasutClient())->createSalesInvoiceFromOffer($offer, $lines);
+        if (trim((string) ($invoice['id'] ?? '')) === '') {
+            throw new RuntimeException('Paraşüt fatura ID dönmedi.');
+        }
+
+        $repo->markCustomerOfferParasutInvoice($offerId, $invoice);
+
+        return ['ok' => true, 'invoice' => $invoice];
+    } catch (Throwable $e) {
+        $repo->markCustomerOfferParasutInvoiceError($offerId, $e->getMessage());
+
+        return ['ok' => false, 'error' => $e->getMessage()];
+    }
 }
 
 function customer_offer_recipients_from_request(RenewalRepository $repo, array $row): array
@@ -4887,16 +4945,18 @@ function handle_customer_offer_public(string $method, string $token): void
             );
 
             $supplierMailSummary = ['sent' => 0, 'failed' => 0];
+            $parasutInvoiceSummary = ['ok' => false, 'skipped' => true];
             if ($decision === 'approved') {
                 $repo->applyCustomerOfferToRenewal((int) $offer['renewal_id'], (int) $offer['id']);
                 $supplierMailSummary = send_supplier_customer_offer_approval_emails($repo, $offer, $lines);
+                $parasutInvoiceSummary = create_parasut_invoice_for_customer_offer($repo, (int) $offer['id']);
             }
 
             $paymentUrl = $decision === 'approved'
                 ? PaymentLink::urlForRenewal((int) $offer['renewal_id'], 60, (string) ($offer['recipient_email'] ?? ''))
                 : '';
 
-            render_public_layout('Müşteri Teklifi', static function () use ($decision, $paymentUrl, $supplierMailSummary): void {
+            render_public_layout('Müşteri Teklifi', static function () use ($decision, $paymentUrl, $supplierMailSummary, $parasutInvoiceSummary): void {
                 ?>
                 <section class="public-card payment-result-card success">
                     <p class="eyebrow">Teklif yanıtı</p>
@@ -4904,6 +4964,12 @@ function handle_customer_offer_public(string $method, string $token): void
                     <?php if ($decision === 'approved'): ?>
                         <p>Teşekkür ederiz. Seçilen tedarikçilere işlem bilgisi iletildi.</p>
                         <p class="muted compact">Tedarikçi mail durumu: <?= h((string) $supplierMailSummary['sent']) ?> gönderildi, <?= h((string) $supplierMailSummary['failed']) ?> başarısız.</p>
+                        <?php if (!empty($parasutInvoiceSummary['ok'])): ?>
+                            <?php $invoice = (array) ($parasutInvoiceSummary['invoice'] ?? []); ?>
+                            <p class="muted compact">Fatura aktarımı: Paraşüt faturası oluşturuldu<?= !empty($invoice['invoice_no']) ? ' (' . h((string) $invoice['invoice_no']) . ')' : '' ?>.</p>
+                        <?php else: ?>
+                            <p class="muted compact">Fatura aktarımı firma yetkilisi tarafından kontrol edilecek.</p>
+                        <?php endif; ?>
                         <?php if ($paymentUrl !== ''): ?>
                             <a class="button primary" href="<?= h($paymentUrl) ?>">Ödeme seçimine geç</a>
                         <?php endif; ?>
@@ -11098,7 +11164,31 @@ function render_customer_offer_history(array $offers): string
                     <?php if (!empty($offer['responded_at'])): ?>
                         <p class="muted compact">Yanıt tarihi: <?= h(date('d.m.Y H:i', strtotime((string) $offer['responded_at']))) ?></p>
                     <?php endif; ?>
+                    <?php
+                    $parasutInvoiceId = trim((string) ($offer['parasut_invoice_id'] ?? ''));
+                    $parasutInvoiceNo = trim((string) ($offer['parasut_invoice_no'] ?? ''));
+                    $parasutStatus = trim((string) ($offer['parasut_invoice_status'] ?? ''));
+                    ?>
+                    <?php if ($status === 'approved' || $parasutStatus !== ''): ?>
+                        <div class="settings-note compact">
+                            <strong>Paraşüt faturası</strong>
+                            <?php if ($parasutInvoiceId !== ''): ?>
+                                <span><?= h($parasutInvoiceNo !== '' ? $parasutInvoiceNo : '#' . $parasutInvoiceId) ?> oluşturuldu<?= !empty($offer['parasut_invoice_created_at']) ? ' · ' . h(date('d.m.Y H:i', strtotime((string) $offer['parasut_invoice_created_at']))) : '' ?></span>
+                            <?php elseif ($parasutStatus === 'failed'): ?>
+                                <span>Oluşturulamadı: <?= h((string) ($offer['parasut_invoice_error'] ?? 'Bilinmeyen hata')) ?></span>
+                            <?php else: ?>
+                                <span>Henüz oluşturulmadı.</span>
+                            <?php endif; ?>
+                        </div>
+                    <?php endif; ?>
                     <div class="customer-offer-history-actions">
+                        <?php if ($status === 'approved' && $parasutInvoiceId === ''): ?>
+                            <form method="post" action="<?= h(url('/customer-offers/' . (int) $offer['id'] . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu onaylı teklif için Paraşüt faturası oluşturulsun mu?')">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                                <button type="submit" class="button primary small">Paraşüt faturası oluştur</button>
+                            </form>
+                        <?php endif; ?>
                         <form method="post" action="<?= h(url('/customer-offers/' . (int) $offer['id'] . '/delete')) ?>" onsubmit="return confirm('Bu müşteri teklif geçmişi silinsin mi? Teklif linki geçersiz olur, müşteriye bilgi maili gönderilmez.')">
                             <?= csrf_field() ?>
                             <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">

@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.1] - 2026-05-08
+
+- Müşteri teklif onayından sonra Paraşüt satış faturası otomatik oluşturma akışı eklendi.
+- Onaylı müşteri teklif geçmişinde Paraşüt fatura no, aktarım durumu, hata detayı ve manuel tekrar oluşturma aksiyonu gösterilir hale geldi.
+
 ## [2.0.0] - 2026-05-08
 
 - Hızlı Takip ve Teklif Platformu ana sürümü V2 olarak başlatıldı.
