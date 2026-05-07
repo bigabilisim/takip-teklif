@@ -1,5 +1,74 @@
 # Changelog
 
+## [1.0.68] - 2026-05-07
+
+- iyzico kredi kartı linklerinde USD/EUR seçildiğinde tutar TCMB satış kuruyla TL’ye çevrilip TRY POS üzerinden ödeme linki oluşturulacak şekilde düzeltildi.
+- Kredi kartı tahsilatı formuna iyzico’nun TL POS davranışını ve yaklaşık TL karşılığını açıklayan bilgilendirme eklendi.
+- Kart ödeme kayıtlarında iyzico’ya gönderilen TL tutar saklanırken ham istek kaydına orijinal döviz tutarı ve kur bilgisi eklendi.
+
+## [1.0.67] - 2026-05-07
+
+- WhatsApp gönderim bağlantıları `wa.me` yerine doğrudan WhatsApp Web gönderim ekranına yönlendirilecek şekilde değiştirildi.
+- WhatsApp butonları aynı isimli `takip_whatsapp_web` sekmesini/penceresini kullanır hale getirildi; sekme yoksa açar, varsa aynı sekmede devam eder.
+
+## [1.0.66] - 2026-05-07
+
+- Mail log detayındaki içerik alanı ham HTML yerine render edilmiş mail önizlemesi olarak gösterilecek şekilde değiştirildi.
+- Önizlemede kayıtlı uygulama logosu `cid:app_logo` yerine paneldeki logo adresiyle gösterilir hale getirildi.
+
+## [1.0.65] - 2026-05-07
+
+- Loglar ekranı “Mail logları” olarak yeniden adlandırıldı ve Ayarlar bölümünün altına taşındı.
+- Eski `/logs` adresi yeni `/settings/mail-logs` adresine yönlendirilecek şekilde korundu.
+- Mail gönderim kayıtlarına Detay açılımı eklendi; alıcı, konu, durum, tarih ve gönderilen mail içeriği güvenli içerik görünümüyle incelenebilir hale getirildi.
+
+## [1.0.64] - 2026-05-07
+
+- Manuel ödeme talebi formuna kayıtlı cariden canlı unvan arama ve seçme eklendi.
+- Cari seçilince e-posta, telefon, vergi no alanları otomatik doldurulur hale getirildi.
+- Seçilen carinin yetkilileri kutucuklar halinde gösterilip ödeme linki için istenen yetkilileri seçme ve oluşturulan talepten yetkili bazlı WhatsApp/mail gönderme eklendi.
+
+## [1.0.63] - 2026-05-07
+
+- Ödeme Talep Et sayfası yenileme/tahsilat kaydından bağımsız manuel ödeme case akışına çevrildi.
+- Manuel ödeme talepleri için tutar, para birimi, müşteri iletişimi, açıklama, ödeme linki, WhatsApp ve mail gönderim aksiyonları eklendi.
+- Manuel ödeme taleplerine özel ödeme ve gönderim log tabloları eklendi; iyzico dönüşleri manuel talepleri ödendi durumuna alacak şekilde genişletildi.
+
+## [1.0.62] - 2026-05-07
+
+- Sol menüye “Ödeme Talep Et” sayfası eklendi.
+- Açık tahsilat kayıtları için ödeme talebi oluşturma, WhatsApp ile gönderme, mail atma ve direkt ödeme linki açma aksiyonları eklendi.
+- Ödeme talebi mail gönderimleri mail loglarına işlenir hale getirildi.
+
+## [1.0.61] - 2026-05-07
+
+- Akış Şemaları sol menüden kaldırılıp Ayarlar bölümünün içine taşındı.
+- Yeni akış adresi `/settings/flows` oldu; eski `/flows` bağlantısı yeni adrese yönlendirilir.
+- Ayarlar üst aksiyonlarına Akış Şemaları butonu eklendi.
+
+## [1.0.60] - 2026-05-07
+
+- Ayarlar ekranındaki kategori kartları satır hizasına sabitlendi; kartlar artık kolonlarda boşluk bırakarak dağılmıyor.
+- Kategori düzeninde sürükleme kontrolü gizlendi; ayar kartları daha temiz tek aksiyonlu satır yapısına alındı.
+
+## [1.0.59] - 2026-05-07
+
+- Ayarlar ekranı üç kategoriye ayrıldı: İletişim ve marka, Entegrasyon ve ödeme, Sistem.
+- Ayar kartları daha kompakt tek satır yapıya alındı; durum rozeti ve Ayarla aksiyonu aynı satırda kalacak şekilde düzenlendi.
+- Sıralama kontrolü görsel olarak küçültüldü ve mobilde kategori kolonları tek kolona düşecek şekilde responsive hale getirildi.
+
+## [1.0.58] - 2026-05-07
+
+- Kredi kartı ödemesinde yalnızca doğrulanmış iyzico ödeme numarası olan başarılı kayıtlar tahsil edilmiş sayılacak şekilde kontrol sıkılaştırıldı.
+- Eski bir başarılı kart ödemesinin yeni ödeme linkini “tamamlandı” göstermemesi için ödeme seçimi tarihinden sonraki tahsilat kontrolü eklendi.
+- iyzico dönüşünde tutar ve ödeme numarası doğrulaması güçlendirildi; ödeme tamamlanmadıysa müşteri tekrar ödeme adımına yönlenir.
+
+## [1.0.57] - 2026-05-07
+
+- PayTR kredi kartı entegrasyonu ve PayTR ayar kartı sistemden kaldırıldı.
+- Kredi kartı ödeme akışı tekrar yalnızca iyzico Checkout Form üzerinden çalışacak şekilde sadeleştirildi.
+- Yenileme düzenleme ekranındaki kredi kartı tahsilatı bilgilendirmeleri iyzico odaklı hale getirildi.
+
 ## [1.0.56] - 2026-05-07
 
 - Sol menüye “Akış Şemaları” bölümü eklendi.

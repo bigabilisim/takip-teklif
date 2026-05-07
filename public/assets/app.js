@@ -783,6 +783,157 @@
         "'": '&#039;',
     }[character]));
 
+    const normalizeSearchText = (value) => String(value || '')
+        .toLocaleLowerCase('tr-TR')
+        .replaceAll('ı', 'i')
+        .replaceAll('ğ', 'g')
+        .replaceAll('ü', 'u')
+        .replaceAll('ş', 's')
+        .replaceAll('ö', 'o')
+        .replaceAll('ç', 'c')
+        .replaceAll('İ', 'i')
+        .replaceAll('Ğ', 'g')
+        .replaceAll('Ü', 'u')
+        .replaceAll('Ş', 's')
+        .replaceAll('Ö', 'o')
+        .replaceAll('Ç', 'c')
+        .trim();
+
+    document.querySelectorAll('[data-manual-payment-form]').forEach((form) => {
+        const source = document.getElementById('manual-payment-customers-json');
+        let customers = [];
+        try {
+            customers = source?.textContent ? JSON.parse(source.textContent) : [];
+        } catch (error) {
+            customers = [];
+        }
+
+        const input = form.querySelector('[data-manual-customer-input]');
+        const customerId = form.querySelector('[data-manual-customer-id]');
+        const email = form.querySelector('[data-manual-customer-email]');
+        const phone = form.querySelector('[data-manual-customer-phone]');
+        const tax = form.querySelector('[data-manual-customer-tax]');
+        const results = form.querySelector('[data-manual-customer-results]');
+        const contactPanel = form.querySelector('[data-manual-contact-panel]');
+        const contactList = form.querySelector('[data-manual-contact-list]');
+        const contactCount = form.querySelector('[data-manual-contact-count]');
+
+        if (!input || !results || !customerId || !contactPanel || !contactList) {
+            return;
+        }
+
+        const renderContacts = (customer) => {
+            const contacts = Array.isArray(customer?.contacts) ? customer.contacts : [];
+            contactList.innerHTML = '';
+
+            if (contacts.length < 1) {
+                contactPanel.hidden = false;
+                contactList.innerHTML = '<div class="empty compact">Bu caride e-posta veya telefon bilgisi olan yetkili yok.</div>';
+                if (contactCount) {
+                    contactCount.textContent = '0 yetkili';
+                }
+                return;
+            }
+
+            contacts.forEach((contact) => {
+                const id = Number(contact.id || 0);
+                const name = String(contact.name || 'Yetkili');
+                const contactEmail = String(contact.email || '');
+                const contactPhone = String(contact.phone || '');
+                const checked = contact.notify ? 'checked' : '';
+                const badge = contact.notify ? '<span class="manual-payment-contact-badge">Bilgilendirme açık</span>' : '';
+                contactList.insertAdjacentHTML('beforeend', `
+                    <label class="manual-payment-contact-option">
+                        <input type="checkbox" name="selected_contact_ids[]" value="${id}" ${checked}>
+                        <span class="manual-payment-contact-info">
+                            <strong>${escapeHtml(name)}</strong>
+                            <em>${escapeHtml(contactEmail || contactPhone || '-')}</em>
+                        </span>
+                        ${badge}
+                    </label>
+                `);
+            });
+
+            contactPanel.hidden = false;
+            if (contactCount) {
+                contactCount.textContent = `${contacts.length} yetkili`;
+            }
+        };
+
+        const selectCustomer = (customer) => {
+            input.value = String(customer.name || '');
+            customerId.value = String(customer.id || '');
+            if (email && !email.value) {
+                email.value = String(customer.email || '');
+            }
+            if (phone && !phone.value) {
+                phone.value = String(customer.phone || '');
+            }
+            if (tax && !tax.value) {
+                tax.value = String(customer.tax || '');
+            }
+            results.hidden = true;
+            renderContacts(customer);
+        };
+
+        const renderResults = () => {
+            const query = normalizeSearchText(input.value);
+            results.innerHTML = '';
+
+            if (query === '') {
+                results.hidden = true;
+                return;
+            }
+
+            const matches = customers
+                .filter((customer) => {
+                    const haystack = normalizeSearchText([
+                        customer.name,
+                        customer.email,
+                        customer.phone,
+                        customer.tax,
+                    ].join(' '));
+
+                    return haystack.includes(query);
+                })
+                .slice(0, 8);
+
+            if (matches.length < 1) {
+                results.innerHTML = '<div class="manual-payment-customer-empty">Cari bulunamadı. Manuel yazmaya devam edebilirsiniz.</div>';
+                results.hidden = false;
+                return;
+            }
+
+            matches.forEach((customer) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'manual-payment-customer-result';
+                button.innerHTML = `
+                    <strong>${escapeHtml(customer.name || '-')}</strong>
+                    <span>${escapeHtml(customer.email || customer.phone || customer.tax || 'Cari')}</span>
+                `;
+                button.addEventListener('click', () => selectCustomer(customer));
+                results.appendChild(button);
+            });
+            results.hidden = false;
+        };
+
+        input.addEventListener('input', () => {
+            customerId.value = '';
+            contactPanel.hidden = true;
+            contactList.innerHTML = '';
+            renderResults();
+        });
+
+        input.addEventListener('focus', renderResults);
+
+        document.addEventListener('click', (event) => {
+            if (!form.contains(event.target)) {
+                results.hidden = true;
+            }
+        });
+    });
+
     const supplierLinkCard = (link) => {
         const url = String(link?.url || '');
         const label = String(link?.label || 'Tedarikçi');

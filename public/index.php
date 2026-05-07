@@ -10,11 +10,11 @@ use App\Core\IyzicoClient;
 use App\Core\Mailer;
 use App\Core\MailTemplate;
 use App\Core\ParasutClient;
-use App\Core\PaytrClient;
 use App\Core\PaymentLink;
 use App\Core\TaxCertificateAnalyzer;
 use App\Core\WebPush;
 use App\Models\CustomerInfoRequestRepository;
+use App\Models\PaymentRequestRepository;
 use App\Models\RenewalRepository;
 use App\Models\SettingsRepository;
 use App\Models\UserRepository;
@@ -84,18 +84,13 @@ if ($path === '/payments/iyzico/callback') {
     exit;
 }
 
-if ($path === '/payments/paytr/callback') {
-    handle_paytr_callback($method);
+if (preg_match('#^/pay/([A-Za-z0-9_-]{20,120})$#', $path, $matches)) {
+    handle_manual_payment_public($method, (string) $matches[1]);
     exit;
 }
 
-if (preg_match('#^/payments/paytr/frame/([^/]+)$#', $path, $matches)) {
-    handle_paytr_frame(rawurldecode($matches[1]));
-    exit;
-}
-
-if (preg_match('#^/payments/paytr/result/([^/]+)$#', $path, $matches)) {
-    handle_paytr_result(rawurldecode($matches[1]));
+if (preg_match('#^/pay/([A-Za-z0-9_-]{20,120})/card$#', $path, $matches) && $method === 'POST') {
+    handle_manual_payment_card_create((string) $matches[1]);
     exit;
 }
 
@@ -123,7 +118,17 @@ try {
         render_dashboard($repo);
     } elseif ($path === '/flows') {
         require_permission('flows.view');
+        redirect('/settings/flows');
+    } elseif ($path === '/settings/flows') {
+        require_permission('flows.view');
         render_flows($repo);
+    } elseif ($path === '/logs') {
+        require_permission('logs.view');
+        $fileParam = trim((string) ($_GET['file'] ?? ''));
+        redirect('/settings/mail-logs' . ($fileParam !== '' ? '?file=' . rawurlencode($fileParam) : ''));
+    } elseif ($path === '/settings/mail-logs') {
+        require_permission('logs.view');
+        render_logs();
     } elseif ($path === '/api/parasut/contacts' && $method === 'GET') {
         handle_parasut_contacts_api();
     } elseif ($path === '/api/push/public-key' && $method === 'GET') {
@@ -167,15 +172,18 @@ try {
     } elseif (preg_match('#^/renewals/(\d+)/payments/iyzico/create$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_iyzico_payment_create($repo, (int) $matches[1]);
-    } elseif (preg_match('#^/renewals/(\d+)/payments/paytr/create$#', $path, $matches) && $method === 'POST') {
-        require_permission('renewals.manage');
-        handle_paytr_payment_create($repo, (int) $matches[1]);
     } elseif ($path === '/collections') {
         require_permission('collections.view');
         render_collections($repo);
     } elseif (preg_match('#^/collections/(\d+)/mail$#', $path, $matches) && $method === 'POST') {
         require_permission('collections.manage');
         handle_collection_mail($repo, (int) $matches[1]);
+    } elseif ($path === '/payment-requests') {
+        require_permission($method === 'POST' ? 'collections.manage' : 'collections.view');
+        handle_payment_requests_page($method);
+    } elseif (preg_match('#^/payment-requests/(\d+)/mail$#', $path, $matches) && $method === 'POST') {
+        require_permission('collections.manage');
+        handle_payment_request_mail((int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/notify$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_manual_renewal_notification($repo, (int) $matches[1]);
@@ -272,9 +280,6 @@ try {
     } elseif (preg_match('#^/settings/users/(\d+)/edit$#', $path, $matches)) {
         require_permission('users.manage');
         handle_users($method, (int) $matches[1]);
-    } elseif ($path === '/logs') {
-        require_permission('logs.view');
-        render_logs();
     } elseif ($path === '/settings/definitions') {
         require_permission('definitions.manage');
         handle_definitions($repo, $method);
@@ -425,7 +430,8 @@ function handle_iyzico_payment_create(RenewalRepository $repo, int $renewalId): 
     $conversationId = 'renewal-' . $renewalId . '-' . date('YmdHis') . '-' . bin2hex(random_bytes(4));
 
     try {
-        $result = $client->initializeCheckout($renewal, $amount, $currency, $conversationId);
+        $charge = iyzico_charge_payload($amount, $currency);
+        $result = $client->initializeCheckout($renewal, $charge['amount'], $charge['currency'], $conversationId);
         $response = $result['response'];
         $paymentPageUrl = trim((string) ($response['paymentPageUrl'] ?? ''));
         $token = trim((string) ($response['token'] ?? ''));
@@ -435,12 +441,12 @@ function handle_iyzico_payment_create(RenewalRepository $repo, int $renewalId): 
             'renewal_id' => $renewalId,
             'conversation_id' => $conversationId,
             'token' => $token,
-            'amount' => $amount,
-            'currency' => $currency,
+            'amount' => $charge['amount'],
+            'currency' => $charge['currency'],
             'status' => $ok ? 'pending' : 'failed',
             'payment_page_url' => $paymentPageUrl,
             'error_message' => $ok ? '' : ((string) ($response['errorMessage'] ?? 'iyzico ödeme linki oluşturulamadı.')),
-            'raw_request' => $result['request'],
+            'raw_request' => iyzico_raw_request_with_original($result['request'], $charge),
             'raw_response' => $response,
             'created_by' => (int) ($_SESSION['user_id'] ?? 0),
         ]);
@@ -451,32 +457,6 @@ function handle_iyzico_payment_create(RenewalRepository $repo, int $renewalId): 
         }
 
         redirect($paymentPageUrl);
-    } catch (Throwable $e) {
-        flash('error', $e->getMessage());
-        redirect('/renewals/' . $renewalId . '/edit#card-payment');
-    }
-}
-
-function handle_paytr_payment_create(RenewalRepository $repo, int $renewalId): void
-{
-    verify_csrf();
-
-    $renewal = $repo->find($renewalId);
-    if (!$renewal) {
-        flash('error', 'Yenileme kaydı bulunamadı.');
-        redirect('/renewals');
-    }
-
-    $amount = (float) str_replace(',', '.', (string) ($_POST['amount'] ?? '0'));
-    $currency = normalize_allowed_currency($_POST['currency'] ?? 'TRY');
-    if ($amount <= 0) {
-        flash('error', 'PayTR ödemesi için tutar girin.');
-        redirect('/renewals/' . $renewalId . '/edit#card-payment');
-    }
-
-    try {
-        $checkoutUrl = create_paytr_checkout_url($repo, $renewal, $amount, $currency, (int) ($_SESSION['user_id'] ?? 0), 'panel');
-        redirect($checkoutUrl);
     } catch (Throwable $e) {
         flash('error', $e->getMessage());
         redirect('/renewals/' . $renewalId . '/edit#card-payment');
@@ -504,6 +484,117 @@ function handle_collection_mail(RenewalRepository $repo, int $renewalId): void
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/collections'));
+}
+
+function handle_payment_requests_page(string $method): void
+{
+    if ($method === 'POST') {
+        handle_manual_payment_request_create();
+        return;
+    }
+
+    render_payment_requests();
+}
+
+function handle_manual_payment_request_create(): void
+{
+    verify_csrf();
+
+    $repo = new PaymentRequestRepository();
+
+    try {
+        $title = trim((string) ($_POST['title'] ?? ''));
+        $amount = (float) str_replace(',', '.', (string) ($_POST['amount'] ?? '0'));
+        $currency = PaymentRequestRepository::normalizeCurrency((string) ($_POST['currency'] ?? 'TRY'));
+
+        if ($title === '') {
+            throw new RuntimeException('Ödeme talebi başlığı yazın.');
+        }
+
+        if ($amount <= 0) {
+            throw new RuntimeException('Tahsil edilecek tutar sıfırdan büyük olmalı.');
+        }
+
+        $email = trim(mb_strtolower((string) ($_POST['customer_email'] ?? '')));
+        if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Geçerli bir e-posta adresi yazın.');
+        }
+
+        $customerId = (int) ($_POST['customer_id'] ?? 0);
+        $recipients = manual_payment_selected_recipients($customerId, $_POST['selected_contact_ids'] ?? []);
+        if ($recipients !== []) {
+            $first = $recipients[0];
+            if ($email === '' && !empty($first['email'])) {
+                $email = (string) $first['email'];
+            }
+            if (trim((string) ($_POST['customer_phone'] ?? '')) === '' && !empty($first['phone'])) {
+                $_POST['customer_phone'] = (string) $first['phone'];
+            }
+        }
+
+        $request = $repo->create([
+            'customer_id' => $customerId > 0 ? $customerId : null,
+            'title' => $title,
+            'description' => trim((string) ($_POST['description'] ?? '')),
+            'customer_name' => trim((string) ($_POST['customer_name'] ?? '')),
+            'customer_email' => $email,
+            'customer_phone' => trim((string) ($_POST['customer_phone'] ?? '')),
+            'customer_tax_number' => trim((string) ($_POST['customer_tax_number'] ?? '')),
+            'recipients' => $recipients,
+            'amount' => $amount,
+            'currency' => $currency,
+            'created_by' => (int) ($_SESSION['user_id'] ?? 0),
+        ]);
+
+        flash('success', 'Manuel ödeme talebi oluşturuldu.');
+        redirect('/payment-requests?created=' . (int) ($request['id'] ?? 0));
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+        redirect('/payment-requests');
+    }
+}
+
+function handle_payment_request_mail(int $requestId): void
+{
+    verify_csrf();
+
+    $repo = new PaymentRequestRepository();
+
+    try {
+        $request = $repo->find($requestId);
+        if (!$request) {
+            throw new RuntimeException('Manuel ödeme talebi bulunamadı.');
+        }
+
+        $email = trim(mb_strtolower((string) ($_POST['recipient_email'] ?? ($request['customer_email'] ?? ''))));
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Mail göndermek için geçerli bir e-posta adresi yazın.');
+        }
+
+        $paymentUrl = manual_payment_request_url($request);
+        $message = trim((string) ($_POST['message'] ?? ''));
+        if ($message === '') {
+            $message = payment_request_default_message($request);
+        }
+
+        $subject = mb_substr('Ödeme talebi: ' . (string) ($request['title'] ?? 'Manuel ödeme'), 0, 240);
+        $body = payment_request_mail_body($request, $message, $paymentUrl);
+        $result = Mailer::sendWithResult($email, $subject, $body, true);
+        $ok = !empty($result['ok']);
+        $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+
+        $repo->logDelivery($requestId, 'mail', $email, $subject, $body, $ok ? 'sent' : 'failed', $error);
+
+        if ($ok) {
+            flash('success', 'Ödeme talebi mail olarak gönderildi.');
+        } else {
+            flash('error', 'Ödeme talebi maili gönderilemedi: ' . ($error ?: 'Alıcı sunucusu kabul etmedi.'));
+        }
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect('/payment-requests?created=' . $requestId);
 }
 
 function handle_manual_renewal_notification(RenewalRepository $repo, int $renewalId): void
@@ -1111,7 +1202,7 @@ function handle_supplier_price_request_whatsapp(RenewalRepository $repo, int $re
         $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $contact, $subject, $message, 'whatsapp');
         $whatsappMessage = supplier_price_whatsapp_message($row, $contact, (string) $quoteRequest['url']);
 
-        header('Location: https://wa.me/' . rawurlencode($waNumber) . '?text=' . rawurlencode($whatsappMessage));
+        header('Location: ' . whatsapp_web_url($waNumber, $whatsappMessage));
         exit;
     } catch (Throwable $e) {
         flash('error', $e->getMessage());
@@ -1434,6 +1525,190 @@ function collection_reminder_mail_body(array $row, array $recipient): string
         . '<p style="margin:10px 0 0;"><a href="' . h($summaryLink) . '" style="display:inline-block;background:#eef6f3;color:#0f625b;text-decoration:none;border:1px solid #cfe1db;border-radius:8px;padding:12px 16px;font-weight:700;">PDF / özet sayfasını aç</a></p>'
         . '<p style="margin:18px 0 0;color:#61726c;font-size:13px;line-height:1.5;">Ödemenizi yaptıysanız bu maili yanıtlayarak dekont veya işlem bilgisini iletebilirsiniz.</p>'
         . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function payment_request_default_message(array $row): string
+{
+    $customer = trim((string) ($row['customer_name'] ?? ''));
+    $greeting = $customer !== '' ? 'Merhaba ' . $customer . ',' : 'Merhaba,';
+    $title = (string) ($row['title'] ?? 'ödeme talebi');
+    $description = trim((string) ($row['description'] ?? ''));
+    $total = money_format_local($row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
+    $detail = $description !== '' ? "\nAçıklama: {$description}" : '';
+
+    return "{$greeting}\n\n{$title} için ödeme talebiniz oluşturuldu.{$detail}\nToplam tutar: {$total}\n\nAşağıdaki güvenli bağlantıdan ödemenizi tamamlayabilirsiniz.";
+}
+
+function payment_request_whatsapp_message(array $row, string $message, string $paymentUrl): string
+{
+    $message = trim($message) !== '' ? trim($message) : payment_request_default_message($row);
+
+    return $message . "\n\nÖdeme linki:\n" . $paymentUrl;
+}
+
+function payment_request_mail_body(array $row, string $message, string $paymentUrl): string
+{
+    $total = money_format_local($row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Ödeme talebi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">' . h((string) ($row['title'] ?? 'Manuel ödeme talebi')) . '</h1>'
+        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h($message), false) . '</div>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . manual_mail_row('Talep no', manual_payment_request_number($row))
+        . manual_mail_row('Müşteri', (string) (($row['customer_name'] ?? '') ?: '-'))
+        . manual_mail_row('Toplam', $total)
+        . '</table>'
+        . '<p style="margin:20px 0 0;"><a href="' . h($paymentUrl) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Ödeme ekranını aç</a></p>'
+        . '<p style="margin:18px 0 0;color:#61726c;font-size:13px;line-height:1.5;">Bu bağlantı size özel oluşturulmuştur. Ödeme tamamlandığında sistemde talep durumu güncellenecektir.</p>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function manual_payment_request_url(array $row): string
+{
+    return url('/pay/' . rawurlencode((string) ($row['public_token'] ?? '')));
+}
+
+function manual_payment_request_number(array $row): string
+{
+    $id = max(0, (int) ($row['id'] ?? 0));
+    $createdAt = !empty($row['created_at']) ? strtotime((string) $row['created_at']) : time();
+
+    return 'MT-' . date('Y', $createdAt ?: time()) . '-' . str_pad((string) $id, 5, '0', STR_PAD_LEFT);
+}
+
+function payment_request_status_label(string $status): string
+{
+    return match ($status) {
+        'paid' => 'Ödendi',
+        'cancelled' => 'İptal',
+        default => 'Bekliyor',
+    };
+}
+
+function payment_request_status_class(string $status): string
+{
+    return match ($status) {
+        'paid' => 'active',
+        'cancelled' => 'cancelled',
+        default => 'warning',
+    };
+}
+
+function manual_payment_request_recipients(array $row): array
+{
+    $decoded = json_decode((string) ($row['recipients_json'] ?? ''), true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    $recipients = [];
+    foreach ($decoded as $recipient) {
+        if (!is_array($recipient)) {
+            continue;
+        }
+
+        $email = trim(mb_strtolower((string) ($recipient['email'] ?? '')));
+        $phone = normalize_phone_number((string) ($recipient['phone'] ?? ''));
+        if ($email === '' && $phone === '') {
+            continue;
+        }
+
+        $recipients[] = [
+            'contact_id' => (int) ($recipient['contact_id'] ?? 0),
+            'name' => trim((string) ($recipient['name'] ?? 'Yetkili')),
+            'email' => $email,
+            'phone' => $phone,
+        ];
+    }
+
+    return $recipients;
+}
+
+function manual_payment_selected_recipients(int $customerId, mixed $selectedIds): array
+{
+    if ($customerId < 1) {
+        return [];
+    }
+
+    $ids = is_array($selectedIds) ? $selectedIds : [$selectedIds];
+    $selected = [];
+    foreach ($ids as $id) {
+        $contactId = (int) $id;
+        if ($contactId > 0) {
+            $selected[$contactId] = true;
+        }
+    }
+
+    if ($selected === []) {
+        return [];
+    }
+
+    $customer = (new RenewalRepository())->findCustomer($customerId);
+    if (!$customer) {
+        return [];
+    }
+
+    $recipients = [];
+    foreach (($customer['contacts'] ?? []) as $contact) {
+        $contactId = (int) ($contact['id'] ?? 0);
+        if ($contactId < 1 || empty($selected[$contactId])) {
+            continue;
+        }
+
+        $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+        $phone = normalize_phone_number((string) ($contact['phone'] ?? ''));
+        if ($email === '' && $phone === '') {
+            continue;
+        }
+
+        $recipients[] = [
+            'contact_id' => $contactId,
+            'name' => trim((string) ($contact['full_name'] ?? 'Yetkili')),
+            'email' => $email,
+            'phone' => $phone,
+        ];
+    }
+
+    return $recipients;
+}
+
+function manual_payment_customer_choices(array $customers): array
+{
+    $choices = [];
+    foreach ($customers as $customer) {
+        $contacts = [];
+        foreach (($customer['contacts'] ?? []) as $contact) {
+            $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+            $phone = normalize_phone_number((string) ($contact['phone'] ?? ''));
+            if ($email === '' && $phone === '') {
+                continue;
+            }
+
+            $contacts[] = [
+                'id' => (int) ($contact['id'] ?? 0),
+                'name' => trim((string) ($contact['full_name'] ?? 'Yetkili')),
+                'email' => $email,
+                'phone' => $phone,
+                'notify' => !empty($contact['notify_enabled']),
+            ];
+        }
+
+        $choices[] = [
+            'id' => (int) ($customer['id'] ?? 0),
+            'name' => (string) ($customer['company_name'] ?? ''),
+            'email' => trim(mb_strtolower((string) ($customer['email'] ?? ''))),
+            'phone' => normalize_phone_number((string) ($customer['phone'] ?? '')),
+            'tax' => (string) ($customer['tax_number'] ?? ''),
+            'contacts' => $contacts,
+        ];
+    }
+
+    return $choices;
 }
 
 function send_manual_renewal_notification(RenewalRepository $repo, int $renewalId): array
@@ -2056,7 +2331,7 @@ function handle_public_renewal_payment(string $method, int $renewalId): void
     $selectedMethod = trim((string) ($renewal['payment_method'] ?? ''));
     $directCreditCard = $method === 'GET' && (string) ($_GET['method'] ?? '') === 'credit_card';
 
-    if ($selectedMethod !== '' && payment_method_is_credit_card($selectedMethod) && !renewal_has_paid_card_payment($repo, $renewalId)) {
+    if ($selectedMethod !== '' && payment_method_is_credit_card($selectedMethod) && !renewal_has_paid_card_payment($repo, $renewalId, (string) ($renewal['payment_selected_at'] ?? ''))) {
         $notice = 'Kredi kartı ödeme adımı henüz tamamlanmamış görünüyor. Ödemeyi tamamlamak için devam edebilirsiniz.';
     }
 
@@ -2555,25 +2830,53 @@ function renewal_payment_choice_completed(array $renewal, ?RenewalRepository $re
     }
 
     if (payment_method_is_credit_card($paymentMethod)) {
-        return $repo !== null && renewal_has_paid_card_payment($repo, (int) ($renewal['id'] ?? 0));
+        return $repo !== null && renewal_has_paid_card_payment($repo, (int) ($renewal['id'] ?? 0), (string) ($renewal['payment_selected_at'] ?? ''));
     }
 
     return true;
 }
 
-function renewal_has_paid_card_payment(RenewalRepository $repo, int $renewalId): bool
+function renewal_has_paid_card_payment(RenewalRepository $repo, int $renewalId, string $since = ''): bool
 {
     if ($renewalId < 1) {
         return false;
     }
 
-    foreach ($repo->cardPayments($renewalId) as $payment) {
-        if ((string) ($payment['status'] ?? '') === 'paid') {
-            return true;
+    $sinceTs = trim($since) !== '' ? strtotime($since) : false;
+    $payments = $repo->cardPayments($renewalId);
+    if ($sinceTs === false) {
+        return $payments !== [] && card_payment_is_confirmed((array) $payments[0]);
+    }
+
+    foreach ($payments as $payment) {
+        if (!card_payment_is_confirmed($payment, $sinceTs !== false ? $sinceTs : null)) {
+            continue;
         }
+
+        return true;
     }
 
     return false;
+}
+
+function card_payment_is_confirmed(array $payment, ?int $sinceTs = null): bool
+{
+    if ((string) ($payment['status'] ?? '') !== 'paid') {
+        return false;
+    }
+
+    if (trim((string) ($payment['payment_id'] ?? '')) === '') {
+        return false;
+    }
+
+    if ($sinceTs === null) {
+        return true;
+    }
+
+    $paidAt = trim((string) (($payment['paid_at'] ?? '') ?: ($payment['updated_at'] ?? '') ?: ($payment['created_at'] ?? '')));
+    $paidTs = $paidAt !== '' ? strtotime($paidAt) : false;
+
+    return $paidTs !== false && $paidTs >= $sinceTs;
 }
 
 function renewal_payment_selected_notice(array $renewal, string $linkEmail = ''): string
@@ -2615,13 +2918,20 @@ function first_credit_card_payment_method(array $methods): ?array
     return null;
 }
 
-function render_card_payment_create_form(int $renewalId, string $provider, string $buttonLabel, array $renewal): string
+function render_card_payment_create_form(int $renewalId, string $buttonLabel, array $renewal): string
 {
-    $provider = $provider === 'paytr' ? 'paytr' : 'iyzico';
-    $action = url('/renewals/' . $renewalId . '/payments/' . $provider . '/create');
-    $confirm = $provider === 'paytr'
-        ? 'PayTR ödeme formu oluşturulsun mu?'
-        : 'iyzico ödeme sayfası oluşturulsun mu?';
+    $action = url('/renewals/' . $renewalId . '/payments/iyzico/create');
+    $confirm = 'iyzico ödeme sayfası oluşturulsun mu?';
+    $selectedCurrency = normalize_allowed_currency((string) ($renewal['currency'] ?? 'TRY'));
+    $amount = (float) ($renewal['item_total'] ?? $renewal['amount'] ?? 0);
+    $exchangeRates = ExchangeRates::latest();
+    $chargePreview = null;
+    if ($selectedCurrency !== 'TRY') {
+        $rate = payment_exchange_rate($exchangeRates, $selectedCurrency);
+        $chargePreview = $rate !== null && $amount > 0
+            ? money_format_local($amount * $rate, 'TRY') . ' · ' . $selectedCurrency . ' satış kuru: ' . format_exchange_rate($rate)
+            : null;
+    }
 
     ob_start();
     ?>
@@ -2635,12 +2945,19 @@ function render_card_payment_create_form(int $renewalId, string $provider, strin
             Para birimi
             <select name="currency">
                 <?php foreach (allowed_currency_options() as $currency): ?>
-                    <?= option($currency, $currency, (string) ($renewal['currency'] ?? 'TRY')) ?>
+                    <?= option($currency, $currency, $selectedCurrency) ?>
                 <?php endforeach; ?>
             </select>
+            <span class="field-help">iyzico POS tahsilatı TL ile açılır. USD/EUR seçerseniz sistem TCMB satış kuruyla TL ödeme linki oluşturur.</span>
         </label>
-        <button type="submit" class="button <?= $provider === 'paytr' ? 'primary' : 'secondary' ?>"><?= h($buttonLabel) ?></button>
+        <button type="submit" class="button secondary"><?= h($buttonLabel) ?></button>
     </form>
+    <?php if ($selectedCurrency !== 'TRY'): ?>
+        <div class="settings-note payment-note">
+            <strong>Kart tahsilatı TL oluşturulacak</strong>
+            <span><?= h($chargePreview ?? ($selectedCurrency . ' için kur alınamazsa sistem ödeme linkini oluşturmaz.')) ?></span>
+        </div>
+    <?php endif; ?>
     <?php
 
     return (string) ob_get_clean();
@@ -3017,9 +3334,10 @@ function create_iyzico_checkout_url(RenewalRepository $repo, array $renewal, flo
 
     $renewalId = (int) $renewal['id'];
     $currency = normalize_allowed_currency($currency);
+    $charge = iyzico_charge_payload($amount, $currency);
 
     $conversationId = $source . '-renewal-' . $renewalId . '-' . date('YmdHis') . '-' . bin2hex(random_bytes(4));
-    $result = $client->initializeCheckout($renewal, $amount, $currency, $conversationId);
+    $result = $client->initializeCheckout($renewal, $charge['amount'], $charge['currency'], $conversationId);
     $response = $result['response'];
     $paymentPageUrl = trim((string) ($response['paymentPageUrl'] ?? ''));
     $token = trim((string) ($response['token'] ?? ''));
@@ -3029,12 +3347,12 @@ function create_iyzico_checkout_url(RenewalRepository $repo, array $renewal, flo
         'renewal_id' => $renewalId,
         'conversation_id' => $conversationId,
         'token' => $token,
-        'amount' => $amount,
-        'currency' => $currency,
+        'amount' => $charge['amount'],
+        'currency' => $charge['currency'],
         'status' => $ok ? 'pending' : 'failed',
         'payment_page_url' => $paymentPageUrl,
         'error_message' => $ok ? '' : ((string) ($response['errorMessage'] ?? 'iyzico ödeme linki oluşturulamadı.')),
-        'raw_request' => $result['request'],
+        'raw_request' => iyzico_raw_request_with_original($result['request'], $charge),
         'raw_response' => $response,
         'created_by' => $createdBy,
     ]);
@@ -3046,53 +3364,203 @@ function create_iyzico_checkout_url(RenewalRepository $repo, array $renewal, flo
     return $paymentPageUrl;
 }
 
-function create_paytr_checkout_url(RenewalRepository $repo, array $renewal, float $amount, string $currency, ?int $createdBy, string $source): string
+function create_credit_card_checkout_url(RenewalRepository $repo, array $renewal, float $amount, string $currency, ?int $createdBy, string $source): string
 {
-    $client = new PaytrClient(new SettingsRepository());
-    if (!$client->isEnabled() || !$client->isConfigured()) {
-        throw new RuntimeException('PayTR kredi kartı ödemesi şu anda aktif değil. Lütfen firma yetkilisiyle iletişime geçin.');
+    return create_iyzico_checkout_url($repo, $renewal, $amount, $currency, $createdBy, $source);
+}
+
+function iyzico_charge_payload(float $amount, string $currency): array
+{
+    $currency = normalize_allowed_currency($currency);
+    $amount = max(0.01, $amount);
+    $charge = [
+        'amount' => round($amount, 2),
+        'currency' => 'TRY',
+        'original_amount' => round($amount, 2),
+        'original_currency' => $currency,
+        'exchange_rate' => 1.0,
+        'converted' => $currency !== 'TRY',
+    ];
+
+    if ($currency === 'TRY') {
+        return $charge;
     }
 
-    $renewalId = (int) $renewal['id'];
-    $currency = normalize_allowed_currency($currency);
-    $merchantOid = 'PTR' . $renewalId . date('YmdHis') . strtoupper(bin2hex(random_bytes(3)));
-    $result = $client->initializeIframe($renewal, $amount, $currency, $merchantOid);
-    $response = $result['response'];
-    $token = trim((string) ($response['token'] ?? ''));
-    $ok = (string) ($response['status'] ?? '') === 'success' && $token !== '';
-    $frameUrl = $ok ? url('/payments/paytr/frame/' . rawurlencode($token)) : '';
+    $exchangeRates = ExchangeRates::latest();
+    $rate = payment_exchange_rate($exchangeRates, $currency);
+    if ($rate === null || $rate <= 0) {
+        throw new RuntimeException($currency . ' için TCMB satış kuru alınamadı. Kredi kartı tahsilatı TL olarak oluşturulamadı.');
+    }
 
-    $repo->createPaytrPayment([
-        'renewal_id' => $renewalId,
-        'conversation_id' => $merchantOid,
+    $charge['amount'] = round($amount * $rate, 2);
+    $charge['exchange_rate'] = $rate;
+
+    return $charge;
+}
+
+function iyzico_raw_request_with_original(array $request, array $charge): array
+{
+    if (empty($charge['converted'])) {
+        return $request;
+    }
+
+    $request['_system_original_amount'] = $charge['original_amount'];
+    $request['_system_original_currency'] = $charge['original_currency'];
+    $request['_system_exchange_rate'] = $charge['exchange_rate'];
+    $request['_system_note'] = 'iyzico kart tahsilatı TRY POS üzerinden oluşturuldu.';
+
+    return $request;
+}
+
+function create_manual_iyzico_checkout_url(PaymentRequestRepository $repo, array $request, ?int $createdBy, string $source): string
+{
+    $client = new IyzicoClient(new SettingsRepository());
+    if (!$client->isEnabled() || !$client->isConfigured()) {
+        throw new RuntimeException('Kredi kartı ödemesi şu anda aktif değil. Lütfen firma yetkilisiyle iletişime geçin.');
+    }
+
+    $requestId = (int) $request['id'];
+    $amount = max(0.01, (float) ($request['amount'] ?? 0));
+    $currency = normalize_allowed_currency((string) ($request['currency'] ?? 'TRY'));
+    $charge = iyzico_charge_payload($amount, $currency);
+    $conversationId = $source . '-manual-payment-' . $requestId . '-' . date('YmdHis') . '-' . bin2hex(random_bytes(4));
+    $result = $client->initializeManualPayment($request, $charge['amount'], $charge['currency'], $conversationId);
+    $response = $result['response'];
+    $paymentPageUrl = trim((string) ($response['paymentPageUrl'] ?? ''));
+    $token = trim((string) ($response['token'] ?? ''));
+    $ok = (string) ($response['status'] ?? '') === 'success' && $paymentPageUrl !== '' && $token !== '';
+
+    $repo->createIyzicoPayment([
+        'request_id' => $requestId,
+        'conversation_id' => $conversationId,
         'token' => $token,
-        'amount' => $amount,
-        'currency' => $currency,
+        'amount' => $charge['amount'],
+        'currency' => $charge['currency'],
         'status' => $ok ? 'pending' : 'failed',
-        'payment_status' => (string) ($response['status'] ?? ''),
-        'payment_page_url' => $frameUrl,
-        'error_message' => $ok ? '' : ((string) ($response['reason'] ?? 'PayTR ödeme formu oluşturulamadı.')),
-        'raw_request' => $result['request'],
+        'payment_page_url' => $paymentPageUrl,
+        'error_message' => $ok ? '' : ((string) ($response['errorMessage'] ?? 'iyzico ödeme linki oluşturulamadı.')),
+        'raw_request' => iyzico_raw_request_with_original($result['request'], $charge),
         'raw_response' => $response,
         'created_by' => $createdBy,
     ]);
 
     if (!$ok) {
-        throw new RuntimeException((string) ($response['reason'] ?? 'PayTR ödeme formu oluşturulamadı.'));
+        throw new RuntimeException((string) ($response['errorMessage'] ?? 'iyzico ödeme linki oluşturulamadı.'));
     }
 
-    return $frameUrl;
+    return $paymentPageUrl;
 }
 
-function create_credit_card_checkout_url(RenewalRepository $repo, array $renewal, float $amount, string $currency, ?int $createdBy, string $source): string
+function handle_manual_payment_card_create(string $token): void
 {
-    $settings = new SettingsRepository();
-    $paytr = new PaytrClient($settings);
-    if ($paytr->isEnabled() && $paytr->isConfigured()) {
-        return create_paytr_checkout_url($repo, $renewal, $amount, $currency, $createdBy, $source);
+    verify_csrf();
+
+    $repo = new PaymentRequestRepository();
+    $request = $repo->findByToken($token);
+    if (!$request) {
+        http_response_code(404);
+        render_public_layout('Ödeme talebi', static function (): void {
+            ?>
+            <section class="public-card payment-result-card error">
+                <p class="eyebrow">Ödeme talebi</p>
+                <h1>Bağlantı bulunamadı.</h1>
+                <p class="muted">Bu ödeme bağlantısı sistemde bulunamadı.</p>
+            </section>
+            <?php
+        });
+        return;
     }
 
-    return create_iyzico_checkout_url($repo, $renewal, $amount, $currency, $createdBy, $source);
+    try {
+        if ((string) ($request['status'] ?? 'pending') === 'paid') {
+            redirect('/pay/' . rawurlencode($token));
+        }
+
+        $checkoutUrl = create_manual_iyzico_checkout_url($repo, $request, null, 'manual-public');
+        redirect($checkoutUrl);
+    } catch (Throwable $e) {
+        $_SESSION['manual_payment_error'] = $e->getMessage();
+        redirect('/pay/' . rawurlencode($token));
+    }
+}
+
+function handle_manual_payment_public(string $method, string $token): void
+{
+    $repo = new PaymentRequestRepository();
+    $request = $repo->findByToken($token);
+    if (!$request) {
+        http_response_code(404);
+        render_public_layout('Ödeme talebi', static function (): void {
+            ?>
+            <section class="public-card payment-result-card error">
+                <p class="eyebrow">Ödeme talebi</p>
+                <h1>Bağlantı bulunamadı.</h1>
+                <p class="muted">Bu ödeme bağlantısı sistemde bulunamadı veya kaldırıldı.</p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    $error = (string) ($_SESSION['manual_payment_error'] ?? '');
+    unset($_SESSION['manual_payment_error']);
+    $exchangeRates = ExchangeRates::latest();
+    $settings = (new SettingsRepository())->all();
+    $iyzicoReady = (string) ($settings['iyzico.enabled'] ?? '0') === '1'
+        && trim((string) ($settings['iyzico.api_key'] ?? '')) !== ''
+        && trim((string) ($settings['iyzico.secret_key'] ?? '')) !== '';
+
+    render_public_layout('Ödeme talebi', static function () use ($request, $error, $exchangeRates, $iyzicoReady): void {
+        $amount = (float) ($request['amount'] ?? 0);
+        $currency = (string) ($request['currency'] ?? 'TRY');
+        $isPaid = (string) ($request['status'] ?? 'pending') === 'paid';
+        ?>
+        <section class="login-panel customer-info-public payment-choice-public manual-payment-public">
+            <div class="login-heading">
+                <p class="eyebrow">Ödeme talebi</p>
+                <h1><?= $isPaid ? 'Ödemeniz alınmıştır.' : 'Ödeme talebinizi tamamlayın.' ?></h1>
+                <p class="muted compact"><?= h((string) ($request['title'] ?? 'Manuel ödeme talebi')) ?></p>
+            </div>
+
+            <?php if ($error !== ''): ?>
+                <div class="alert error"><?= h($error) ?></div>
+            <?php endif; ?>
+
+            <?php if ($isPaid): ?>
+                <div class="alert success">Bu ödeme talebi başarıyla tahsil edilmiş görünüyor.</div>
+            <?php elseif (!$iyzicoReady): ?>
+                <div class="alert error">Kredi kartı ödeme altyapısı şu anda hazır değil. Lütfen firma yetkilisiyle iletişime geçin.</div>
+            <?php endif; ?>
+
+            <div class="payment-choice-summary">
+                <div>
+                    <span>Talep no</span>
+                    <strong><?= h(manual_payment_request_number($request)) ?></strong>
+                </div>
+                <div>
+                    <span>Toplam tutar</span>
+                    <strong><?= h(money_format_local($amount, $currency)) ?></strong>
+                </div>
+            </div>
+
+            <?= render_payment_exchange_panel($amount, $currency, $exchangeRates) ?>
+
+            <?php if (trim((string) ($request['description'] ?? '')) !== ''): ?>
+                <div class="settings-note manual-payment-description">
+                    <strong>Açıklama</strong>
+                    <span><?= nl2br(h((string) $request['description']), false) ?></span>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!$isPaid): ?>
+                <form method="post" action="<?= h(url('/pay/' . rawurlencode((string) $request['public_token']) . '/card')) ?>">
+                    <?= csrf_field() ?>
+                    <button type="submit" class="button primary full" <?= $iyzicoReady ? '' : 'disabled' ?>>Kredi kartı ile öde</button>
+                </form>
+            <?php endif; ?>
+        </section>
+        <?php
+    });
 }
 
 function handle_iyzico_callback(string $method): void
@@ -3115,6 +3583,13 @@ function handle_iyzico_callback(string $method): void
     $repo = new RenewalRepository();
     $payment = $repo->findIyzicoPaymentByToken($token);
     if (!$payment) {
+        $manualRepo = new PaymentRequestRepository();
+        $manualPayment = $manualRepo->findIyzicoPaymentByToken($token);
+        if ($manualPayment) {
+            handle_manual_iyzico_callback_result($manualRepo, $manualPayment, $token);
+            return;
+        }
+
         http_response_code(404);
         render_public_layout('Ödeme sonucu', static function (): void {
             ?>
@@ -3138,7 +3613,7 @@ function handle_iyzico_callback(string $method): void
         $result = $client->retrieveCheckout($token, (string) $payment['conversation_id']);
         $request = $result['request'];
         $response = $result['response'];
-        $localStatus = iyzico_local_status($response);
+        $localStatus = iyzico_local_status($response, (float) ($payment['amount'] ?? 0));
         $message = iyzico_result_message($localStatus, $response);
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
     } catch (Throwable $e) {
@@ -3171,118 +3646,52 @@ function handle_iyzico_callback(string $method): void
     });
 }
 
-function handle_paytr_frame(string $token): void
+function handle_manual_iyzico_callback_result(PaymentRequestRepository $repo, array $payment, string $token): void
 {
-    $repo = new RenewalRepository();
-    $payment = $repo->findPaytrPaymentByToken($token);
-    if (!$payment) {
-        http_response_code(404);
-        render_public_layout('PayTR ödeme', static function (): void {
-            ?>
-            <section class="public-card payment-result-card error">
-                <p class="eyebrow">PayTR</p>
-                <h1>Ödeme kaydı bulunamadı.</h1>
-                <p class="muted">Bu ödeme bağlantısı sistemde bulunamadı.</p>
-            </section>
-            <?php
-        });
-        return;
+    $request = [];
+    $response = [];
+    $localStatus = 'failed';
+    $message = 'Ödeme sonucu alınamadı.';
+
+    try {
+        $client = new IyzicoClient(new SettingsRepository());
+        $result = $client->retrieveCheckout($token, (string) $payment['conversation_id']);
+        $request = $result['request'];
+        $response = $result['response'];
+        $localStatus = iyzico_local_status($response, (float) ($payment['amount'] ?? 0));
+        $message = iyzico_result_message($localStatus, $response);
+        $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
+    } catch (Throwable $e) {
+        $message = $e->getMessage();
+        $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, ['errorMessage' => $message], 'failed');
     }
 
-    $client = new PaytrClient(new SettingsRepository());
-    $iframeUrl = $client->iframeUrl($token);
-    render_public_layout('PayTR ödeme', static function () use ($payment, $iframeUrl): void {
-        ?>
-        <section class="public-card paytr-frame-card">
-            <div class="login-heading">
-                <p class="eyebrow">PayTR güvenli ödeme</p>
-                <h1>Kredi kartı ile ödeme.</h1>
-                <p class="muted compact"><?= h((string) ($payment['company_name'] ?? '-')) ?> için <?= h(money_format_local($payment['amount'] ?? null, (string) ($payment['currency'] ?? 'TRY'))) ?> tutarındaki ödeme PayTR güvenli formunda alınır.</p>
-            </div>
-            <iframe src="<?= h($iframeUrl) ?>" id="paytriframe" frameborder="0" scrolling="no"></iframe>
-            <script src="https://www.paytr.com/js/iframeResizer.min.js"></script>
-            <script>if (window.iFrameResize) window.iFrameResize({}, '#paytriframe');</script>
-        </section>
-        <?php
-    });
-}
-
-function handle_paytr_callback(string $method): void
-{
-    if ($method !== 'POST') {
-        http_response_code(405);
-        echo 'PAYTR notification failed: method';
-        return;
-    }
-
-    $client = new PaytrClient(new SettingsRepository());
-    if (!$client->verifyCallback($_POST)) {
-        http_response_code(400);
-        echo 'PAYTR notification failed: bad hash';
-        return;
-    }
-
-    $merchantOid = trim((string) ($_POST['merchant_oid'] ?? ''));
-    $repo = new RenewalRepository();
-    $payment = $repo->findPaytrPaymentByMerchantOid($merchantOid);
-    if ($payment) {
-        $status = paytr_local_status($_POST);
-        $repo->updatePaytrPaymentResult((int) $payment['id'], $_POST, $_POST, $status);
-    }
-
-    header('Content-Type: text/plain; charset=UTF-8');
-    echo 'OK';
-}
-
-function handle_paytr_result(string $merchantOid): void
-{
-    $repo = new RenewalRepository();
-    $payment = $repo->findPaytrPaymentByMerchantOid($merchantOid);
-    if (!$payment) {
-        http_response_code(404);
-        render_public_layout('PayTR ödeme sonucu', static function (): void {
-            ?>
-            <section class="public-card payment-result-card error">
-                <p class="eyebrow">PayTR</p>
-                <h1>Ödeme kaydı bulunamadı.</h1>
-                <p class="muted">Bu işlem numarası için ödeme kaydı bulunamadı.</p>
-            </section>
-            <?php
-        });
-        return;
-    }
-
-    $result = (string) ($_GET['result'] ?? '');
-    $localStatus = (string) ($payment['status'] ?? 'pending');
     $exchangeRates = ExchangeRates::latest();
-    render_public_layout('PayTR ödeme sonucu', static function () use ($payment, $result, $localStatus, $exchangeRates): void {
-        $paid = $localStatus === 'paid';
-        $tone = $paid || $result === 'success' ? 'success' : 'error';
+
+    render_public_layout('Ödeme sonucu', static function () use ($payment, $localStatus, $message, $exchangeRates): void {
+        $tone = $localStatus === 'paid' ? 'success' : ($localStatus === 'review' ? 'warning' : 'error');
+        $amount = (float) ($payment['amount'] ?? 0);
+        $currency = (string) ($payment['currency'] ?? 'TRY');
         ?>
         <section class="public-card payment-result-card <?= h($tone) ?>">
-            <p class="eyebrow">PayTR ödeme sonucu</p>
-            <h1><?= $paid || $result === 'success' ? 'Ödeme süreciniz alındı.' : 'Ödeme tamamlanamadı.' ?></h1>
-            <p><?= $paid ? 'PayTR ödeme bildirimi başarıyla işlendi.' : 'PayTR bildirimi ulaştığında ödeme durumu panelde otomatik güncellenecek.' ?></p>
+            <p class="eyebrow">iyzico ödeme sonucu</p>
+            <h1><?= $localStatus === 'paid' ? 'Ödeme alındı.' : 'Ödeme tamamlanamadı.' ?></h1>
+            <p><?= h($message) ?></p>
             <div class="payment-result-summary">
-                <span>Müşteri</span>
-                <strong><?= h($payment['company_name'] ?? '-') ?></strong>
+                <span>Talep no</span>
+                <strong><?= h(manual_payment_request_number(['id' => $payment['request_id'] ?? 0])) ?></strong>
                 <span>Kayıt</span>
                 <strong><?= h($payment['title'] ?? '-') ?></strong>
                 <span>Tutar</span>
-                <strong><?= h(money_format_local($payment['amount'] ?? null, (string) ($payment['currency'] ?? 'TRY'))) ?></strong>
+                <strong><?= h(money_format_local($payment['amount'] ?? null, $currency)) ?></strong>
             </div>
-            <?= render_payment_exchange_panel((float) ($payment['amount'] ?? 0), (string) ($payment['currency'] ?? 'TRY'), $exchangeRates) ?>
+            <?= render_payment_exchange_panel($amount, $currency, $exchangeRates) ?>
         </section>
         <?php
     });
 }
 
-function paytr_local_status(array $post): string
-{
-    return (string) ($post['status'] ?? '') === 'success' ? 'paid' : 'failed';
-}
-
-function iyzico_local_status(array $response): string
+function iyzico_local_status(array $response, ?float $expectedAmount = null): string
 {
     if ((string) ($response['status'] ?? '') !== 'success') {
         return 'failed';
@@ -3290,8 +3699,15 @@ function iyzico_local_status(array $response): string
 
     $paymentStatus = strtoupper((string) ($response['paymentStatus'] ?? ''));
     $fraudStatus = (string) ($response['fraudStatus'] ?? '');
+    $paymentId = trim((string) ($response['paymentId'] ?? ''));
+    $paidPriceRaw = $response['paidPrice'] ?? $response['price'] ?? null;
+    $amountMatches = true;
 
-    if ($paymentStatus === 'SUCCESS' && ($fraudStatus === '' || $fraudStatus === '1')) {
+    if ($expectedAmount !== null && $expectedAmount > 0 && is_numeric($paidPriceRaw)) {
+        $amountMatches = abs((float) $paidPriceRaw - $expectedAmount) < 0.01;
+    }
+
+    if ($paymentStatus === 'SUCCESS' && $paymentId !== '' && $amountMatches && ($fraudStatus === '' || $fraudStatus === '1')) {
         return 'paid';
     }
 
@@ -4728,15 +5144,18 @@ function render_flows(RenewalRepository $repo): void
         ['title' => 'Kart ödemesi tamamlandı', 'count' => $collection['paid_card'], 'tone' => $collection['paid_card'] > 0 ? 'done' : 'muted', 'text' => 'Kredi kartı ödemesi başarılı kayıtlar burada kapanır.'],
     ];
 
-    render_layout('Akış Şemaları', static function () use ($renewalSteps, $offerSteps, $collectionSteps, $insights): void {
+    $backPath = Auth::can('settings.manage') ? '/settings' : (Auth::can('dashboard.view') ? '/' : (first_allowed_path() ?? '/'));
+    $backLabel = Auth::can('settings.manage') ? 'Ayarlara dön' : "Dashboard'a dön";
+
+    render_layout('Akış Şemaları', static function () use ($renewalSteps, $offerSteps, $collectionSteps, $insights, $backPath, $backLabel): void {
         ?>
         <div class="page-title">
             <div>
-                <p class="eyebrow">Süreç kontrol</p>
+                <p class="eyebrow">Ayarlar</p>
                 <h1>Akış Şemaları</h1>
             </div>
             <div class="page-actions">
-                <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
+                <a href="<?= h(url($backPath)) ?>" class="button secondary"><?= h($backLabel) ?></a>
             </div>
         </div>
 
@@ -4955,6 +5374,211 @@ function render_collections(RenewalRepository $repo): void
     });
 }
 
+function render_payment_requests(): void
+{
+    $repo = new PaymentRequestRepository();
+    $requests = $repo->all(40);
+    $createdId = (int) ($_GET['created'] ?? 0);
+    $created = $createdId > 0 ? $repo->find($createdId) : null;
+    $message = $created ? payment_request_default_message($created) : '';
+    $paymentUrl = $created ? manual_payment_request_url($created) : '';
+    $whatsappNumber = $created ? whatsapp_number_from_phone((string) ($created['customer_phone'] ?? '')) : null;
+    $whatsappHref = $created && $whatsappNumber !== null
+        ? whatsapp_web_url($whatsappNumber, payment_request_whatsapp_message($created, $message, $paymentUrl))
+        : '';
+    $customerChoices = manual_payment_customer_choices((new RenewalRepository())->customersWithContacts());
+    $createdRecipients = $created ? manual_payment_request_recipients($created) : [];
+    $canManage = Auth::can('collections.manage');
+
+    render_layout('Ödeme Talep Et', static function () use ($requests, $created, $message, $paymentUrl, $whatsappHref, $customerChoices, $createdRecipients, $canManage): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Manuel tahsilat</p>
+                <h1>Ödeme Talep Et</h1>
+            </div>
+        </div>
+
+        <section class="payment-request-layout manual-payment-request-layout">
+            <article class="panel payment-request-panel">
+                <div class="section-head">
+                    <div>
+                        <p class="eyebrow">Yeni case</p>
+                        <h2>Manuel ödeme talebi oluştur</h2>
+                        <p>Dükkanda, telefonda veya tek seferlik satışlarda tutarı ve açıklamayı yazıp müşteriye ödeme linki gönderin.</p>
+                    </div>
+                    <span class="badge active">Bağımsız talep</span>
+                </div>
+
+                <form method="post" class="payment-request-form" data-manual-payment-form>
+                    <?= csrf_field() ?>
+                    <label class="field-wide">
+                        Ne için ödeme alınacak?
+                        <input name="title" maxlength="190" placeholder="Örn: Teknik servis ücreti, adaptör satışı, yerinde destek" required>
+                    </label>
+                    <label>
+                        Tutar
+                        <input type="number" min="0.01" step="0.01" name="amount" placeholder="100.00" required>
+                    </label>
+                    <label>
+                        Para birimi
+                        <select name="currency">
+                            <?php foreach (allowed_currency_options() as $currency): ?>
+                                <?= option($currency, $currency, 'TRY') ?>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <div class="manual-payment-customer-field">
+                        <label>
+                            Firma / müşteri
+                            <input name="customer_name" maxlength="190" placeholder="Cari unvanı yazın veya manuel girin" autocomplete="off" data-manual-customer-input>
+                            <input type="hidden" name="customer_id" value="" data-manual-customer-id>
+                        </label>
+                        <div class="manual-payment-customer-results" data-manual-customer-results hidden></div>
+                    </div>
+                    <label>
+                        Telefon
+                        <input name="customer_phone" placeholder="05xx xxx xx xx" data-manual-customer-phone>
+                    </label>
+                    <label>
+                        E-posta
+                        <input type="email" name="customer_email" placeholder="musteri@firma.com" data-manual-customer-email>
+                    </label>
+                    <label>
+                        Vergi / TC no
+                        <input name="customer_tax_number" maxlength="60" placeholder="Kart ödemesinde gerekebilir" data-manual-customer-tax>
+                    </label>
+                    <div class="manual-payment-contact-panel field-wide" data-manual-contact-panel hidden>
+                        <div class="section-head compact">
+                            <div>
+                                <strong>Yetkili seç</strong>
+                                <span>Ödeme linkini göndermek istediğiniz yetkilileri işaretleyin.</span>
+                            </div>
+                            <span class="badge active" data-manual-contact-count>0 yetkili</span>
+                        </div>
+                        <div class="manual-payment-contact-list" data-manual-contact-list></div>
+                    </div>
+                    <label class="field-wide">
+                        Açıklama
+                        <textarea name="description" rows="5" placeholder="Ne yapıldı, neden bu tahsilat alınıyor, müşteriye görünecek kısa açıklama"></textarea>
+                    </label>
+                    <div class="payment-request-submit field-wide">
+                        <button class="button primary" type="submit" <?= $canManage ? '' : 'disabled' ?>>Ödeme talebi oluştur</button>
+                    </div>
+                </form>
+            </article>
+
+            <aside class="panel payment-request-preview">
+                <?php if ($created): ?>
+                    <div class="payment-request-preview-head">
+                        <small>Oluşturulan talep</small>
+                        <strong><?= h((string) ($created['title'] ?? '-')) ?></strong>
+                        <span><?= h(manual_payment_request_number($created)) ?> · <?= h(payment_request_status_label((string) ($created['status'] ?? 'pending'))) ?></span>
+                    </div>
+
+                    <div class="payment-request-summary">
+                        <div>
+                            <span>Tutar</span>
+                            <strong><?= h(money_format_local($created['amount'] ?? null, (string) ($created['currency'] ?? 'TRY'))) ?></strong>
+                            <small><?= h((string) (($created['customer_name'] ?? '') ?: 'Müşteri adı boş')) ?></small>
+                        </div>
+                        <div>
+                            <span>İletişim</span>
+                            <strong><?= h((string) (($created['customer_phone'] ?? '') ?: '-')) ?></strong>
+                            <small><?= h((string) (($created['customer_email'] ?? '') ?: 'E-posta yok')) ?></small>
+                        </div>
+                    </div>
+
+                    <label class="payment-request-link">
+                        Ödeme linki
+                        <input type="text" value="<?= h($paymentUrl) ?>" readonly>
+                    </label>
+
+                    <div class="payment-request-actions">
+                        <a class="button whatsapp" href="<?= h($whatsappHref ?: '#') ?>" target="takip_whatsapp_web" <?= $whatsappHref === '' ? 'aria-disabled="true"' : '' ?>>WhatsApp üzerinden yolla</a>
+                        <?php if ($canManage): ?>
+                            <form method="post" action="<?= h(url('/payment-requests/' . (int) $created['id'] . '/mail')) ?>">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="recipient_email" value="<?= h((string) ($created['customer_email'] ?? '')) ?>">
+                                <input type="hidden" name="message" value="<?= h($message) ?>">
+                                <button class="button secondary" type="submit" <?= !filter_var((string) ($created['customer_email'] ?? ''), FILTER_VALIDATE_EMAIL) ? 'disabled' : '' ?>>Mail at</button>
+                            </form>
+                        <?php endif; ?>
+                        <a class="button primary" href="<?= h($paymentUrl) ?>" target="_blank" rel="noopener">Direkt ödeme linkini aç</a>
+                    </div>
+                    <?php if ($createdRecipients !== []): ?>
+                        <div class="manual-payment-recipient-list">
+                            <?php foreach ($createdRecipients as $recipient): ?>
+                                <?php
+                                $recipientMessage = payment_request_whatsapp_message($created, $message, $paymentUrl);
+                                $waNumber = whatsapp_number_from_phone((string) ($recipient['phone'] ?? ''));
+                                $waHref = $waNumber !== null ? whatsapp_web_url($waNumber, $recipientMessage) : '';
+                                ?>
+                                <article class="manual-payment-recipient-card">
+                                    <div>
+                                        <strong><?= h((string) ($recipient['name'] ?: 'Yetkili')) ?></strong>
+                                        <span><?= h((string) (($recipient['email'] ?? '') ?: ($recipient['phone'] ?? '-'))) ?></span>
+                                    </div>
+                                    <a class="button small whatsapp" href="<?= h($waHref ?: '#') ?>" target="takip_whatsapp_web" <?= $waHref === '' ? 'aria-disabled="true"' : '' ?>>WhatsApp</a>
+                                    <?php if ($canManage): ?>
+                                        <form method="post" action="<?= h(url('/payment-requests/' . (int) $created['id'] . '/mail')) ?>">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="recipient_email" value="<?= h((string) ($recipient['email'] ?? '')) ?>">
+                                            <input type="hidden" name="message" value="<?= h($message) ?>">
+                                            <button class="button small secondary" type="submit" <?= !filter_var((string) ($recipient['email'] ?? ''), FILTER_VALIDATE_EMAIL) ? 'disabled' : '' ?>>Mail</button>
+                                        </form>
+                                    <?php endif; ?>
+                                </article>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                <?php else: ?>
+                    <div class="payment-request-preview-head">
+                        <small>Nasıl çalışır?</small>
+                        <strong>Case oluştur, link gönder, ödeme al.</strong>
+                        <span>Tutar ve açıklama yenileme kaydından bağımsız tutulur.</span>
+                    </div>
+                    <div class="settings-note">
+                        <strong>Örnek kullanım</strong>
+                        <span>“100 TL servis ücreti” yazın; telefon varsa WhatsApp, e-posta varsa mail, müşteri yanınızdaysa direkt ödeme linkini açın.</span>
+                    </div>
+                <?php endif; ?>
+            </aside>
+        </section>
+
+        <script type="application/json" id="manual-payment-customers-json"><?= json_encode($customerChoices, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '[]' ?></script>
+
+        <section class="panel manual-payment-history">
+            <div class="section-head">
+                <div>
+                    <p class="eyebrow">Geçmiş</p>
+                    <h2>Son manuel ödeme talepleri</h2>
+                </div>
+            </div>
+            <?php if ($requests === []): ?>
+                <div class="empty">Henüz manuel ödeme talebi oluşturulmadı.</div>
+            <?php else: ?>
+                <div class="manual-payment-list">
+                    <?php foreach ($requests as $request): ?>
+                        <?php $requestUrl = manual_payment_request_url($request); ?>
+                        <article class="manual-payment-row">
+                            <div>
+                                <small><?= h(manual_payment_request_number($request)) ?></small>
+                                <strong><?= h((string) ($request['title'] ?? '-')) ?></strong>
+                                <span><?= h((string) (($request['customer_name'] ?? '') ?: ($request['customer_phone'] ?? '') ?: ($request['customer_email'] ?? '-'))) ?></span>
+                            </div>
+                            <b><?= h(money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'))) ?></b>
+                            <span class="badge <?= h(payment_request_status_class((string) ($request['status'] ?? 'pending'))) ?>"><?= h(payment_request_status_label((string) ($request['status'] ?? 'pending'))) ?></span>
+                            <a class="button small secondary" href="<?= h($requestUrl) ?>" target="_blank" rel="noopener">Linki aç</a>
+                        </article>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </section>
+        <?php
+    });
+}
+
 function render_renewals(RenewalRepository $repo): void
 {
     $filters = [
@@ -5163,11 +5787,6 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
     $invoiceRows = $id ? $repo->invoicePeriods($id) : [];
     $paymentRows = $id ? $repo->cardPayments($id) : [];
     $settings = $id ? (new SettingsRepository())->all() : [];
-    $paytrReady = $id
-        && (string) ($settings['paytr.enabled'] ?? '0') === '1'
-        && trim((string) ($settings['paytr.merchant_id'] ?? '')) !== ''
-        && trim((string) ($settings['paytr.merchant_key'] ?? '')) !== ''
-        && trim((string) ($settings['paytr.merchant_salt'] ?? '')) !== '';
     $iyzicoReady = $id
         && (string) ($settings['iyzico.enabled'] ?? '0') === '1'
         && trim((string) ($settings['iyzico.api_key'] ?? '')) !== ''
@@ -5184,7 +5803,7 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
         }
     }
 
-    render_layout($id ? 'Yenileme düzenle' : ($oldEntryMode ? 'Eski tarihli giriş' : 'Yeni yenileme'), static function () use ($id, $renewal, $customers, $suppliers, $supplierGroups, $definitions, $periods, $itemRows, $errors, $reminderRows, $invoiceRows, $paymentRows, $paytrReady, $iyzicoReady, $settings, $nextRenewalStartDate, $nextRenewalDate, $oldEntryMode): void {
+    render_layout($id ? 'Yenileme düzenle' : ($oldEntryMode ? 'Eski tarihli giriş' : 'Yeni yenileme'), static function () use ($id, $renewal, $customers, $suppliers, $supplierGroups, $definitions, $periods, $itemRows, $errors, $reminderRows, $invoiceRows, $paymentRows, $iyzicoReady, $settings, $nextRenewalStartDate, $nextRenewalDate, $oldEntryMode): void {
         ?>
         <div class="page-title">
             <div>
@@ -5486,26 +6105,21 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                 <div class="section-head">
                     <div>
                         <h2>Kredi kartı tahsilatı</h2>
-                        <p class="muted compact">Kart bilgisi panelde tutulmaz; PayTR aktifse öncelikli olarak PayTR güvenli ödeme formu kullanılır.</p>
+                        <p class="muted compact">Kart bilgisi panelde tutulmaz; müşteri iyzico Checkout Form sayfasına yönlendirilir.</p>
                     </div>
-                    <span class="badge <?= ($paytrReady || $iyzicoReady) ? 'active' : 'cancelled' ?>">
-                        <?= $paytrReady ? 'PayTR hazır' : ($iyzicoReady ? 'iyzico hazır' : 'Ayar bekliyor') ?>
+                    <span class="badge <?= $iyzicoReady ? 'active' : 'cancelled' ?>">
+                        <?= $iyzicoReady ? 'iyzico hazır' : 'Ayar bekliyor' ?>
                     </span>
                 </div>
 
-                <?php if (!$paytrReady && !$iyzicoReady): ?>
+                <?php if (!$iyzicoReady): ?>
                     <div class="settings-note payment-note">
                         <strong>Kredi kartı ayarları eksik</strong>
-                        <span>Ödeme linki oluşturmak için Ayarlar bölümünden PayTR veya iyzico API bilgilerini girip entegrasyonu aktif edin.</span>
+                        <span>Ödeme linki oluşturmak için Ayarlar bölümünden iyzico API bilgilerini girip entegrasyonu aktif edin.</span>
                     </div>
-                    <a class="button secondary" href="<?= h(url('/settings#paytr-settings')) ?>">PayTR ayarlarına git</a>
+                    <a class="button secondary" href="<?= h(url('/settings#iyzico-settings')) ?>">iyzico ayarlarına git</a>
                 <?php else: ?>
-                    <?php if ($paytrReady): ?>
-                        <?= render_card_payment_create_form((int) $id, 'paytr', 'PayTR ödeme formu oluştur', $renewal) ?>
-                    <?php endif; ?>
-                    <?php if ($iyzicoReady): ?>
-                        <?= render_card_payment_create_form((int) $id, 'iyzico', 'iyzico ödeme linki oluştur', $renewal) ?>
-                    <?php endif; ?>
+                    <?= render_card_payment_create_form((int) $id, 'iyzico ödeme linki oluştur', $renewal) ?>
                 <?php endif; ?>
 
                 <?php if ($paymentRows): ?>
@@ -7439,25 +8053,28 @@ function render_logs(): void
     $selectedLines = $selectedFile !== null ? tail_file_lines($selectedFile['path'], 350) : [];
     $mailLogs = recent_mail_logs();
 
-    render_layout('Loglar', static function () use ($files, $selectedFile, $selectedLines, $mailLogs): void {
+    render_layout('Mail logları', static function () use ($files, $selectedFile, $selectedLines, $mailLogs): void {
         ?>
         <div class="page-title">
             <div>
-                <p class="eyebrow">Sistem</p>
-                <h1>Loglar</h1>
+                <p class="eyebrow">Ayarlar</p>
+                <h1>Mail logları</h1>
             </div>
-            <a href="<?= h(url('/logs')) ?>" class="button secondary">Yenile</a>
+            <div class="customer-actions">
+                <a href="<?= h(url('/settings/mail-logs')) ?>" class="button secondary">Yenile</a>
+                <a href="<?= h(url('/settings')) ?>" class="button secondary">Ayarlara dön</a>
+            </div>
         </div>
 
         <section class="grid-2 log-board">
             <div class="panel">
-                <h2>Log dosyalari</h2>
+                <h2>Log dosyaları</h2>
                 <?php if ($files === []): ?>
                     <div class="empty">Log dosyası bulunmuyor.</div>
                 <?php else: ?>
                     <div class="stack settings-form">
                         <?php foreach ($files as $file): ?>
-                            <a class="log-file-row <?= $selectedFile && $selectedFile['name'] === $file['name'] ? 'active' : '' ?>" href="<?= h(url('/logs') . '?file=' . rawurlencode($file['name'])) ?>">
+                            <a class="log-file-row <?= $selectedFile && $selectedFile['name'] === $file['name'] ? 'active' : '' ?>" href="<?= h(url('/settings/mail-logs') . '?file=' . rawurlencode($file['name'])) ?>">
                                 <strong><?= h($file['label']) ?></strong>
                                 <span><?= h($file['size_label']) ?> - <?= h($file['modified_label']) ?></span>
                             </a>
@@ -7468,11 +8085,11 @@ function render_logs(): void
 
             <div class="panel log-detail-panel">
                 <div class="section-head">
-                    <h2><?= h($selectedFile['label'] ?? 'Log detayi') ?></h2>
+                    <h2><?= h($selectedFile['label'] ?? 'Log detayı') ?></h2>
                     <span class="badge active">Son 350 satır</span>
                 </div>
                 <?php if ($selectedFile === null): ?>
-                    <div class="empty">Incelemek için soldan bir log dosyası seçin.</div>
+                    <div class="empty">İncelemek için soldan bir log dosyası seçin.</div>
                 <?php elseif ($selectedLines === []): ?>
                     <div class="empty">Bu log dosyası boş.</div>
                 <?php else: ?>
@@ -7499,10 +8116,13 @@ function render_logs(): void
                                 <th>Durum</th>
                                 <th>Okunma</th>
                                 <th>Hata</th>
+                                <th>Detay</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php foreach ($mailLogs as $row): ?>
+                                <?php $body = trim((string) ($row['body'] ?? '')); ?>
+                                <?php $previewHtml = mail_log_preview_html($body); ?>
                                 <tr>
                                     <td><?= h(date('d.m.Y H:i', strtotime((string) $row['sent_at']))) ?></td>
                                     <td>
@@ -7528,6 +8148,31 @@ function render_logs(): void
                                         <?php endif; ?>
                                     </td>
                                     <td><?= h((string) ($row['error_message'] ?: '-')) ?></td>
+                                    <td>
+                                        <details class="mail-log-detail">
+                                            <summary>Detay</summary>
+                                            <div class="mail-log-detail-card">
+                                                <div class="mail-log-detail-grid">
+                                                    <span><small>Alıcı</small><strong><?= h((string) $row['recipient_email']) ?></strong></span>
+                                                    <span><small>Konu</small><strong><?= h((string) $row['subject']) ?></strong></span>
+                                                    <span><small>Durum</small><strong><?= h($row['status'] === 'sent' ? 'Gönderildi' : 'Hatalı') ?></strong></span>
+                                                    <span><small>Tarih</small><strong><?= h(date('d.m.Y H:i', strtotime((string) $row['sent_at']))) ?></strong></span>
+                                                </div>
+                                                <strong>Mail önizlemesi</strong>
+                                                <?php if ($body !== ''): ?>
+                                                    <iframe
+                                                        class="mail-log-preview"
+                                                        sandbox=""
+                                                        referrerpolicy="no-referrer"
+                                                        title="Mail önizlemesi"
+                                                        srcdoc="<?= h($previewHtml) ?>"
+                                                    ></iframe>
+                                                <?php else: ?>
+                                                    <div class="empty compact">Bu kayıtta içerik bulunmuyor.</div>
+                                                <?php endif; ?>
+                                            </div>
+                                        </details>
+                                    </td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
@@ -7537,6 +8182,37 @@ function render_logs(): void
         </section>
         <?php
     });
+}
+
+function mail_log_preview_html(string $body): string
+{
+    $body = trim($body);
+    if ($body === '') {
+        return '';
+    }
+
+    $logoUrl = branding_logo_url();
+    if ($logoUrl !== null) {
+        $body = str_replace(['cid:app_logo', '{{logo_url}}'], $logoUrl, $body);
+    }
+
+    $body = preg_replace('#<script\b[^>]*>.*?</script>#is', '', $body) ?? $body;
+    $body = preg_replace('#<iframe\b[^>]*>.*?</iframe>#is', '', $body) ?? $body;
+    $body = preg_replace('#\son[a-z]+\s*=\s*(".*?"|\'.*?\'|[^\s>]+)#is', '', $body) ?? $body;
+
+    if (preg_match('#<(?:!doctype|html|body|table|div|p|br|img|h[1-6]|span|a)\b#i', $body) === 1) {
+        if (preg_match('#<html\b#i', $body) === 1) {
+            return $body;
+        }
+
+        return '<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="color-scheme" content="light">'
+            . '<style>body{margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;}img{max-width:100%;height:auto;}</style>'
+            . '</head><body>' . $body . '</body></html>';
+    }
+
+    return '<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="color-scheme" content="light">'
+        . '<style>body{margin:0;background:#fff;color:#17201c;font:16px/1.55 Arial,sans-serif;padding:24px;white-space:pre-wrap;}</style>'
+        . '</head><body>' . h($body) . '</body></html>';
 }
 
 function log_files(): array
@@ -7614,6 +8290,7 @@ function recent_mail_logs(int $limit = 100): array
         $stmt = Database::connection()->prepare(
             'SELECT ml.recipient_email,
                     ml.subject,
+                    ml.body,
                     ml.status,
                     ml.error_message,
                     ml.sent_at,
@@ -8178,28 +8855,6 @@ function handle_settings(string $method): void
                 redirect('/settings#iyzico-settings');
             }
 
-            if ($action === 'save_paytr') {
-                $current = $settingsRepo->all();
-                $mode = (string) ($_POST['paytr_mode'] ?? 'test');
-                if (!in_array($mode, ['test', 'live'], true)) {
-                    $mode = 'test';
-                }
-
-                $settingsRepo->setMany([
-                    'paytr.enabled' => !empty($_POST['paytr_enabled']) ? '1' : '0',
-                    'paytr.mode' => $mode,
-                    'paytr.merchant_id' => trim((string) ($_POST['paytr_merchant_id'] ?? '')),
-                    'paytr.merchant_key' => (string) ((string) ($_POST['paytr_merchant_key'] ?? '') !== '' ? $_POST['paytr_merchant_key'] : ($current['paytr.merchant_key'] ?? '')),
-                    'paytr.merchant_salt' => (string) ((string) ($_POST['paytr_merchant_salt'] ?? '') !== '' ? $_POST['paytr_merchant_salt'] : ($current['paytr.merchant_salt'] ?? '')),
-                    'paytr.no_installment' => !empty($_POST['paytr_no_installment']) ? '1' : '0',
-                    'paytr.max_installment' => (string) max(0, min(12, (int) ($_POST['paytr_max_installment'] ?? 0))),
-                    'paytr.timeout_limit' => (string) max(1, min(120, (int) ($_POST['paytr_timeout_limit'] ?? 30))),
-                    'paytr.debug_on' => !empty($_POST['paytr_debug_on']) ? '1' : '0',
-                ]);
-                flash('success', 'PayTR ayarları kaydedildi.');
-                redirect('/settings#paytr-settings');
-            }
-
             if ($action === 'save_bank_transfer') {
                 $settingsRepo->setMany([
                     'bank_transfer.iban_info' => trim((string) ($_POST['bank_transfer_iban_info'] ?? '')),
@@ -8250,9 +8905,11 @@ function handle_settings(string $method): void
     $parasutStatus = $parasutClient->status();
     $canDefinitions = Auth::can('definitions.manage');
     $canUsers = Auth::can('users.manage');
+    $canFlows = Auth::can('flows.view');
+    $canLogs = Auth::can('logs.view');
     $databaseConfig = app_config('database', []);
 
-    render_layout('Ayarlar', static function () use ($settings, $token, $error, $parasutClient, $parasutStatus, $canDefinitions, $canUsers, $databaseConfig): void {
+    render_layout('Ayarlar', static function () use ($settings, $token, $error, $parasutClient, $parasutStatus, $canDefinitions, $canUsers, $canFlows, $canLogs, $databaseConfig): void {
         $hasMicrosoftToken = !empty($token['refresh_token']);
         $expiresAt = !empty($token['expires_at']) ? date('d.m.Y H:i', (int) $token['expires_at']) : '-';
         $logoUrl = branding_logo_url($settings);
@@ -8271,6 +8928,12 @@ function handle_settings(string $method): void
                 <?php if ($canDefinitions): ?>
                     <a href="<?= h(url('/settings/definitions')) ?>" class="button secondary">Tanımlamalar</a>
                 <?php endif; ?>
+                <?php if ($canFlows): ?>
+                    <a href="<?= h(url('/settings/flows')) ?>" class="button secondary">Akış Şemaları</a>
+                <?php endif; ?>
+                <?php if ($canLogs): ?>
+                    <a href="<?= h(url('/settings/mail-logs')) ?>" class="button secondary">Mail logları</a>
+                <?php endif; ?>
                 <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
             </div>
         </div>
@@ -8279,8 +8942,24 @@ function handle_settings(string $method): void
             <div class="alert error"><?= h($error) ?></div>
         <?php endif; ?>
 
-        <section class="settings-board" data-settings-board>
-            <div class="settings-card settings-card-brand" data-settings-card data-settings-key="logo">
+        <section class="settings-board settings-board-categorized" data-settings-board>
+            <div class="settings-category-heading" data-settings-group="communication">
+                <span>01</span>
+                <strong>İletişim ve marka</strong>
+                <em>Mail, logo ve testler</em>
+            </div>
+            <div class="settings-category-heading" data-settings-group="integration">
+                <span>02</span>
+                <strong>Entegrasyon ve ödeme</strong>
+                <em>Paraşüt, tahsilat ve bildirimler</em>
+            </div>
+            <div class="settings-category-heading" data-settings-group="system">
+                <span>03</span>
+                <strong>Sistem</strong>
+                <em>Veritabanı ve yedekleme</em>
+            </div>
+
+            <div class="settings-card settings-card-brand" data-settings-card data-settings-key="logo" data-settings-group="communication">
                 <div class="section-head">
                     <h2>Logo</h2>
                     <?php if ($logoUrl !== null): ?>
@@ -8319,7 +8998,7 @@ function handle_settings(string $method): void
                 </div>
             </div>
 
-            <form method="post" class="settings-card settings-card-mail" data-settings-card data-settings-key="mail">
+            <form method="post" class="settings-card settings-card-mail" data-settings-card data-settings-key="mail" data-settings-group="communication">
                 <div class="section-head">
                     <h2>Mail Ayarları</h2>
                     <span class="badge active" data-mail-driver-badge><?= h((string) ($settings['mail.driver'] ?? 'log')) ?></span>
@@ -8447,7 +9126,7 @@ function handle_settings(string $method): void
             </form>
 
             <div class="settings-side">
-                <div class="settings-card" id="database-settings" data-settings-card data-settings-key="database">
+                <div class="settings-card" id="database-settings" data-settings-card data-settings-key="database" data-settings-group="system">
                     <div class="section-head">
                         <h2>Veritabanı</h2>
                         <span class="badge active">MariaDB</span>
@@ -8494,7 +9173,7 @@ function handle_settings(string $method): void
                     </form>
                 </div>
 
-                <div class="settings-card" id="notification-settings" data-settings-card data-settings-key="notifications">
+                <div class="settings-card" id="notification-settings" data-settings-card data-settings-key="notifications" data-settings-group="integration">
                     <div class="section-head">
                         <h2>PWA ve Bildirim</h2>
                         <span class="badge cancelled" data-push-badge>Kapali</span>
@@ -8519,7 +9198,7 @@ function handle_settings(string $method): void
                     </div>
                 </div>
 
-                <div class="settings-card" id="backup-settings" data-settings-card data-settings-key="backup">
+                <div class="settings-card" id="backup-settings" data-settings-card data-settings-key="backup" data-settings-group="system">
                     <div class="section-head">
                         <h2>Yedekleme</h2>
                         <span class="badge <?= ($settings['backup.enabled'] ?? '1') === '1' ? 'active' : 'cancelled' ?>">
@@ -8577,7 +9256,21 @@ function handle_settings(string $method): void
                     </div>
                 </div>
 
-                <div class="settings-card" id="iyzico-settings" data-settings-card data-settings-key="iyzico">
+                <?php if ($canLogs): ?>
+                    <div class="settings-card" data-settings-card data-settings-key="mail-logs" data-settings-group="system">
+                        <div class="section-head">
+                            <h2>Mail logları</h2>
+                            <span class="badge active">Kayıtlar</span>
+                        </div>
+                        <div class="settings-note">
+                            <strong>Gönderim ve okuma geçmişi</strong>
+                            <span>Mail gönderimlerini, hata mesajlarını ve gönderilen içerik detaylarını buradan inceleyebilirsiniz.</span>
+                        </div>
+                        <a href="<?= h(url('/settings/mail-logs')) ?>" class="button secondary full settings-form">Mail loglarını aç</a>
+                    </div>
+                <?php endif; ?>
+
+                <div class="settings-card" id="iyzico-settings" data-settings-card data-settings-key="iyzico" data-settings-group="integration">
                     <div class="section-head">
                         <h2>iyzico ödeme</h2>
                         <span class="badge <?= ($settings['iyzico.enabled'] ?? '0') === '1' ? 'active' : 'cancelled' ?>">
@@ -8625,73 +9318,7 @@ function handle_settings(string $method): void
                     </form>
                 </div>
 
-                <div class="settings-card" id="paytr-settings" data-settings-card data-settings-key="paytr">
-                    <div class="section-head">
-                        <h2>PayTR ödeme</h2>
-                        <span class="badge <?= ($settings['paytr.enabled'] ?? '0') === '1' ? 'active' : 'cancelled' ?>">
-                            <?= ($settings['paytr.enabled'] ?? '0') === '1' ? 'Aktif' : 'Kapalı' ?>
-                        </span>
-                    </div>
-                    <form method="post" class="form-grid settings-form">
-                        <?= csrf_field() ?>
-                        <input type="hidden" name="action" value="save_paytr">
-                        <label class="checkline">
-                            <input type="checkbox" name="paytr_enabled" value="1" <?= ($settings['paytr.enabled'] ?? '0') === '1' ? 'checked' : '' ?>>
-                            PayTR kredi kartı ödeme formunu aç
-                        </label>
-                        <div class="form-grid two">
-                            <label>
-                                Ortam
-                                <select name="paytr_mode">
-                                    <?= option('test', 'Test modu', (string) ($settings['paytr.mode'] ?? 'test')) ?>
-                                    <?= option('live', 'Canlı', (string) ($settings['paytr.mode'] ?? 'test')) ?>
-                                </select>
-                            </label>
-                            <label>
-                                Maksimum taksit
-                                <input type="number" min="0" max="12" name="paytr_max_installment" value="<?= h($settings['paytr.max_installment'] ?? '0') ?>">
-                            </label>
-                        </div>
-                        <label class="checkline">
-                            <input type="checkbox" name="paytr_no_installment" value="1" <?= ($settings['paytr.no_installment'] ?? '0') === '1' ? 'checked' : '' ?>>
-                            Taksit kapalı olsun
-                        </label>
-                        <label class="checkline">
-                            <input type="checkbox" name="paytr_debug_on" value="1" <?= ($settings['paytr.debug_on'] ?? '1') === '1' ? 'checked' : '' ?>>
-                            PayTR debug açık kalsın
-                        </label>
-                        <label>
-                            Merchant ID
-                            <input name="paytr_merchant_id" value="<?= h($settings['paytr.merchant_id'] ?? '') ?>" placeholder="PayTR mağaza no">
-                        </label>
-                        <label>
-                            Merchant Key
-                            <input type="password" name="paytr_merchant_key" value="" placeholder="<?= ($settings['paytr.merchant_key'] ?? '') !== '' ? '********' : 'Merchant key' ?>" autocomplete="new-password">
-                            <span class="field-help">Boş bırakırsanız mevcut key korunur.</span>
-                        </label>
-                        <label>
-                            Merchant Salt
-                            <input type="password" name="paytr_merchant_salt" value="" placeholder="<?= ($settings['paytr.merchant_salt'] ?? '') !== '' ? '********' : 'Merchant salt' ?>" autocomplete="new-password">
-                            <span class="field-help">Boş bırakırsanız mevcut salt korunur.</span>
-                        </label>
-                        <label>
-                            Zaman aşımı dakika
-                            <input type="number" min="1" max="120" name="paytr_timeout_limit" value="<?= h($settings['paytr.timeout_limit'] ?? '30') ?>">
-                        </label>
-                        <label>
-                            Bildirim URL
-                            <input value="<?= h(url('/payments/paytr/callback')) ?>" readonly>
-                            <span class="field-help">PayTR panelinde Bildirim URL alanına bu adres yazılmalı.</span>
-                        </label>
-                        <div class="settings-note">
-                            <strong>iFrame API</strong>
-                            <span>Kart bilgisi panelde tutulmaz; müşteri PayTR güvenli ödeme formunda ödeme yapar.</span>
-                        </div>
-                        <button type="submit" class="button primary full">PayTR ayarlarını kaydet</button>
-                    </form>
-                </div>
-
-                <div class="settings-card" id="bank-transfer-settings" data-settings-card data-settings-key="bank-transfer">
+                <div class="settings-card" id="bank-transfer-settings" data-settings-card data-settings-key="bank-transfer" data-settings-group="integration">
                     <div class="section-head">
                         <h2>Havale / EFT</h2>
                         <span class="badge active">Makbuz</span>
@@ -8713,7 +9340,7 @@ function handle_settings(string $method): void
                     </form>
                 </div>
 
-                <div class="settings-card" data-settings-card data-settings-key="mail-test">
+                <div class="settings-card" data-settings-card data-settings-key="mail-test" data-settings-group="communication">
                     <div class="section-head">
                         <h2>Test E-postası</h2>
                         <span class="badge active">Test</span>
@@ -8729,7 +9356,7 @@ function handle_settings(string $method): void
                     </form>
                 </div>
 
-                <div class="settings-card" id="parasut-settings" data-settings-card data-settings-key="parasut">
+                <div class="settings-card" id="parasut-settings" data-settings-card data-settings-key="parasut" data-settings-group="integration">
                     <div class="section-head">
                         <h2>Paraşüt</h2>
                         <span class="badge <?= $parasutStatus['connected'] ? 'active' : 'cancelled' ?>"><?= $parasutStatus['connected'] ? 'Bağlı' : 'Bekliyor' ?></span>
@@ -8759,7 +9386,7 @@ function handle_settings(string $method): void
                     <?php endif; ?>
                 </div>
 
-                <div class="settings-card" data-settings-card data-settings-key="microsoft-status">
+                <div class="settings-card" data-settings-card data-settings-key="microsoft-status" data-settings-group="communication">
                     <div class="section-head">
                         <h2>Microsoft Durumu</h2>
                         <span class="badge <?= $hasMicrosoftToken ? 'active' : 'cancelled' ?>"><?= $hasMicrosoftToken ? 'Bağlı' : 'Bağlı değil' ?></span>
@@ -9277,11 +9904,10 @@ function render_layout(string $title, callable $content, string $headExtra = '')
                 <div class="sidebar-menu" id="mobile-navigation" data-mobile-menu>
                 <nav class="nav">
                     <?= Auth::can('dashboard.view') ? nav_link('/', 'Dashboard') : '' ?>
-                    <?= Auth::can('flows.view') ? nav_link('/flows', 'Akış Şemaları') : '' ?>
                     <?= Auth::can('collections.view') ? nav_link('/collections', 'Tahsilat') : '' ?>
+                    <?= Auth::can('collections.view') ? nav_link('/payment-requests', 'Ödeme Talep Et') : '' ?>
                     <?= Auth::can('customers.view') ? nav_link('/customers', 'Müşteriler') : '' ?>
                     <?= Auth::can('suppliers.view') ? nav_link('/suppliers', 'Tedarikçiler') : '' ?>
-                    <?= Auth::can('logs.view') ? nav_link('/logs', 'Loglar') : '' ?>
                     <?= $settingsHref !== null ? nav_link($settingsHref, 'Ayarlar') : '' ?>
                 </nav>
                 <form method="post" action="<?= h(url('/logout')) ?>" class="logout">
@@ -9764,7 +10390,7 @@ function render_renewal_communication_dialogs(array $row): string
                                 <strong><?= h((string) (($contact['full_name'] ?? '') ?: $phone)) ?></strong>
                                 <span><?= h($phone) ?><?= !empty($contact['email']) ? ' - ' . h((string) $contact['email']) : '' ?></span>
                             </div>
-                            <a class="button small whatsapp" target="_blank" rel="noopener" href="https://wa.me/<?= h($waNumber) ?>?text=<?= h(rawurlencode($message)) ?>">WhatsApp aç</a>
+                            <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h(whatsapp_web_url($waNumber, $message)) ?>">WhatsApp aç</a>
                         </div>
                     <?php endforeach; ?>
                     <?php if (!$hasWhatsappRecipient): ?>
@@ -9940,7 +10566,7 @@ function render_supplier_price_request_dialog(array $row): string
                                         <strong><?= h((string) (($contact['name'] ?? '') ?: $phone)) ?></strong>
                                         <span><?= h((string) (($contact['supplier_name'] ?? '') ?: 'Tedarikçi')) ?> - <?= h($phone) ?></span>
                                     </div>
-                                    <a class="button small whatsapp" target="_blank" rel="noopener" href="<?= h($whatsappLink) ?>">WhatsApp aç</a>
+                                    <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h($whatsappLink) ?>">WhatsApp aç</a>
                                 </div>
                             <?php endforeach; ?>
                             <?php if (!$hasWhatsappRecipient): ?>
@@ -10559,6 +11185,11 @@ function whatsapp_number_from_phone(string $phone): ?string
     return null;
 }
 
+function whatsapp_web_url(string $number, string $message): string
+{
+    return 'https://web.whatsapp.com/send?phone=' . rawurlencode($number) . '&text=' . rawurlencode($message);
+}
+
 function renewal_whatsapp_message(array $row, array $contact): string
 {
     $email = (string) ($contact['email'] ?? '');
@@ -11011,6 +11642,14 @@ function settings_nav_href(): ?string
         return '/settings';
     }
 
+    if (Auth::can('flows.view')) {
+        return '/settings/flows';
+    }
+
+    if (Auth::can('logs.view')) {
+        return '/settings/mail-logs';
+    }
+
     if (Auth::can('definitions.manage')) {
         return '/settings/definitions';
     }
@@ -11026,12 +11665,12 @@ function first_allowed_path(): ?string
 {
     $paths = [
         'dashboard.view' => '/',
-        'flows.view' => '/flows',
+        'flows.view' => '/settings/flows',
         'collections.view' => '/collections',
         'renewals.view' => '/renewals',
         'customers.view' => '/customers',
         'suppliers.view' => '/suppliers',
-        'logs.view' => '/logs',
+        'logs.view' => '/settings/mail-logs',
         'settings.manage' => '/settings',
         'definitions.manage' => '/settings/definitions',
         'users.manage' => '/settings/users',

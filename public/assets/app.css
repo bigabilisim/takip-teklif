@@ -1193,6 +1193,350 @@ h3 {
     margin: 0;
 }
 
+.payment-request-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.8fr);
+    gap: 14px;
+    align-items: start;
+}
+
+.payment-request-panel,
+.payment-request-preview {
+    padding: 18px;
+}
+
+.payment-request-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.payment-request-form .field-wide,
+.payment-request-submit {
+    grid-column: 1 / -1;
+}
+
+.payment-request-form textarea {
+    min-height: 132px;
+    resize: vertical;
+}
+
+.manual-payment-customer-field {
+    position: relative;
+    min-width: 0;
+}
+
+.manual-payment-customer-results {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    display: grid;
+    gap: 6px;
+    max-height: 300px;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow: 0 16px 40px rgba(18, 37, 34, 0.16);
+}
+
+.manual-payment-customer-result {
+    display: grid;
+    gap: 2px;
+    width: 100%;
+    padding: 10px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: #f8fbfa;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+
+.manual-payment-customer-result:hover,
+.manual-payment-customer-result:focus {
+    border-color: rgba(20, 124, 114, 0.25);
+    background: #eef7f4;
+}
+
+.manual-payment-customer-result strong {
+    font-size: 14px;
+    line-height: 1.2;
+}
+
+.manual-payment-customer-result span,
+.manual-payment-customer-empty {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.manual-payment-customer-empty {
+    padding: 10px;
+}
+
+.manual-payment-contact-panel {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #f7fbfa;
+}
+
+.manual-payment-contact-panel[hidden] {
+    display: none;
+}
+
+.section-head.compact {
+    align-items: center;
+    padding-bottom: 0;
+}
+
+.section-head.compact strong {
+    display: block;
+    font-size: 16px;
+}
+
+.section-head.compact span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.manual-payment-contact-list,
+.manual-payment-recipient-list {
+    display: grid;
+    gap: 8px;
+}
+
+.manual-payment-contact-option,
+.manual-payment-recipient-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.manual-payment-contact-option {
+    cursor: pointer;
+}
+
+.manual-payment-contact-option:has(input:checked) {
+    border-color: rgba(20, 124, 114, 0.35);
+    background: #eef8f4;
+}
+
+.manual-payment-contact-option input {
+    width: 18px;
+    min-height: 18px;
+}
+
+.manual-payment-contact-info,
+.manual-payment-recipient-card > div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.manual-payment-contact-option strong,
+.manual-payment-recipient-card strong {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.2;
+}
+
+.manual-payment-contact-option em,
+.manual-payment-recipient-card span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 750;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.manual-payment-contact-option > .manual-payment-contact-badge {
+    padding: 5px 8px;
+    border-radius: 999px;
+    background: #daf4e4;
+    color: #1d6f3a;
+    font-size: 11px;
+    font-weight: 850;
+}
+
+.manual-payment-recipient-card {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.manual-payment-recipient-card form {
+    margin: 0;
+}
+
+.payment-request-preview {
+    display: grid;
+    gap: 14px;
+}
+
+.payment-request-preview-head {
+    display: grid;
+    gap: 4px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+}
+
+.payment-request-preview-head small,
+.payment-request-summary span,
+.payment-request-link {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+
+.payment-request-preview-head strong {
+    color: var(--text);
+    font-size: 20px;
+    line-height: 1.15;
+}
+
+.payment-request-preview-head span {
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.payment-request-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.payment-request-summary > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--surface-2);
+}
+
+.payment-request-summary strong {
+    color: var(--text);
+    font-size: 20px;
+    line-height: 1.1;
+}
+
+.payment-request-summary small {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.payment-request-link {
+    display: grid;
+    gap: 7px;
+}
+
+.payment-request-link input {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 650;
+    text-transform: none;
+}
+
+.payment-request-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.payment-request-actions form {
+    margin: 0;
+}
+
+.payment-request-actions .button,
+.payment-request-actions form .button {
+    width: 100%;
+}
+
+.button[aria-disabled="true"] {
+    opacity: 0.55;
+    pointer-events: none;
+}
+
+.manual-payment-history {
+    margin-top: 14px;
+    padding: 18px;
+}
+
+.manual-payment-list {
+    display: grid;
+    gap: 8px;
+}
+
+.manual-payment-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fbfcfb;
+}
+
+.manual-payment-row > div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.manual-payment-row small {
+    color: var(--primary);
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+}
+
+.manual-payment-row strong,
+.manual-payment-row span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.manual-payment-row strong {
+    color: var(--text);
+    font-size: 15px;
+}
+
+.manual-payment-row span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.manual-payment-row b {
+    color: var(--text);
+    font-size: 15px;
+}
+
+.manual-payment-description {
+    margin: 0;
+}
+
 .link {
     color: var(--primary);
     font-weight: 700;
@@ -2974,6 +3318,78 @@ td.actions {
     word-break: break-word;
 }
 
+.mail-log-detail {
+    position: relative;
+}
+
+.mail-log-detail summary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 0 14px;
+    border: 1px solid rgba(20, 124, 114, 0.28);
+    border-radius: 999px;
+    background: #edf7f4;
+    color: var(--primary);
+    font-weight: 900;
+    cursor: pointer;
+    list-style: none;
+    white-space: nowrap;
+}
+
+.mail-log-detail summary::-webkit-details-marker {
+    display: none;
+}
+
+.mail-log-detail-card {
+    display: grid;
+    gap: 12px;
+    min-width: min(680px, 70vw);
+    max-width: min(820px, 82vw);
+    margin-top: 10px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: 0 18px 40px rgba(17, 32, 28, 0.12);
+}
+
+.mail-log-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.mail-log-detail-grid span {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--surface-2);
+}
+
+.mail-log-detail-grid small {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+}
+
+.mail-log-detail-grid strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mail-log-preview {
+    width: 100%;
+    min-height: 640px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #f4f6f5;
+}
+
 .contact-editor {
     display: grid;
     gap: 12px;
@@ -3286,9 +3702,76 @@ td.actions {
 
 .settings-board {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-auto-flow: dense;
+    gap: 12px;
     align-items: start;
+}
+
+.settings-board-categorized {
+    grid-auto-flow: row;
+}
+
+.settings-category-heading {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 10px;
+    row-gap: 2px;
+    align-items: center;
+    min-width: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #edf5f2;
+}
+
+.settings-category-heading[data-settings-group="communication"],
+.settings-card[data-settings-group="communication"] {
+    grid-column: 1;
+}
+
+.settings-category-heading[data-settings-group="integration"],
+.settings-card[data-settings-group="integration"] {
+    grid-column: 2;
+}
+
+.settings-category-heading[data-settings-group="system"],
+.settings-card[data-settings-group="system"] {
+    grid-column: 3;
+}
+
+.settings-category-heading span {
+    grid-row: 1 / span 2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: #d9eee9;
+    color: var(--primary-strong);
+    font-size: 12px;
+    font-weight: 900;
+}
+
+.settings-category-heading strong,
+.settings-category-heading em {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-category-heading strong {
+    color: var(--text);
+    font-size: 14px;
+}
+
+.settings-category-heading em {
+    color: var(--muted);
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 700;
 }
 
 .settings-card {
@@ -3297,8 +3780,52 @@ td.actions {
     border: 1px solid var(--line);
     border-radius: 8px;
     box-shadow: var(--shadow);
-    padding: 16px;
+    padding: 12px;
     transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.settings-card[data-settings-key="mail"] {
+    grid-row: 2;
+}
+
+.settings-card[data-settings-key="logo"] {
+    grid-row: 3;
+}
+
+.settings-card[data-settings-key="mail-test"] {
+    grid-row: 4;
+}
+
+.settings-card[data-settings-key="microsoft-status"] {
+    grid-row: 5;
+}
+
+.settings-card[data-settings-key="notifications"] {
+    grid-row: 2;
+}
+
+.settings-card[data-settings-key="bank-transfer"] {
+    grid-row: 3;
+}
+
+.settings-card[data-settings-key="parasut"] {
+    grid-row: 4;
+}
+
+.settings-card[data-settings-key="iyzico"] {
+    grid-row: 5;
+}
+
+.settings-card[data-settings-key="database"] {
+    grid-row: 2;
+}
+
+.settings-card[data-settings-key="backup"] {
+    grid-row: 3;
+}
+
+.settings-card[data-settings-key="mail-logs"] {
+    grid-row: 4;
 }
 
 .settings-card-brand {
@@ -3323,6 +3850,8 @@ td.actions {
 }
 
 .settings-dialog-slot .settings-card {
+    grid-column: auto !important;
+    grid-row: auto !important;
     padding: 0;
     border: 0;
     background: transparent;
@@ -3339,12 +3868,27 @@ td.actions {
 
 .settings-card .section-head {
     align-items: center;
-    min-height: 42px;
+    min-height: 34px;
+    flex-wrap: nowrap;
     cursor: pointer;
 }
 
 .settings-card .section-head h2 {
+    flex: 1 1 auto;
+    min-width: 0;
     margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px;
+    line-height: 1.15;
+}
+
+.settings-card .badge {
+    flex: 0 0 auto;
+    min-height: 24px;
+    padding-inline: 9px;
+    font-size: 11px;
 }
 
 .settings-card-tools {
@@ -3356,8 +3900,8 @@ td.actions {
 
 .settings-drag-handle,
 .settings-toggle {
-    min-height: 34px;
-    padding: 0 12px;
+    min-height: 30px;
+    padding: 0 10px;
     border: 1px solid var(--line);
     border-radius: 999px;
     background: var(--surface-2);
@@ -3368,8 +3912,21 @@ td.actions {
 }
 
 .settings-drag-handle {
+    width: 30px;
+    padding: 0;
     color: var(--muted);
+    font-size: 0;
     cursor: grab;
+}
+
+.settings-drag-handle::before {
+    content: "⋮⋮";
+    font-size: 13px;
+    letter-spacing: -3px;
+}
+
+.settings-board-categorized .settings-drag-handle {
+    display: none;
 }
 
 .settings-drag-handle:active {
@@ -3380,6 +3937,7 @@ td.actions {
     border-color: rgba(20, 124, 114, 0.28);
     background: #e9f5f2;
     color: var(--primary);
+    white-space: nowrap;
 }
 
 .settings-card-body {
@@ -3793,20 +4351,6 @@ td.actions {
 
 .supplier-unsubscribe-actions .button:only-child {
     grid-column: 1 / -1;
-}
-
-.paytr-frame-card {
-    display: grid;
-    gap: 16px;
-    max-width: 980px;
-}
-
-.paytr-frame-card iframe {
-    width: 100%;
-    min-height: 720px;
-    border: 0;
-    border-radius: 8px;
-    background: #fff;
 }
 
 .renewal-public-summary {
@@ -5306,6 +5850,7 @@ label {
     .customer-board,
     .customers-layout,
     .log-board,
+    .payment-request-layout,
     .user-board {
         grid-template-columns: 1fr;
     }
@@ -5385,6 +5930,11 @@ label {
 
     .settings-board {
         grid-template-columns: 1fr;
+    }
+
+    .settings-category-heading[data-settings-group],
+    .settings-card[data-settings-group] {
+        grid-column: 1 !important;
     }
 
     .definitions-board {
@@ -5594,6 +6144,19 @@ label {
 }
 
 @media (max-width: 680px) {
+    .mail-log-detail-card {
+        min-width: 78vw;
+        max-width: 78vw;
+    }
+
+    .mail-log-preview {
+        min-height: 520px;
+    }
+
+    .mail-log-detail-grid {
+        grid-template-columns: 1fr;
+    }
+
     .content {
         padding: 20px;
     }
@@ -5675,6 +6238,12 @@ label {
     .supplier-unsubscribe-actions,
     .collection-card-main,
     .collection-card-grid,
+    .payment-request-form,
+    .payment-request-summary,
+    .payment-request-actions,
+    .manual-payment-row,
+    .manual-payment-contact-option,
+    .manual-payment-recipient-card,
     .customer-offer-history-card summary,
     .customer-offer-history-lines > div {
         grid-template-columns: 1fr;

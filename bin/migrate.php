@@ -278,6 +278,77 @@ ensure_table($pdo, 'renewal_payment_receipts', "
         INDEX idx_renewal_payment_receipts_status (notification_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_table($pdo, 'manual_payment_requests', "
+    CREATE TABLE manual_payment_requests (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        public_token VARCHAR(96) NOT NULL,
+        customer_id INT UNSIGNED NULL,
+        title VARCHAR(190) NOT NULL,
+        description TEXT NULL,
+        customer_name VARCHAR(190) NULL,
+        customer_email VARCHAR(190) NULL,
+        customer_phone VARCHAR(60) NULL,
+        customer_tax_number VARCHAR(60) NULL,
+        recipients_json MEDIUMTEXT NULL,
+        amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+        currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+        status ENUM('pending','paid','cancelled') NOT NULL DEFAULT 'pending',
+        paid_at DATETIME NULL,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_manual_payment_requests_token (public_token),
+        INDEX idx_manual_payment_requests_customer (customer_id),
+        INDEX idx_manual_payment_requests_status (status, created_at),
+        INDEX idx_manual_payment_requests_created_by (created_by)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_column($pdo, 'manual_payment_requests', 'customer_id', 'INT UNSIGNED NULL AFTER public_token');
+ensure_column($pdo, 'manual_payment_requests', 'recipients_json', 'MEDIUMTEXT NULL AFTER customer_tax_number');
+ensure_index($pdo, 'manual_payment_requests', 'idx_manual_payment_requests_customer', 'INDEX idx_manual_payment_requests_customer (customer_id)');
+ensure_table($pdo, 'manual_payment_transactions', "
+    CREATE TABLE manual_payment_transactions (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        request_id INT UNSIGNED NOT NULL,
+        provider VARCHAR(30) NOT NULL DEFAULT 'iyzico',
+        conversation_id VARCHAR(190) NOT NULL,
+        token VARCHAR(190) NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        payment_status VARCHAR(50) NULL,
+        payment_id VARCHAR(120) NULL,
+        payment_page_url TEXT NULL,
+        error_message TEXT NULL,
+        raw_request MEDIUMTEXT NULL,
+        raw_response MEDIUMTEXT NULL,
+        paid_at DATETIME NULL,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_manual_payment_transactions_request FOREIGN KEY (request_id) REFERENCES manual_payment_requests(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_manual_payment_transactions_conversation (conversation_id),
+        INDEX idx_manual_payment_transactions_token (token),
+        INDEX idx_manual_payment_transactions_status (status),
+        INDEX idx_manual_payment_transactions_request (request_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_table($pdo, 'manual_payment_request_logs', "
+    CREATE TABLE manual_payment_request_logs (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        request_id INT UNSIGNED NOT NULL,
+        channel VARCHAR(30) NOT NULL,
+        recipient VARCHAR(190) NOT NULL,
+        subject VARCHAR(240) NULL,
+        body MEDIUMTEXT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'sent',
+        error_message TEXT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_manual_payment_request_logs_request FOREIGN KEY (request_id) REFERENCES manual_payment_requests(id) ON DELETE CASCADE,
+        INDEX idx_manual_payment_request_logs_request (request_id, created_at),
+        INDEX idx_manual_payment_request_logs_channel (channel, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
 ensure_table($pdo, 'renewal_decisions', "
     CREATE TABLE renewal_decisions (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

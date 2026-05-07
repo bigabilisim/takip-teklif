@@ -245,9 +245,7 @@ function permission_catalog(): array
             'settings.manage' => 'Sistem, veritabani, mail, logo ve Parasut ayarlari',
             'definitions.manage' => 'Tanimlamalari yonet',
             'users.manage' => 'Kullanici ve yetki yonetimi',
-        ],
-        'Sistem' => [
-            'logs.view' => 'Loglari goruntule',
+            'logs.view' => 'Mail loglarını görüntüle',
         ],
     ];
 }

@@ -186,7 +186,7 @@ final class RenewalRepository
                 'bank' => $collection['bank'],
                 'term30' => $collection['term30'],
                 'receipts' => $this->countValue('SELECT COUNT(*) FROM renewal_payment_receipts'),
-                'paid_card' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'paid'"),
+                'paid_card' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'paid' AND COALESCE(payment_id, '') <> ''"),
                 'card_pending' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'pending'"),
             ],
         ];
@@ -248,6 +248,7 @@ final class RenewalRepository
                 FROM renewal_payments rp_paid_filter
                 WHERE rp_paid_filter.renewal_id = r.id
                   AND rp_paid_filter.status = 'paid'
+                  AND COALESCE(rp_paid_filter.payment_id, '') <> ''
             )",
             "NOT EXISTS (
                 SELECT 1
@@ -1706,18 +1707,13 @@ final class RenewalRepository
         return $this->providerPayments($renewalId, 'iyzico');
     }
 
-    public function paytrPayments(int $renewalId): array
-    {
-        return $this->providerPayments($renewalId, 'paytr');
-    }
-
     public function cardPayments(int $renewalId): array
     {
         $stmt = $this->db->prepare(
             'SELECT *
              FROM renewal_payments
              WHERE renewal_id = :renewal_id
-               AND provider IN (\'iyzico\', \'paytr\')
+               AND provider = \'iyzico\'
              ORDER BY created_at DESC, id DESC'
         );
         $stmt->execute(['renewal_id' => $renewalId]);
@@ -1745,13 +1741,6 @@ final class RenewalRepository
     public function createIyzicoPayment(array $data): int
     {
         $data['provider'] = 'iyzico';
-
-        return $this->createCardPayment($data);
-    }
-
-    public function createPaytrPayment(array $data): int
-    {
-        $data['provider'] = 'paytr';
 
         return $this->createCardPayment($data);
     }
@@ -1804,40 +1793,6 @@ final class RenewalRepository
         return $row ?: null;
     }
 
-    public function findPaytrPaymentByToken(string $token): ?array
-    {
-        return $this->findPaymentByProviderField('paytr', 'token', $token);
-    }
-
-    public function findPaytrPaymentByMerchantOid(string $merchantOid): ?array
-    {
-        return $this->findPaymentByProviderField('paytr', 'conversation_id', $merchantOid);
-    }
-
-    private function findPaymentByProviderField(string $provider, string $field, string $value): ?array
-    {
-        if (!in_array($field, ['token', 'conversation_id'], true)) {
-            throw new \InvalidArgumentException('Gecersiz odeme arama alani.');
-        }
-
-        $stmt = $this->db->prepare(
-            'SELECT rp.*, r.title, r.brand, c.company_name
-             FROM renewal_payments rp
-             INNER JOIN renewals r ON r.id = rp.renewal_id
-             INNER JOIN customers c ON c.id = r.customer_id
-             WHERE rp.provider = :provider
-               AND rp.' . $field . ' = :value
-             LIMIT 1'
-        );
-        $stmt->execute([
-            'provider' => $provider,
-            'value' => $value,
-        ]);
-        $row = $stmt->fetch();
-
-        return $row ?: null;
-    }
-
     public function updateIyzicoPaymentResult(int $paymentId, array $request, array $response, string $status): void
     {
         $stmt = $this->db->prepare(
@@ -1859,32 +1814,6 @@ final class RenewalRepository
             'payment_status' => $this->nullableString($response['paymentStatus'] ?? ''),
             'provider_payment_id' => $this->nullableString($response['paymentId'] ?? ''),
             'error_message' => $this->nullableString($response['errorMessage'] ?? ''),
-            'raw_request' => $this->jsonOrNull($request),
-            'raw_response' => $this->jsonOrNull($response),
-        ]);
-    }
-
-    public function updatePaytrPaymentResult(int $paymentId, array $request, array $response, string $status): void
-    {
-        $stmt = $this->db->prepare(
-            'UPDATE renewal_payments SET
-                status = :status,
-                payment_status = :payment_status,
-                payment_id = :provider_payment_id,
-                error_message = :error_message,
-                raw_request = :raw_request,
-                raw_response = :raw_response,
-                paid_at = CASE WHEN :paid_status = \'paid\' AND paid_at IS NULL THEN NOW() ELSE paid_at END,
-                updated_at = NOW()
-             WHERE id = :id'
-        );
-        $stmt->execute([
-            'id' => $paymentId,
-            'status' => $status,
-            'paid_status' => $status,
-            'payment_status' => $this->nullableString($response['status'] ?? ''),
-            'provider_payment_id' => $this->nullableString($response['merchant_oid'] ?? ''),
-            'error_message' => $this->nullableString($response['failed_reason_msg'] ?? $response['reason'] ?? ''),
             'raw_request' => $this->jsonOrNull($request),
             'raw_response' => $this->jsonOrNull($response),
         ]);
@@ -4123,6 +4052,7 @@ final class RenewalRepository
                     FROM renewal_payments rp_paid
                     WHERE rp_paid.renewal_id = r.id
                       AND rp_paid.status = 'paid'
+                      AND COALESCE(rp_paid.payment_id, '') <> ''
                 ) AS has_paid_card_payment,
                 (
                     SELECT rp_latest.status
