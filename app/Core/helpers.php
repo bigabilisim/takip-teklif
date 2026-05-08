@@ -217,6 +217,7 @@ function permission_catalog(): array
         'Panel' => [
             'dashboard.view' => 'Dashboard goruntule',
             'dashboard.details' => 'Dashboard detaylarini ac/kapat',
+            'reports.view' => 'Satış raporlarını görüntüle',
             'flows.view' => 'Akış şemalarını görüntüle',
         ],
         'Yenilemeler' => [

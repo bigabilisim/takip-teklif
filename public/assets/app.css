@@ -1301,6 +1301,203 @@ h3 {
     font-size: 16px;
 }
 
+.sales-report-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 0.42fr);
+    gap: 16px;
+    align-items: stretch;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #eef6f3;
+    box-shadow: var(--shadow);
+}
+
+.sales-report-hero h2 {
+    margin: 4px 0 8px;
+    color: var(--text);
+    font-size: 28px;
+    line-height: 1.08;
+}
+
+.sales-report-hero p:last-child {
+    max-width: 780px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.sales-report-filter {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr);
+    gap: 10px;
+    align-content: center;
+    padding: 14px;
+    border: 1px solid #d8e8e3;
+    border-radius: 9px;
+    background: #ffffff;
+}
+
+.sales-report-filter label {
+    display: grid;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 850;
+}
+
+.sales-report-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.sales-report-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin: 14px 0;
+}
+
+.sales-report-summary article {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+}
+
+.sales-report-summary span,
+.sales-report-summary small,
+.sales-month-card span,
+.sales-month-card small {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+
+.sales-report-summary strong {
+    display: block;
+    margin: 6px 0 2px;
+    color: var(--text);
+    font-size: 24px;
+    line-height: 1.05;
+}
+
+.sales-month-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.sales-month-card {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid #dbe7e2;
+    border-radius: 10px;
+    background: #fbfdfc;
+}
+
+.sales-month-card.has-sales {
+    border-color: #aed9d0;
+    background: #f1faf7;
+}
+
+.sales-month-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.sales-month-head strong {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 38px;
+    height: 38px;
+    border-radius: 999px;
+    background: #dff2ed;
+    color: var(--primary-strong);
+    font-size: 20px;
+}
+
+.sales-month-bar {
+    overflow: hidden;
+    height: 8px;
+    border-radius: 999px;
+    background: #edf3f1;
+}
+
+.sales-month-bar span {
+    display: block;
+    min-width: 4px;
+    max-width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #87cfc4, #157f73);
+}
+
+.sales-month-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.sales-month-meta span {
+    padding: 6px 8px;
+    border-radius: 999px;
+    background: #ffffff;
+}
+
+.sales-month-card em {
+    color: var(--text);
+    font-size: 13px;
+    font-style: normal;
+    font-weight: 850;
+    line-height: 1.35;
+}
+
+.sales-report-table-panel {
+    margin-top: 0;
+}
+
+.sales-report-table {
+    display: grid;
+    gap: 8px;
+}
+
+.sales-report-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 90px 120px 90px;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid #e0ebe7;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.sales-report-row.head {
+    background: #edf5f2;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 900;
+    text-transform: uppercase;
+}
+
+.sales-report-row strong,
+.sales-report-row span {
+    min-width: 0;
+}
+
 .collection-stats {
     margin-bottom: 14px;
 }
@@ -6820,18 +7017,29 @@ label {
     }
 
     .stock-sync-panel,
-    .stock-item-card {
+    .stock-item-card,
+    .sales-report-hero {
         grid-template-columns: 1fr;
         align-items: stretch;
     }
 
-    .stock-summary-grid {
+    .stock-summary-grid,
+    .sales-report-summary,
+    .sales-month-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .stock-price,
     .stock-meta {
         justify-items: start;
+    }
+
+    .sales-report-filter {
+        grid-template-columns: 1fr;
+    }
+
+    .sales-report-row {
+        grid-template-columns: 1fr;
     }
 
     h1 {

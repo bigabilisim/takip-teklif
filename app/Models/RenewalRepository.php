@@ -933,6 +933,135 @@ final class RenewalRepository
         return $stmt->fetchAll();
     }
 
+    public function salesReportYears(): array
+    {
+        $sql = 'SELECT DISTINCT sale_year FROM (' . $this->salesReportUnionSql() . ') sales WHERE sale_year IS NOT NULL ORDER BY sale_year DESC';
+        $years = array_map('intval', $this->db->query($sql)->fetchAll(PDO::FETCH_COLUMN));
+
+        return $years !== [] ? $years : [(int) date('Y')];
+    }
+
+    public function salesReportItemOptions(int $limit = 200): array
+    {
+        $limit = max(1, min($limit, 500));
+        $stmt = $this->db->prepare(
+            'SELECT item_title
+             FROM (' . $this->salesReportUnionSql() . ') sales
+             WHERE item_title <> \'\'
+             GROUP BY item_title
+             ORDER BY item_title ASC
+             LIMIT :limit'
+        );
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    public function monthlySalesReport(int $year, string $query = ''): array
+    {
+        $year = max(2000, min(2100, $year));
+        $query = trim($query);
+        $months = [];
+        for ($month = 1; $month <= 12; $month++) {
+            $months[$month] = [
+                'month' => $month,
+                'sale_count' => 0,
+                'line_count' => 0,
+                'quantity' => 0.0,
+                'amounts' => [],
+            ];
+        }
+
+        $where = 'sale_year = :year';
+        $params = ['year' => $year];
+        if ($query !== '') {
+            $where .= ' AND item_title LIKE :query';
+            $params['query'] = '%' . $query . '%';
+        }
+
+        $base = $this->salesReportUnionSql();
+        $countStmt = $this->db->prepare(
+            "SELECT
+                sale_month,
+                COUNT(*) AS line_count,
+                COUNT(DISTINCT sale_key) AS sale_count,
+                SUM(quantity) AS quantity
+             FROM ({$base}) sales
+             WHERE {$where}
+             GROUP BY sale_month
+             ORDER BY sale_month ASC"
+        );
+        $countStmt->execute($params);
+        foreach ($countStmt->fetchAll() as $row) {
+            $month = (int) ($row['sale_month'] ?? 0);
+            if (!isset($months[$month])) {
+                continue;
+            }
+            $months[$month]['sale_count'] = (int) ($row['sale_count'] ?? 0);
+            $months[$month]['line_count'] = (int) ($row['line_count'] ?? 0);
+            $months[$month]['quantity'] = (float) ($row['quantity'] ?? 0);
+        }
+
+        $amountStmt = $this->db->prepare(
+            "SELECT
+                sale_month,
+                currency,
+                SUM(line_total) AS total
+             FROM ({$base}) sales
+             WHERE {$where}
+             GROUP BY sale_month, currency
+             ORDER BY sale_month ASC, currency ASC"
+        );
+        $amountStmt->execute($params);
+        foreach ($amountStmt->fetchAll() as $row) {
+            $month = (int) ($row['sale_month'] ?? 0);
+            if (!isset($months[$month])) {
+                continue;
+            }
+            $currency = (string) (($row['currency'] ?? '') ?: 'TRY');
+            $months[$month]['amounts'][$currency] = (float) ($row['total'] ?? 0);
+        }
+
+        $itemStmt = $this->db->prepare(
+            "SELECT
+                item_title,
+                COUNT(DISTINCT sale_key) AS sale_count,
+                COUNT(*) AS line_count,
+                SUM(quantity) AS quantity
+             FROM ({$base}) sales
+             WHERE {$where}
+             GROUP BY item_title
+             ORDER BY quantity DESC, sale_count DESC, item_title ASC
+             LIMIT 12"
+        );
+        $itemStmt->execute($params);
+        $items = $itemStmt->fetchAll();
+
+        $totals = [
+            'sale_count' => 0,
+            'line_count' => 0,
+            'quantity' => 0.0,
+            'amounts' => [],
+        ];
+        foreach ($months as $month) {
+            $totals['sale_count'] += (int) $month['sale_count'];
+            $totals['line_count'] += (int) $month['line_count'];
+            $totals['quantity'] += (float) $month['quantity'];
+            foreach ($month['amounts'] as $currency => $amount) {
+                $totals['amounts'][$currency] = ($totals['amounts'][$currency] ?? 0.0) + (float) $amount;
+            }
+        }
+
+        return [
+            'year' => $year,
+            'query' => $query,
+            'months' => array_values($months),
+            'totals' => $totals,
+            'items' => $items,
+        ];
+    }
+
     public function createSalesOffer(array $data): int
     {
         $title = trim((string) ($data['offer_title'] ?? $data['title'] ?? ''));
@@ -4797,6 +4926,43 @@ final class RenewalRepository
         unset($supplier);
 
         return $suppliers;
+    }
+
+    private function salesReportUnionSql(): string
+    {
+        return "
+            SELECT
+                CONCAT('customer:', cor.id) AS sale_key,
+                col.item_title AS item_title,
+                col.quantity AS quantity,
+                col.line_total AS line_total,
+                COALESCE(NULLIF(col.currency, ''), cor.currency, 'TRY') AS currency,
+                COALESCE(cor.responded_at, cor.updated_at, cor.created_at) AS sale_date,
+                YEAR(COALESCE(cor.responded_at, cor.updated_at, cor.created_at)) AS sale_year,
+                MONTH(COALESCE(cor.responded_at, cor.updated_at, cor.created_at)) AS sale_month,
+                c.company_name AS customer_name
+            FROM customer_offer_lines col
+            INNER JOIN customer_offer_requests cor ON cor.id = col.offer_id
+            INNER JOIN renewals r ON r.id = cor.renewal_id
+            INNER JOIN customers c ON c.id = r.customer_id
+            WHERE cor.status = 'approved'
+
+            UNION ALL
+
+            SELECT
+                CONCAT('sales:', so.id) AS sale_key,
+                soi.title AS item_title,
+                soi.quantity AS quantity,
+                soi.line_total AS line_total,
+                COALESCE(NULLIF(soi.currency, ''), so.currency, 'TRY') AS currency,
+                COALESCE(so.updated_at, so.created_at) AS sale_date,
+                YEAR(COALESCE(so.updated_at, so.created_at)) AS sale_year,
+                MONTH(COALESCE(so.updated_at, so.created_at)) AS sale_month,
+                so.customer_name AS customer_name
+            FROM sales_offer_items soi
+            INNER JOIN sales_offers so ON so.id = soi.offer_id
+            WHERE so.status = 'approved'
+        ";
     }
 
     private function createSupplierContacts(int $supplierId, array $data): void

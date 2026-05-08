@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.10] - 2026-05-08
+
+- Raporlar menüsüne ürün/hizmet bazında yıllık-aylık satış analizi eklendi.
+- Onaylanan müşteri tekliflerinden ürün adı filtresiyle satış sayısı, satılan adet ve KDV dahil tutarlar izlenebilir hale getirildi.
+
 ## [2.0.9] - 2026-05-08
 
 - Paraşüt ürün/hizmet kataloğu yerel stok kalemi tablosuna senkronlanabilir hale getirildi.

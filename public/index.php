@@ -116,6 +116,9 @@ try {
         }
         require_permission('dashboard.view');
         render_dashboard($repo);
+    } elseif ($path === '/reports/sales') {
+        require_permission('reports.view');
+        render_sales_report($repo);
     } elseif ($path === '/flows') {
         require_permission('flows.view');
         redirect('/settings/flows');
@@ -5484,6 +5487,177 @@ function render_dashboard(RenewalRepository $repo): void
     });
 }
 
+function render_sales_report(RenewalRepository $repo): void
+{
+    $years = $repo->salesReportYears();
+    $requestedYear = (int) ($_GET['year'] ?? date('Y'));
+    $year = in_array($requestedYear, $years, true) ? $requestedYear : (int) ($years[0] ?? date('Y'));
+    $query = trim((string) ($_GET['q'] ?? ''));
+    $report = $repo->monthlySalesReport($year, $query);
+    $itemOptions = $repo->salesReportItemOptions();
+    $maxMonthlySales = max(1, ...array_map(static fn (array $month): int => (int) $month['sale_count'], $report['months']));
+
+    render_layout('Satış Raporları', static function () use ($years, $year, $query, $report, $itemOptions, $maxMonthlySales): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Raporlar</p>
+                <h1>Satış analizi</h1>
+            </div>
+            <div class="page-actions">
+                <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
+            </div>
+        </div>
+
+        <section class="sales-report-hero">
+            <div>
+                <p class="eyebrow">Ay bazlı takip</p>
+                <h2><?= h($query !== '' ? $query . ' satışları' : 'Tüm ürün ve hizmet satışları') ?></h2>
+                <p>Onaylanan müşteri teklifleri ve onaylanmış teklif kayıtları üzerinden hesaplanır. Ürün adına göre filtreleyerek “Aylık Bakım Anlaşması” gibi kalemleri yıl içinde kaç kere sattığınızı görebilirsiniz.</p>
+            </div>
+            <form method="get" class="sales-report-filter">
+                <label>
+                    Yıl
+                    <select name="year">
+                        <?php foreach ($years as $optionYear): ?>
+                            <?= option((string) $optionYear, (string) $optionYear, (string) $year) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    Ürün / hizmet
+                    <input name="q" list="sales-report-items" value="<?= h($query) ?>" placeholder="Örn: Aylık Bakım Anlaşması">
+                    <datalist id="sales-report-items">
+                        <?php foreach ($itemOptions as $item): ?>
+                            <option value="<?= h($item) ?>"></option>
+                        <?php endforeach; ?>
+                    </datalist>
+                </label>
+                <div class="sales-report-actions">
+                    <button class="button primary" type="submit">Raporla</button>
+                    <?php if ($query !== ''): ?>
+                        <a class="button secondary" href="<?= h(url('/reports/sales?year=' . $year)) ?>">Temizle</a>
+                    <?php endif; ?>
+                </div>
+            </form>
+        </section>
+
+        <section class="sales-report-summary">
+            <article>
+                <span>Yıllık satış</span>
+                <strong><?= h((string) $report['totals']['sale_count']) ?></strong>
+                <small>onaylı işlem</small>
+            </article>
+            <article>
+                <span>Satılan adet</span>
+                <strong><?= h(decimal_format_local($report['totals']['quantity'])) ?></strong>
+                <small>toplam miktar</small>
+            </article>
+            <article>
+                <span>Kalem sayısı</span>
+                <strong><?= h((string) $report['totals']['line_count']) ?></strong>
+                <small>teklif satırı</small>
+            </article>
+            <article>
+                <span>KDV dahil toplam</span>
+                <strong><?= h(report_amounts_text((array) $report['totals']['amounts'])) ?></strong>
+                <small>para birimine göre</small>
+            </article>
+        </section>
+
+        <section class="sales-month-grid">
+            <?php foreach ($report['months'] as $month): ?>
+                <?php
+                $saleCount = (int) $month['sale_count'];
+                $barWidth = (int) round(($saleCount / $maxMonthlySales) * 100);
+                ?>
+                <article class="sales-month-card <?= $saleCount > 0 ? 'has-sales' : '' ?>">
+                    <div class="sales-month-head">
+                        <span><?= h(turkish_month_name((int) $month['month'])) ?></span>
+                        <strong><?= h((string) $saleCount) ?></strong>
+                    </div>
+                    <div class="sales-month-bar" aria-hidden="true">
+                        <span style="width: <?= h((string) $barWidth) ?>%"></span>
+                    </div>
+                    <div class="sales-month-meta">
+                        <span>Adet <b><?= h(decimal_format_local($month['quantity'])) ?></b></span>
+                        <span>Kalem <b><?= h((string) $month['line_count']) ?></b></span>
+                    </div>
+                    <em><?= h(report_amounts_text((array) $month['amounts'])) ?></em>
+                </article>
+            <?php endforeach; ?>
+        </section>
+
+        <section class="panel sales-report-table-panel">
+            <div class="section-head">
+                <div>
+                    <h2>En çok satılan kalemler</h2>
+                    <span><?= h((string) $year) ?> yılı için onaylı satış özeti</span>
+                </div>
+            </div>
+            <?php if ($report['items'] === []): ?>
+                <div class="empty">Bu filtreyle onaylı satış bulunmadı.</div>
+            <?php else: ?>
+                <div class="sales-report-table">
+                    <div class="sales-report-row head">
+                        <span>Ürün / hizmet</span>
+                        <span>Satış</span>
+                        <span>Adet</span>
+                        <span>Kalem</span>
+                    </div>
+                    <?php foreach ($report['items'] as $item): ?>
+                        <div class="sales-report-row">
+                            <strong><?= h((string) $item['item_title']) ?></strong>
+                            <span><?= h((string) ((int) $item['sale_count'])) ?></span>
+                            <span><?= h(decimal_format_local($item['quantity'] ?? 0)) ?></span>
+                            <span><?= h((string) ((int) $item['line_count'])) ?></span>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </section>
+        <?php
+    });
+}
+
+function turkish_month_name(int $month): string
+{
+    return [
+        1 => 'Ocak',
+        2 => 'Şubat',
+        3 => 'Mart',
+        4 => 'Nisan',
+        5 => 'Mayıs',
+        6 => 'Haziran',
+        7 => 'Temmuz',
+        8 => 'Ağustos',
+        9 => 'Eylül',
+        10 => 'Ekim',
+        11 => 'Kasım',
+        12 => 'Aralık',
+    ][$month] ?? '-';
+}
+
+function decimal_format_local(mixed $value): string
+{
+    return number_format((float) $value, 2, ',', '.');
+}
+
+function report_amounts_text(array $amounts): string
+{
+    if ($amounts === []) {
+        return '-';
+    }
+
+    ksort($amounts);
+
+    return implode(' · ', array_map(
+        static fn (string $currency, mixed $amount): string => money_format_local($amount, $currency),
+        array_keys($amounts),
+        $amounts
+    ));
+}
+
 function handle_sales_offer_create(RenewalRepository $repo, string $method): void
 {
     $templates = $repo->offerTemplates();
@@ -9545,6 +9719,7 @@ function default_staff_permissions(): array
     return [
         'dashboard.view',
         'dashboard.details',
+        'reports.view',
         'flows.view',
         'renewals.view',
         'renewals.details',
@@ -11051,6 +11226,7 @@ function render_layout(string $title, callable $content, string $headExtra = '')
                 <div class="sidebar-menu" id="mobile-navigation" data-mobile-menu>
                 <nav class="nav">
                     <?= Auth::can('dashboard.view') ? nav_link('/', 'Dashboard') : '' ?>
+                    <?= Auth::can('reports.view') ? nav_link('/reports/sales', 'Raporlar') : '' ?>
                     <?= Auth::can('collections.view') ? nav_link('/collections', 'Tahsilat') : '' ?>
                     <?= Auth::can('collections.view') ? nav_link('/payment-requests', 'Ödeme Talep Et') : '' ?>
                     <?= Auth::can('customers.view') ? nav_link('/customers', 'Müşteriler') : '' ?>
@@ -12950,6 +13126,7 @@ function first_allowed_path(): ?string
 {
     $paths = [
         'dashboard.view' => '/',
+        'reports.view' => '/reports/sales',
         'flows.view' => '/settings/flows',
         'collections.view' => '/collections',
         'renewals.view' => '/renewals',
