@@ -2176,6 +2176,65 @@ final class RenewalRepository
         return $row ?: null;
     }
 
+    public function latestCustomerOfferForPayment(int $renewalId, string $email = ''): ?array
+    {
+        $email = trim(mb_strtolower($email));
+        $stmt = $this->db->prepare(
+            "SELECT id,
+                    renewal_id,
+                    status,
+                    recipient_email,
+                    recipient_name,
+                    total,
+                    currency,
+                    created_at
+             FROM customer_offer_requests
+             WHERE renewal_id = :renewal_id
+               AND status IN ('sent', 'opened', 'approved')
+             ORDER BY
+               CASE
+                   WHEN :email_check <> '' AND LOWER(recipient_email) = :email_match THEN 0
+                   ELSE 1
+               END ASC,
+               CASE status
+                   WHEN 'approved' THEN 0
+                   WHEN 'opened' THEN 1
+                   ELSE 2
+               END ASC,
+               created_at DESC,
+               id DESC
+             LIMIT 1"
+        );
+        $stmt->execute([
+            'renewal_id' => $renewalId,
+            'email_check' => $email,
+            'email_match' => $email,
+        ]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function markCustomerOfferApprovedByPayment(int $offerId, string $note = ''): void
+    {
+        $note = trim($note) !== '' ? trim($note) : 'Kredi kartı ödemesi tamamlandığı için sistem tarafından onaylandı.';
+        $stmt = $this->db->prepare(
+            "UPDATE customer_offer_requests
+             SET status = 'approved',
+                 responded_at = COALESCE(responded_at, NOW()),
+                 response_note = :response_note,
+                 response_ip = COALESCE(response_ip, 'system'),
+                 response_user_agent = COALESCE(response_user_agent, 'iyzico-payment'),
+                 updated_at = NOW()
+             WHERE id = :id
+               AND status IN ('sent', 'opened', 'approved')"
+        );
+        $stmt->execute([
+            'id' => $offerId,
+            'response_note' => mb_substr($note, 0, 2000),
+        ]);
+    }
+
     public function latestApprovedCustomerOfferWithParasutInvoice(int $renewalId): ?array
     {
         $stmt = $this->db->prepare(
@@ -2211,6 +2270,24 @@ final class RenewalRepository
         $row = $stmt->fetch();
 
         return $row ?: null;
+    }
+
+    public function setCustomerParasutContactId(int $customerId, string $contactId): void
+    {
+        $contactId = trim($contactId);
+        if ($customerId < 1 || $contactId === '') {
+            return;
+        }
+
+        $this->db->prepare(
+            'UPDATE customers
+             SET parasut_contact_id = :parasut_contact_id,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $customerId,
+            'parasut_contact_id' => $contactId,
+        ]);
     }
 
     public function deleteCustomerOffer(int $offerId): ?array

@@ -1083,7 +1083,9 @@ function create_parasut_invoice_for_customer_offer(RenewalRepository $repo, int 
     try {
         $lines = $repo->customerOfferLines($offerId);
         $payment = $repo->latestPaidPayment((int) ($offer['renewal_id'] ?? 0));
-        $invoice = (new ParasutClient())->createSalesInvoiceFromOffer($offer, $lines, $payment);
+        $client = new ParasutClient();
+        $offer = ensure_customer_offer_parasut_contact($repo, $client, $offer);
+        $invoice = $client->createSalesInvoiceFromOffer($offer, $lines, $payment);
         if (trim((string) ($invoice['id'] ?? '')) === '') {
             throw new RuntimeException('Paraşüt fatura ID dönmedi.');
         }
@@ -1096,6 +1098,77 @@ function create_parasut_invoice_for_customer_offer(RenewalRepository $repo, int 
 
         return ['ok' => false, 'error' => $e->getMessage()];
     }
+}
+
+function ensure_customer_offer_parasut_contact(RenewalRepository $repo, ParasutClient $client, array $offer): array
+{
+    if (trim((string) ($offer['parasut_contact_id'] ?? '')) !== '') {
+        return $offer;
+    }
+
+    $companyName = trim((string) ($offer['company_name'] ?? ''));
+    if ($companyName === '') {
+        throw new RuntimeException('Müşteri Paraşüt carisi eşleşmemiş ve firma adı boş.');
+    }
+
+    $contacts = $client->searchContacts($companyName, 8, 'customer');
+    $matched = parasut_contact_match_for_customer($contacts, $companyName, (string) ($offer['customer_tax_number'] ?? ''));
+    if ($matched === null || trim((string) ($matched['id'] ?? '')) === '') {
+        throw new RuntimeException('Müşterinin Paraşüt cari ID bilgisi yok. Önce müşteriyi Paraşüt carisiyle eşleştirin.');
+    }
+
+    $contactId = trim((string) $matched['id']);
+    $repo->setCustomerParasutContactId((int) ($offer['customer_id'] ?? 0), $contactId);
+    $offer['parasut_contact_id'] = $contactId;
+
+    return $offer;
+}
+
+function parasut_contact_match_for_customer(array $contacts, string $companyName, string $taxNumber = ''): ?array
+{
+    if ($contacts === []) {
+        return null;
+    }
+
+    $taxNumber = preg_replace('/\D+/', '', $taxNumber) ?? '';
+    if ($taxNumber !== '') {
+        foreach ($contacts as $contact) {
+            $contactTax = preg_replace('/\D+/', '', (string) ($contact['tax_number'] ?? '')) ?? '';
+            if ($contactTax !== '' && $contactTax === $taxNumber) {
+                return $contact;
+            }
+        }
+    }
+
+    $needle = normalized_match_key($companyName);
+    foreach ($contacts as $contact) {
+        if (normalized_match_key((string) ($contact['name'] ?? '')) === $needle) {
+            return $contact;
+        }
+    }
+
+    return count($contacts) === 1 ? $contacts[0] : null;
+}
+
+function normalized_match_key(string $value): string
+{
+    $value = mb_strtolower(trim($value), 'UTF-8');
+    $value = strtr($value, [
+        'ı' => 'i',
+        'ğ' => 'g',
+        'ü' => 'u',
+        'ş' => 's',
+        'ö' => 'o',
+        'ç' => 'c',
+        'İ' => 'i',
+        'Ğ' => 'g',
+        'Ü' => 'u',
+        'Ş' => 's',
+        'Ö' => 'o',
+        'Ç' => 'c',
+    ]);
+
+    return (string) preg_replace('/[^a-z0-9]+/u', '', $value);
 }
 
 function sync_parasut_invoice_note_for_offer(RenewalRepository $repo, array $offer): ?array
@@ -1138,6 +1211,61 @@ function sync_parasut_invoice_note_for_latest_paid_renewal(RenewalRepository $re
     }
 
     return sync_parasut_invoice_note_for_offer($repo, $offer);
+}
+
+function finalize_paid_renewal_after_card_payment(RenewalRepository $repo, array $payment): array
+{
+    $renewalId = (int) ($payment['renewal_id'] ?? 0);
+    if ($renewalId < 1) {
+        return ['ok' => false, 'error' => 'Yenileme kaydı bulunamadı.'];
+    }
+
+    $renewal = $repo->find($renewalId);
+    if (!$renewal) {
+        return ['ok' => false, 'error' => 'Yenileme kaydı bulunamadı.'];
+    }
+
+    $alreadyInvoicedOffer = $repo->latestApprovedCustomerOfferWithParasutInvoice($renewalId);
+    if ($alreadyInvoicedOffer) {
+        $invoiceNo = trim((string) (($alreadyInvoicedOffer['parasut_invoice_no'] ?? '') ?: ($alreadyInvoicedOffer['parasut_invoice_id'] ?? '')));
+        if (empty($renewal['renewed_at']) && $invoiceNo !== '') {
+            $repo->markRenewed($renewalId, $invoiceNo);
+        }
+
+        return ['ok' => true, 'already_created' => true, 'invoice_no' => $invoiceNo];
+    }
+
+    $offer = $repo->latestApprovedCustomerOfferWaitingParasut($renewalId);
+    if (!$offer) {
+        $offer = $repo->latestCustomerOfferForPayment(
+            $renewalId,
+            (string) ($renewal['payment_selected_email'] ?? '')
+        );
+        if ($offer) {
+            $repo->markCustomerOfferApprovedByPayment(
+                (int) $offer['id'],
+                'Kredi kartı ödemesi tamamlandığı için sistem tarafından onaylandı. Ödeme no: ' . trim((string) ($payment['payment_id'] ?? '-'))
+            );
+            $repo->applyCustomerOfferToRenewal($renewalId, (int) $offer['id']);
+        }
+    }
+
+    if (!$offer) {
+        return ['ok' => false, 'skipped' => true, 'error' => 'Ödeme başarılı ancak müşteriye gönderilmiş teklif kaydı bulunamadı.'];
+    }
+
+    $invoiceResult = create_parasut_invoice_for_customer_offer($repo, (int) $offer['id']);
+    if (empty($invoiceResult['ok'])) {
+        return $invoiceResult + ['offer_id' => (int) $offer['id']];
+    }
+
+    $invoice = (array) ($invoiceResult['invoice'] ?? []);
+    $invoiceNo = trim((string) (($invoice['invoice_no'] ?? '') ?: ($invoice['id'] ?? '')));
+    if ($invoiceNo !== '') {
+        $repo->markRenewed($renewalId, $invoiceNo);
+    }
+
+    return $invoiceResult + ['offer_id' => (int) $offer['id'], 'renewed' => $invoiceNo !== ''];
 }
 
 function customer_offer_recipients_from_request(RenewalRepository $repo, array $row): array
@@ -3972,6 +4100,14 @@ function handle_iyzico_callback(string $method): void
             notify_payment_received($payment, $response, 'renewal');
         }
         if ($localStatus === 'paid') {
+            try {
+                $finalizeResult = finalize_paid_renewal_after_card_payment($repo, $payment);
+                if (empty($finalizeResult['ok'])) {
+                    error_log('Ödeme sonrası yenileme/fatura tamamlanamadı: ' . (string) ($finalizeResult['error'] ?? 'Bilinmeyen hata'));
+                }
+            } catch (Throwable $finalizeError) {
+                error_log('Ödeme sonrası yenileme/fatura tamamlanamadı: ' . $finalizeError->getMessage());
+            }
             sync_parasut_invoice_note_for_latest_paid_renewal($repo, (int) ($payment['renewal_id'] ?? 0));
         }
     } catch (Throwable $e) {

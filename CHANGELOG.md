@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.18] - 2026-05-08
+
+- Başarılı iyzico yenileme ödemesi sonrasında ilgili müşteri teklifi otomatik onaylanır, Paraşüt faturası oluşturulur ve yenileme kaydı yeni periyoda ilerletilir.
+- Paraşüt cari ID boşsa, fatura oluşturma sırasında müşteri unvanı/VKN ile güvenli eşleşme yapılır ve cari ID müşteri kartına yazılır.
+
 ## [2.0.17] - 2026-05-08
 
 - Tahsilat ekranına başarılı iyzico kart ödemelerini gösteren “Kart ödemeleri” filtresi eklendi.
