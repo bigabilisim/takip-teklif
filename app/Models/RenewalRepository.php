@@ -933,6 +933,27 @@ final class RenewalRepository
         return $stmt->fetchAll();
     }
 
+    public function findSalesOffer(int $id): ?array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT so.*,
+                    ot.name AS template_name
+             FROM sales_offers so
+             LEFT JOIN offer_templates ot ON ot.id = so.template_id
+             WHERE so.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute(['id' => $id]);
+        $offer = $stmt->fetch();
+        if (!$offer) {
+            return null;
+        }
+
+        $offer['items'] = $this->salesOfferItems($id);
+
+        return $offer;
+    }
+
     public function salesReportYears(): array
     {
         $sql = 'SELECT DISTINCT sale_year FROM (' . $this->salesReportUnionSql() . ') sales WHERE sale_year IS NOT NULL ORDER BY sale_year DESC';
@@ -1108,6 +1129,81 @@ final class RenewalRepository
             $this->db->commit();
 
             return $id;
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function updateSalesOffer(int $id, array $data): void
+    {
+        if ($this->findSalesOffer($id) === null) {
+            throw new \RuntimeException('Teklif kaydı bulunamadı.');
+        }
+
+        $title = trim((string) ($data['offer_title'] ?? $data['title'] ?? ''));
+        $customerName = trim((string) ($data['customer_name'] ?? ''));
+        if ($title === '') {
+            throw new \RuntimeException('Teklif başlığı zorunlu.');
+        }
+        if ($customerName === '') {
+            throw new \RuntimeException('Teklif için firma / müşteri adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Teklif için en az bir kalem girin.');
+        }
+
+        $currency = self::normalizeCurrency($data['currency'] ?? 'TRY');
+        $totals = $this->salesOfferTotals($items);
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE sales_offers
+                 SET template_id = :template_id,
+                     title = :title,
+                     customer_name = :customer_name,
+                     customer_email = :customer_email,
+                     customer_phone = :customer_phone,
+                     currency = :currency,
+                     subtotal = :subtotal,
+                     vat_total = :vat_total,
+                     total = :total,
+                     notes = :notes,
+                     updated_at = NOW()
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                'id' => $id,
+                'template_id' => empty($data['template_id']) ? null : (int) $data['template_id'],
+                'title' => $title,
+                'customer_name' => $customerName,
+                'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
+                'customer_phone' => $this->nullableString(\normalize_phone_number($data['customer_phone'] ?? '')),
+                'currency' => $currency,
+                'subtotal' => $totals['subtotal'],
+                'vat_total' => $totals['vat_total'],
+                'total' => $totals['total'],
+                'notes' => $this->nullableString($data['notes'] ?? ''),
+            ]);
+            $this->replaceSalesOfferItems($id, $items, $currency);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function deleteSalesOffer(int $id): void
+    {
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare('DELETE FROM sales_offer_items WHERE offer_id = :offer_id')
+                ->execute(['offer_id' => $id]);
+            $this->db->prepare('DELETE FROM sales_offers WHERE id = :id')
+                ->execute(['id' => $id]);
+            $this->db->commit();
         } catch (\Throwable $e) {
             $this->db->rollBack();
             throw $e;
@@ -5436,6 +5532,19 @@ final class RenewalRepository
         }
 
         return $items;
+    }
+
+    private function salesOfferItems(int $offerId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM sales_offer_items
+             WHERE offer_id = :offer_id
+             ORDER BY sort_order ASC, id ASC'
+        );
+        $stmt->execute(['offer_id' => $offerId]);
+
+        return $stmt->fetchAll();
     }
 
     private function replaceOfferTemplateItems(int $templateId, array $items): void

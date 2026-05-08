@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.20] - 2026-05-08
+
+- Dashboard teklif kartları açıldığında alt bölümde `Düzenle` ve `Sil` aksiyonları eklendi; silme aksiyonu üst özet satırında gösterilmez.
+- Satış teklifleri için mevcut form düzenleme modunda da kullanılabilir hale getirildi.
+
 ## [2.0.19] - 2026-05-08
 
 - Tedarikçi fiyat talepleri, müşteri yenileme teklifleri ve satış teklifleri için ayrı teklif numarası serileri eklendi (`TT`, `YT`, `TK`).

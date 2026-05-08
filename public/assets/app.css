@@ -1059,6 +1059,10 @@ h3 {
     gap: 7px;
 }
 
+.track-actions form {
+    margin: 0;
+}
+
 .track-actions > .renewal-actions {
     flex: 1 1 100%;
 }

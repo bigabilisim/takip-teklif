@@ -159,6 +159,15 @@ try {
     } elseif ($path === '/offers/create') {
         require_permission('renewals.manage');
         handle_sales_offer_create($repo, $method);
+    } elseif (preg_match('#^/offers/(\d+)/edit$#', $path, $matches)) {
+        require_permission('renewals.manage');
+        handle_sales_offer_create($repo, $method, (int) $matches[1]);
+    } elseif (preg_match('#^/offers/(\d+)/delete$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.delete');
+        verify_csrf();
+        $repo->deleteSalesOffer((int) $matches[1]);
+        flash('success', 'Teklif kaydı silindi.');
+        redirect('/');
     } elseif ($path === '/renewals/create') {
         require_permission('renewals.manage');
         handle_renewal_form($repo, $method);
@@ -5777,13 +5786,14 @@ function render_dashboard(RenewalRepository $repo): void
     $upcoming = $repo->upcoming();
     $salesOffers = $repo->dashboardSalesOffers();
     $canManageRenewals = Auth::can('renewals.manage');
+    $canDeleteRenewals = Auth::can('renewals.delete');
     $canRequestCustomerInfo = Auth::can('customers.manage');
     $canViewRenewals = Auth::can('renewals.view');
     $showDetails = Auth::can('dashboard.details');
     $exchangeRates = ExchangeRates::latest();
     $customersForRequest = $canRequestCustomerInfo ? $repo->customers() : [];
 
-    render_layout('Dashboard', static function () use ($stats, $upcoming, $salesOffers, $canManageRenewals, $canRequestCustomerInfo, $canViewRenewals, $showDetails, $exchangeRates, $customersForRequest): void {
+    render_layout('Dashboard', static function () use ($stats, $upcoming, $salesOffers, $canManageRenewals, $canDeleteRenewals, $canRequestCustomerInfo, $canViewRenewals, $showDetails, $exchangeRates, $customersForRequest): void {
         ?>
         <div class="page-title">
             <div>
@@ -5847,7 +5857,7 @@ function render_dashboard(RenewalRepository $repo): void
                             <?php endif; ?>
                         </div>
                     </div>
-                    <?= render_sales_offer_lane($salesOffers, $canManageRenewals) ?>
+                    <?= render_sales_offer_lane($salesOffers, $canManageRenewals, $canDeleteRenewals) ?>
                 </div>
             </section>
         <?php else: ?>
@@ -6034,25 +6044,44 @@ function report_amounts_text(array $amounts): string
     ));
 }
 
-function handle_sales_offer_create(RenewalRepository $repo, string $method): void
+function handle_sales_offer_create(RenewalRepository $repo, string $method, ?int $id = null): void
 {
     $templates = $repo->offerTemplates();
     $stockItems = $repo->stockItems('', 250);
     $customerChoices = manual_payment_customer_choices($repo->customersWithContacts());
-    $templateId = max(0, (int) ($_GET['template_id'] ?? 0));
-    $blankMode = !empty($_GET['blank']);
-    $selectedTemplate = $templateId > 0 ? $repo->findOfferTemplate($templateId) : null;
+    $editingOffer = $id !== null ? $repo->findSalesOffer($id) : null;
+    if ($id !== null && $editingOffer === null) {
+        flash('error', 'Düzenlenecek teklif bulunamadı.');
+        redirect('/');
+    }
+
+    $templateId = $editingOffer !== null ? (int) ($editingOffer['template_id'] ?? 0) : max(0, (int) ($_GET['template_id'] ?? 0));
+    $blankMode = $editingOffer !== null || !empty($_GET['blank']);
+    $selectedTemplate = $editingOffer === null && $templateId > 0 ? $repo->findOfferTemplate($templateId) : null;
     $errors = [];
-    $formData = [
-        'template_id' => $selectedTemplate['id'] ?? null,
-        'offer_title' => $selectedTemplate ? (string) $selectedTemplate['name'] : '',
-        'customer_name' => '',
-        'customer_email' => '',
-        'customer_phone' => '',
-        'currency' => $selectedTemplate ? (string) $selectedTemplate['currency'] : 'TRY',
-        'notes' => $selectedTemplate ? (string) ($selectedTemplate['description'] ?? '') : '',
-        'items' => $selectedTemplate['items'] ?? [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']],
-    ];
+    if ($editingOffer !== null) {
+        $formData = [
+            'template_id' => $editingOffer['template_id'] ?? null,
+            'offer_title' => (string) $editingOffer['title'],
+            'customer_name' => (string) $editingOffer['customer_name'],
+            'customer_email' => (string) ($editingOffer['customer_email'] ?? ''),
+            'customer_phone' => (string) ($editingOffer['customer_phone'] ?? ''),
+            'currency' => (string) ($editingOffer['currency'] ?? 'TRY'),
+            'notes' => (string) ($editingOffer['notes'] ?? ''),
+            'items' => $editingOffer['items'] ?? [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']],
+        ];
+    } else {
+        $formData = [
+            'template_id' => $selectedTemplate['id'] ?? null,
+            'offer_title' => $selectedTemplate ? (string) $selectedTemplate['name'] : '',
+            'customer_name' => '',
+            'customer_email' => '',
+            'customer_phone' => '',
+            'currency' => $selectedTemplate ? (string) $selectedTemplate['currency'] : 'TRY',
+            'notes' => $selectedTemplate ? (string) ($selectedTemplate['description'] ?? '') : '',
+            'items' => $selectedTemplate['items'] ?? [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']],
+        ];
+    }
 
     if ($method === 'POST') {
         verify_csrf();
@@ -6060,20 +6089,27 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
         $formData['created_by'] = (int) ($_SESSION['user_id'] ?? 0);
 
         try {
+            if ($editingOffer !== null) {
+                $repo->updateSalesOffer((int) $editingOffer['id'], $formData);
+                flash('success', 'Teklif güncellendi: ' . (string) (($editingOffer['offer_number'] ?? '') ?: ('TK-' . date('Y', strtotime((string) $editingOffer['created_at'])) . '-' . str_pad((string) (int) $editingOffer['id'], 6, '0', STR_PAD_LEFT))));
+                redirect('/');
+            }
+
             $offerId = $repo->createSalesOffer($formData);
-            flash('success', 'Yeni teklif taslak olarak oluşturuldu: TK-' . date('Y') . '-' . str_pad((string) $offerId, 6, '0', STR_PAD_LEFT));
+            $createdOffer = $repo->findSalesOffer($offerId);
+            flash('success', 'Yeni teklif taslak olarak oluşturuldu: ' . (string) (($createdOffer['offer_number'] ?? '') ?: ('TK-' . date('Y') . '-' . str_pad((string) $offerId, 6, '0', STR_PAD_LEFT))));
             redirect('/');
         } catch (Throwable $e) {
             $errors[] = $e->getMessage();
         }
     }
 
-    render_layout('Yeni Teklif', static function () use ($templates, $stockItems, $customerChoices, $selectedTemplate, $blankMode, $errors, $formData): void {
+    render_layout($editingOffer !== null ? 'Teklifi Düzenle' : 'Yeni Teklif', static function () use ($templates, $stockItems, $customerChoices, $selectedTemplate, $blankMode, $errors, $formData, $editingOffer): void {
         ?>
         <div class="page-title">
             <div>
                 <p class="eyebrow">Teklifler</p>
-                <h1>Yeni teklif oluştur</h1>
+                <h1><?= $editingOffer !== null ? 'Teklifi düzenle' : 'Yeni teklif oluştur' ?></h1>
             </div>
             <div class="page-actions">
                 <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
@@ -6116,10 +6152,17 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
             <section class="panel offer-builder-panel">
                 <div class="section-head">
                     <div>
-                        <h2><?= $selectedTemplate ? 'Şablondan teklif' : 'Boş teklif' ?></h2>
-                        <span><?= $selectedTemplate ? h((string) $selectedTemplate['name']) . ' şablonu ile başlatıldı.' : 'Kalemleri ve fiyatları kendiniz belirleyin.' ?></span>
+                        <?php if ($editingOffer !== null): ?>
+                            <h2>Teklif bilgilerini güncelle</h2>
+                            <span><?= h((string) (($editingOffer['offer_number'] ?? '') ?: ('TK-' . date('Y', strtotime((string) $editingOffer['created_at'])) . '-' . str_pad((string) (int) $editingOffer['id'], 6, '0', STR_PAD_LEFT)))) ?> numaralı teklif üzerinde çalışıyorsunuz.</span>
+                        <?php else: ?>
+                            <h2><?= $selectedTemplate ? 'Şablondan teklif' : 'Boş teklif' ?></h2>
+                            <span><?= $selectedTemplate ? h((string) $selectedTemplate['name']) . ' şablonu ile başlatıldı.' : 'Kalemleri ve fiyatları kendiniz belirleyin.' ?></span>
+                        <?php endif; ?>
                     </div>
-                    <a class="button small secondary" href="<?= h(url('/offers/create')) ?>">Şablon seçimine dön</a>
+                    <?php if ($editingOffer === null): ?>
+                        <a class="button small secondary" href="<?= h(url('/offers/create')) ?>">Şablon seçimine dön</a>
+                    <?php endif; ?>
                 </div>
                 <form method="post" class="form-grid offer-builder-form" data-offer-builder-form data-stock-search-url="<?= h(url('/api/stock-items')) ?>">
                     <?= csrf_field() ?>
@@ -6186,7 +6229,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
 
                     <div class="form-actions span-2">
                         <a href="<?= h(url('/')) ?>" class="button secondary">Vazgeç</a>
-                        <button type="submit" class="button primary">Teklifi taslak oluştur</button>
+                        <button type="submit" class="button primary"><?= $editingOffer !== null ? 'Teklifi güncelle' : 'Teklifi taslak oluştur' ?></button>
                     </div>
                 </form>
             </section>
@@ -6427,7 +6470,7 @@ function handle_offer_templates(RenewalRepository $repo, string $method): void
     });
 }
 
-function render_sales_offer_lane(array $offers, bool $canManage): string
+function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete): string
 {
     if ($offers === []) {
         return '<div class="empty lane-empty">Henüz teklif taslağı yok. Sağ tarafı artık teklif modülü için kullanıyoruz.</div>';
@@ -6437,6 +6480,7 @@ function render_sales_offer_lane(array $offers, bool $canManage): string
     ?>
     <div class="dashboard-card-list">
         <?php foreach ($offers as $offer): ?>
+            <?php $offerId = (int) ($offer['id'] ?? 0); ?>
             <details class="dashboard-track-card offers sales-offer-card">
                 <summary class="track-summary">
                     <span class="track-main">
@@ -6479,9 +6523,17 @@ function render_sales_offer_lane(array $offers, bool $canManage): string
                     <?php if (!empty($offer['notes'])): ?>
                         <div class="settings-note compact"><?= nl2br(h((string) $offer['notes']), false) ?></div>
                     <?php endif; ?>
-                    <?php if ($canManage): ?>
+                    <?php if ($offerId > 0 && ($canManage || $canDelete)): ?>
                         <div class="track-actions">
-                            <a class="button small secondary" href="<?= h(url('/offers/create')) ?>">Yeni teklif</a>
+                            <?php if ($canManage): ?>
+                                <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
+                            <?php endif; ?>
+                            <?php if ($canDelete): ?>
+                                <form method="post" class="inline-delete-form" action="<?= h(url('/offers/' . $offerId . '/delete')) ?>" onsubmit="return confirm('Bu teklif ve kalemleri silinsin mi?')">
+                                    <?= csrf_field() ?>
+                                    <button type="submit" class="button small danger">Sil</button>
+                                </form>
+                            <?php endif; ?>
                         </div>
                     <?php endif; ?>
                 </div>
