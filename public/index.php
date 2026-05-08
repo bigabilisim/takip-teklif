@@ -89,6 +89,11 @@ if (preg_match('#^/pay/([A-Za-z0-9_-]{20,120})$#', $path, $matches)) {
     exit;
 }
 
+if (preg_match('#^/pay/([A-Za-z0-9_-]{20,120})/email$#', $path, $matches) && $method === 'POST') {
+    handle_manual_payment_public_email((string) $matches[1]);
+    exit;
+}
+
 if (preg_match('#^/pay/([A-Za-z0-9_-]{20,120})/card$#', $path, $matches) && $method === 'POST') {
     handle_manual_payment_card_create((string) $matches[1]);
     exit;
@@ -190,6 +195,9 @@ try {
     } elseif ($path === '/payment-requests') {
         require_permission($method === 'POST' ? 'collections.manage' : 'collections.view');
         handle_payment_requests_page($method);
+    } elseif (preg_match('#^/payment-requests/(\d+)/update$#', $path, $matches) && $method === 'POST') {
+        require_permission('collections.manage');
+        handle_payment_request_update((int) $matches[1]);
     } elseif (preg_match('#^/payment-requests/(\d+)/mail$#', $path, $matches) && $method === 'POST') {
         require_permission('collections.manage');
         handle_payment_request_mail((int) $matches[1]);
@@ -584,6 +592,50 @@ function handle_manual_payment_request_create(): void
         flash('error', $e->getMessage());
         redirect('/payment-requests');
     }
+}
+
+function handle_payment_request_update(int $requestId): void
+{
+    verify_csrf();
+
+    $repo = new PaymentRequestRepository();
+
+    try {
+        $request = $repo->find($requestId);
+        if (!$request) {
+            throw new RuntimeException('Manuel ödeme talebi bulunamadı.');
+        }
+
+        $title = trim((string) ($_POST['title'] ?? ''));
+        $amount = (float) str_replace(',', '.', (string) ($_POST['amount'] ?? '0'));
+        $email = trim(mb_strtolower((string) ($_POST['customer_email'] ?? '')));
+        if ($title === '') {
+            throw new RuntimeException('Ödeme talebi başlığı yazın.');
+        }
+        if ((string) ($request['status'] ?? '') !== 'paid' && $amount <= 0) {
+            throw new RuntimeException('Tahsil edilecek tutar sıfırdan büyük olmalı.');
+        }
+        if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Geçerli bir e-posta adresi yazın.');
+        }
+
+        $repo->update($requestId, [
+            'title' => $title,
+            'description' => trim((string) ($_POST['description'] ?? '')),
+            'customer_name' => trim((string) ($_POST['customer_name'] ?? '')),
+            'customer_email' => $email,
+            'customer_phone' => trim((string) ($_POST['customer_phone'] ?? '')),
+            'customer_tax_number' => trim((string) ($_POST['customer_tax_number'] ?? '')),
+            'amount' => $amount,
+            'currency' => PaymentRequestRepository::normalizeCurrency((string) ($_POST['currency'] ?? 'TRY')),
+        ]);
+
+        flash('success', 'Ödeme talebi güncellendi.');
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect('/payment-requests?created=' . $requestId);
 }
 
 function handle_payment_request_mail(int $requestId): void
@@ -3698,11 +3750,55 @@ function handle_manual_payment_card_create(string $token): void
             redirect('/pay/' . rawurlencode($token));
         }
 
+        if (manual_payment_needs_email($request)) {
+            $_SESSION['manual_payment_error'] = 'Kredi kartı ödemesine devam etmek için e-posta adresinizi girin.';
+            redirect('/pay/' . rawurlencode($token) . '#email-required');
+        }
+
         $checkoutUrl = create_manual_iyzico_checkout_url($repo, $request, null, 'manual-public');
         redirect($checkoutUrl);
     } catch (Throwable $e) {
         $_SESSION['manual_payment_error'] = $e->getMessage();
         redirect('/pay/' . rawurlencode($token));
+    }
+}
+
+function handle_manual_payment_public_email(string $token): void
+{
+    verify_csrf();
+
+    $repo = new PaymentRequestRepository();
+    $request = $repo->findByToken($token);
+    if (!$request) {
+        http_response_code(404);
+        render_public_layout('Ödeme talebi', static function (): void {
+            ?>
+            <section class="public-card payment-result-card error">
+                <p class="eyebrow">Ödeme talebi</p>
+                <h1>Bağlantı bulunamadı.</h1>
+                <p class="muted">Bu ödeme bağlantısı sistemde bulunamadı.</p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    try {
+        if ((string) ($request['status'] ?? 'pending') === 'paid') {
+            redirect('/pay/' . rawurlencode($token));
+        }
+
+        $email = trim(mb_strtolower((string) ($_POST['customer_email'] ?? '')));
+        $request = $repo->updatePublicEmail((int) $request['id'], $email);
+        if (!$request) {
+            throw new RuntimeException('Ödeme talebi güncellenemedi.');
+        }
+
+        $checkoutUrl = create_manual_iyzico_checkout_url($repo, $request, null, 'manual-public');
+        redirect($checkoutUrl);
+    } catch (Throwable $e) {
+        $_SESSION['manual_payment_error'] = $e->getMessage();
+        redirect('/pay/' . rawurlencode($token) . '#email-required');
     }
 }
 
@@ -3736,6 +3832,9 @@ function handle_manual_payment_public(string $method, string $token): void
         $amount = (float) ($request['amount'] ?? 0);
         $currency = (string) ($request['currency'] ?? 'TRY');
         $isPaid = (string) ($request['status'] ?? 'pending') === 'paid';
+        $needsEmail = !$isPaid && $iyzicoReady && manual_payment_needs_email($request);
+        $emailError = manual_payment_error_is_missing_email($error);
+        $visibleError = $emailError ? '' : $error;
         ?>
         <section class="login-panel customer-info-public payment-choice-public manual-payment-public">
             <div class="login-heading">
@@ -3744,14 +3843,16 @@ function handle_manual_payment_public(string $method, string $token): void
                 <p class="muted compact"><?= h((string) ($request['title'] ?? 'Manuel ödeme talebi')) ?></p>
             </div>
 
-            <?php if ($error !== ''): ?>
-                <div class="alert error"><?= h($error) ?></div>
+            <?php if ($visibleError !== ''): ?>
+                <div class="alert error"><?= h($visibleError) ?></div>
             <?php endif; ?>
 
             <?php if ($isPaid): ?>
                 <div class="alert success">Bu ödeme talebi başarıyla tahsil edilmiş görünüyor.</div>
             <?php elseif (!$iyzicoReady): ?>
                 <div class="alert error">Kredi kartı ödeme altyapısı şu anda hazır değil. Lütfen firma yetkilisiyle iletişime geçin.</div>
+            <?php elseif ($needsEmail || $emailError): ?>
+                <div class="alert warning" id="email-required">Kredi kartı ödemesine devam etmek için e-posta adresinizi girin.</div>
             <?php endif; ?>
 
             <div class="payment-choice-summary">
@@ -3774,7 +3875,16 @@ function handle_manual_payment_public(string $method, string $token): void
                 </div>
             <?php endif; ?>
 
-            <?php if (!$isPaid): ?>
+            <?php if (!$isPaid && ($needsEmail || $emailError)): ?>
+                <form method="post" action="<?= h(url('/pay/' . rawurlencode((string) $request['public_token']) . '/email')) ?>" class="manual-payment-email-form">
+                    <?= csrf_field() ?>
+                    <label>
+                        E-posta adresiniz
+                        <input type="email" name="customer_email" value="<?= h((string) ($request['customer_email'] ?? '')) ?>" placeholder="ornek@firma.com" required>
+                    </label>
+                    <button type="submit" class="button primary full">E-postayı kaydet ve kredi kartı ile öde</button>
+                </form>
+            <?php elseif (!$isPaid): ?>
                 <form method="post" action="<?= h(url('/pay/' . rawurlencode((string) $request['public_token']) . '/card')) ?>">
                     <?= csrf_field() ?>
                     <button type="submit" class="button primary full" <?= $iyzicoReady ? '' : 'disabled' ?>>Kredi kartı ile öde</button>
@@ -3783,6 +3893,26 @@ function handle_manual_payment_public(string $method, string $token): void
         </section>
         <?php
     });
+}
+
+function manual_payment_needs_email(array $request): bool
+{
+    $email = trim((string) ($request['customer_email'] ?? ''));
+
+    return $email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false;
+}
+
+function manual_payment_error_is_missing_email(string $error): bool
+{
+    $error = mb_strtolower(trim($error), 'UTF-8');
+    if ($error === '') {
+        return false;
+    }
+
+    return str_contains($error, 'e-posta')
+        || str_contains($error, 'e post')
+        || str_contains($error, 'email')
+        || str_contains($error, 'e-postasi');
 }
 
 function handle_iyzico_callback(string $method): void
@@ -6797,16 +6927,74 @@ function render_payment_requests(): void
                 <div class="manual-payment-list">
                     <?php foreach ($requests as $request): ?>
                         <?php $requestUrl = manual_payment_request_url($request); ?>
-                        <article class="manual-payment-row">
-                            <div>
-                                <small><?= h(manual_payment_request_number($request)) ?></small>
-                                <strong><?= h((string) ($request['title'] ?? '-')) ?></strong>
-                                <span><?= h((string) (($request['customer_name'] ?? '') ?: ($request['customer_phone'] ?? '') ?: ($request['customer_email'] ?? '-'))) ?></span>
+                        <?php $isPaidRequest = (string) ($request['status'] ?? 'pending') === 'paid'; ?>
+                        <details class="manual-payment-case">
+                            <summary class="manual-payment-row">
+                                <div>
+                                    <small><?= h(manual_payment_request_number($request)) ?></small>
+                                    <strong><?= h((string) ($request['title'] ?? '-')) ?></strong>
+                                    <span><?= h((string) (($request['customer_name'] ?? '') ?: ($request['customer_phone'] ?? '') ?: ($request['customer_email'] ?? '-'))) ?></span>
+                                </div>
+                                <b><?= h(money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'))) ?></b>
+                                <span class="badge <?= h(payment_request_status_class((string) ($request['status'] ?? 'pending'))) ?>"><?= h(payment_request_status_label((string) ($request['status'] ?? 'pending'))) ?></span>
+                                <span class="button small secondary">Düzenle</span>
+                            </summary>
+                            <div class="manual-payment-case-body">
+                                <div class="manual-payment-case-actions">
+                                    <a class="button small secondary" href="<?= h($requestUrl) ?>" target="_blank" rel="noopener">Linki aç</a>
+                                    <?php if (!filter_var((string) ($request['customer_email'] ?? ''), FILTER_VALIDATE_EMAIL)): ?>
+                                        <span class="badge warning">E-posta eksik</span>
+                                    <?php endif; ?>
+                                </div>
+                                <?php if ($canManage): ?>
+                                    <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/update')) ?>" class="manual-payment-edit-form">
+                                        <?= csrf_field() ?>
+                                        <label>
+                                            Başlık
+                                            <input name="title" value="<?= h((string) ($request['title'] ?? '')) ?>" required>
+                                        </label>
+                                        <label>
+                                            Tutar
+                                            <input type="number" min="0.01" step="0.01" name="amount" value="<?= h(number_format((float) ($request['amount'] ?? 0), 2, '.', '')) ?>" <?= $isPaidRequest ? 'readonly' : '' ?> required>
+                                        </label>
+                                        <label>
+                                            Para birimi
+                                            <select name="currency" <?= $isPaidRequest ? 'disabled' : '' ?>>
+                                                <?php foreach (allowed_currency_options() as $currency): ?>
+                                                    <?= option($currency, $currency, (string) ($request['currency'] ?? 'TRY')) ?>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </label>
+                                        <label>
+                                            Firma / müşteri
+                                            <input name="customer_name" value="<?= h((string) ($request['customer_name'] ?? '')) ?>" placeholder="Cari unvanı">
+                                        </label>
+                                        <label>
+                                            Telefon
+                                            <input name="customer_phone" value="<?= h((string) ($request['customer_phone'] ?? '')) ?>" placeholder="05xx xxx xx xx">
+                                        </label>
+                                        <label>
+                                            E-posta
+                                            <input type="email" name="customer_email" value="<?= h((string) ($request['customer_email'] ?? '')) ?>" placeholder="musteri@firma.com">
+                                        </label>
+                                        <label>
+                                            Vergi / TC no
+                                            <input name="customer_tax_number" value="<?= h((string) ($request['customer_tax_number'] ?? '')) ?>" maxlength="60">
+                                        </label>
+                                        <label class="field-wide">
+                                            Açıklama
+                                            <textarea name="description" rows="3"><?= h((string) ($request['description'] ?? '')) ?></textarea>
+                                        </label>
+                                        <div class="field-wide manual-payment-edit-footer">
+                                            <?php if ($isPaidRequest): ?>
+                                                <span>Ödenmiş case için tutar ve para birimi korunur; iletişim ve açıklama güncellenir.</span>
+                                            <?php endif; ?>
+                                            <button type="submit" class="button small primary">Kaydet</button>
+                                        </div>
+                                    </form>
+                                <?php endif; ?>
                             </div>
-                            <b><?= h(money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'))) ?></b>
-                            <span class="badge <?= h(payment_request_status_class((string) ($request['status'] ?? 'pending'))) ?>"><?= h(payment_request_status_label((string) ($request['status'] ?? 'pending'))) ?></span>
-                            <a class="button small secondary" href="<?= h($requestUrl) ?>" target="_blank" rel="noopener">Linki aç</a>
-                        </article>
+                        </details>
                     <?php endforeach; ?>
                 </div>
             <?php endif; ?>

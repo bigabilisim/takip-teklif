@@ -2002,6 +2002,15 @@ h3 {
     width: 100%;
 }
 
+.manual-payment-email-form {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid rgba(180, 103, 24, 0.22);
+    border-radius: 8px;
+    background: #fff8ed;
+}
+
 .button[aria-disabled="true"] {
     opacity: 0.55;
     pointer-events: none;
@@ -2017,6 +2026,22 @@ h3 {
     gap: 8px;
 }
 
+.manual-payment-case {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fbfcfb;
+    overflow: hidden;
+}
+
+.manual-payment-case > summary {
+    list-style: none;
+    cursor: pointer;
+}
+
+.manual-payment-case > summary::-webkit-details-marker {
+    display: none;
+}
+
 .manual-payment-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto auto;
@@ -2024,9 +2049,13 @@ h3 {
     gap: 10px;
     min-width: 0;
     padding: 12px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: #fbfcfb;
+    border: 0;
+    background: transparent;
+}
+
+.manual-payment-case[open] .manual-payment-row {
+    border-bottom: 1px solid var(--line);
+    background: #f5faf8;
 }
 
 .manual-payment-row > div {
@@ -2064,6 +2093,52 @@ h3 {
 .manual-payment-row b {
     color: var(--text);
     font-size: 15px;
+}
+
+.manual-payment-case-body {
+    display: grid;
+    gap: 12px;
+    padding: 12px;
+}
+
+.manual-payment-case-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.manual-payment-edit-form {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.manual-payment-edit-form .field-wide,
+.manual-payment-edit-footer {
+    grid-column: 1 / -1;
+}
+
+.manual-payment-edit-form textarea {
+    min-height: 92px;
+    resize: vertical;
+}
+
+.manual-payment-edit-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.manual-payment-edit-footer span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
 }
 
 .manual-payment-description {
@@ -6931,6 +7006,7 @@ label {
     .payment-request-summary,
     .payment-request-actions,
     .manual-payment-row,
+    .manual-payment-edit-form,
     .manual-price-form,
     .manual-price-line,
     .manual-payment-contact-option,

@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.15] - 2026-05-08
+
+- Manuel ödeme linkinde canlı iyzico için müşteri e-postası eksikse kullanıcıdan e-posta alınıp kaydedildikten sonra kredi kartı ödeme akışı otomatik yeniden başlatılır.
+- Ödeme Talep Et ekranında açılmış manuel ödeme case'leri için açılır düzenleme formu eklendi.
+
 ## [2.0.14] - 2026-05-08
 
 - Yeni teklif kalemleri iki satırlı özel düzene alındı; stok kataloğu uyarısı `i` rozetli bilgi kutusu olarak gösterilir.

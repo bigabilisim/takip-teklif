@@ -91,6 +91,78 @@ final class PaymentRequestRepository
         return $row ?: null;
     }
 
+    public function update(int $id, array $data): ?array
+    {
+        $current = $this->find($id);
+        if (!$current) {
+            return null;
+        }
+
+        $isPaid = (string) ($current['status'] ?? '') === 'paid';
+        $amount = $isPaid
+            ? (float) ($current['amount'] ?? 0)
+            : max(0.01, (float) ($data['amount'] ?? $current['amount'] ?? 0));
+        $currency = $isPaid
+            ? (string) ($current['currency'] ?? 'TRY')
+            : self::normalizeCurrency((string) ($data['currency'] ?? $current['currency'] ?? 'TRY'));
+
+        $stmt = $this->db->prepare(
+            'UPDATE manual_payment_requests
+             SET title = :title,
+                 description = :description,
+                 customer_name = :customer_name,
+                 customer_email = :customer_email,
+                 customer_phone = :customer_phone,
+                 customer_tax_number = :customer_tax_number,
+                 amount = :amount,
+                 currency = :currency,
+                 updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $id,
+            'title' => trim((string) ($data['title'] ?? $current['title'] ?? 'Manuel ödeme talebi')),
+            'description' => $this->nullableString($data['description'] ?? ''),
+            'customer_name' => $this->nullableString($data['customer_name'] ?? ''),
+            'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
+            'customer_phone' => $this->nullableString(\normalize_phone_number($data['customer_phone'] ?? '')),
+            'customer_tax_number' => $this->nullableString($data['customer_tax_number'] ?? ''),
+            'amount' => $amount,
+            'currency' => $currency,
+        ]);
+
+        $this->syncCustomerEmailIfEmpty((int) ($current['customer_id'] ?? 0), (string) ($data['customer_email'] ?? ''));
+
+        return $this->find($id);
+    }
+
+    public function updatePublicEmail(int $id, string $email): ?array
+    {
+        $email = trim(mb_strtolower($email));
+        if ($email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+            throw new \RuntimeException('Geçerli bir e-posta adresi yazın.');
+        }
+
+        $current = $this->find($id);
+        if (!$current) {
+            return null;
+        }
+
+        $this->db->prepare(
+            'UPDATE manual_payment_requests
+             SET customer_email = :email,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'email' => $email,
+        ]);
+
+        $this->syncCustomerEmailIfEmpty((int) ($current['customer_id'] ?? 0), $email);
+
+        return $this->find($id);
+    }
+
     public function createIyzicoPayment(array $data): int
     {
         $stmt = $this->db->prepare(
@@ -330,6 +402,26 @@ final class PaymentRequestRepository
         if ((int) $stmt->fetchColumn() === 0) {
             $this->db->exec(sprintf('ALTER TABLE `%s` ADD %s', str_replace('`', '``', $table), $definition));
         }
+    }
+
+    private function syncCustomerEmailIfEmpty(int $customerId, string $email): void
+    {
+        $email = trim(mb_strtolower($email));
+        if ($customerId < 1 || $email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+            return;
+        }
+
+        $this->db->prepare(
+            "UPDATE customers
+             SET email = :email,
+                 updated_at = NOW()
+             WHERE id = :id
+               AND deleted_at IS NULL
+               AND COALESCE(email, '') = ''"
+        )->execute([
+            'id' => $customerId,
+            'email' => $email,
+        ]);
     }
 
     private function nullableString(mixed $value): ?string

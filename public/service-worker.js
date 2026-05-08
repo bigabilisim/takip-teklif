@@ -1,4 +1,4 @@
-const APP_VERSION = '2.0.14';
+const APP_VERSION = '2.0.15';
 const CACHE_NAME = `yenileme-pwa-v${APP_VERSION}`;
 const CORE_ASSETS = [
     '/offline.html',
