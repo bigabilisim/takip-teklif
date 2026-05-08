@@ -3085,6 +3085,62 @@ td.actions {
     background: #fbfcfb;
 }
 
+.customer-info-request-card {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #cfe7e2;
+    border-radius: 8px;
+    background: #f4fbf9;
+}
+
+.customer-info-request-card > div {
+    display: grid;
+    gap: 3px;
+}
+
+.customer-info-request-card strong {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.25;
+}
+
+.customer-info-request-card span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.customer-info-request-form {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+    gap: 8px;
+    align-items: end;
+}
+
+.customer-info-request-form label {
+    display: grid;
+    gap: 5px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 850;
+}
+
+.customer-info-request-form input {
+    min-height: 38px;
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
+.customer-info-request-actions {
+    display: flex;
+    gap: 7px;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
 .customer-row-head,
 .customer-actions {
     display: flex;
@@ -5927,6 +5983,18 @@ label {
         max-height: none;
         overflow: visible;
         padding-right: 0;
+    }
+
+    .customer-info-request-form {
+        grid-template-columns: 1fr;
+    }
+
+    .customer-info-request-actions {
+        justify-content: stretch;
+    }
+
+    .customer-info-request-actions .button {
+        flex: 1 1 140px;
     }
 
     .form-grid.two,

@@ -4478,7 +4478,7 @@ function handle_customer_info_public(string $method, string $token): void
     $request = $requestRepo->findByToken($token);
     $error = null;
     $notice = null;
-    $values = customer_info_form_values([], (string) ($request['recipient_email'] ?? ''), (string) ($request['recipient_name'] ?? ''));
+    $values = [];
     $extracted = [];
 
     if (!$request) {
@@ -4497,6 +4497,8 @@ function handle_customer_info_public(string $method, string $token): void
         });
         return;
     }
+
+    $values = customer_info_initial_values($requestRepo, $request);
 
     if ($method === 'POST') {
         verify_csrf();
@@ -4552,7 +4554,7 @@ function handle_customer_info_public(string $method, string $token): void
         <section class="login-panel customer-info-public">
             <div class="login-heading">
                 <p class="eyebrow">Cari bilgi formu</p>
-                <h1>Firma bilgilerinizi tamamlayin.</h1>
+                <h1>Firma bilgilerinizi tamamlayın.</h1>
                 <p class="muted compact">Vergi levhanızı yükleyerek alanları otomatik doldurabilir veya bilgileri manuel girebilirsiniz.</p>
             </div>
 
@@ -5260,6 +5262,19 @@ function customer_info_form_values(array $source, string $fallbackEmail = '', st
         'notes' => trim((string) ($source['notes'] ?? '')),
         'contacts' => $contacts,
     ];
+}
+
+function customer_info_initial_values(CustomerInfoRequestRepository $repo, array $request): array
+{
+    $customerId = (int) ($request['customer_id'] ?? 0);
+    $fallbackEmail = (string) ($request['recipient_email'] ?? '');
+    $fallbackName = (string) ($request['recipient_name'] ?? '');
+
+    if ($customerId > 0) {
+        return $repo->customerFormDefaults($customerId, $fallbackEmail, $fallbackName);
+    }
+
+    return customer_info_form_values([], $fallbackEmail, $fallbackName);
 }
 
 function customer_info_contact_rows(array $source, string $fallbackEmail = '', string $fallbackContactName = ''): array
@@ -6528,8 +6543,13 @@ function handle_customers(RenewalRepository $repo, string $method): void
 
         if ($action === 'send_customer_info_request') {
             try {
-                send_customer_info_request($requestRepo, $_POST);
-                flash('success', 'Cari bilgi talep maili gönderildi.');
+                $requestResult = send_customer_info_request($requestRepo, $_POST);
+                if (($requestResult['channel'] ?? '') === 'whatsapp' && !empty($requestResult['whatsapp_url'])) {
+                    header('Location: ' . (string) $requestResult['whatsapp_url']);
+                    return;
+                }
+
+                flash('success', 'Cari bilgi talep maili gönderildi. Link 48 saat geçerli olacak.');
                 redirect('/customers');
             } catch (Throwable $e) {
                 $errors[] = $e->getMessage();
@@ -6694,6 +6714,9 @@ function render_customer_list_card(array $customer, bool $canManage, bool $canDe
                         <?php endforeach; ?>
                     </div>
                 <?php endif; ?>
+                <?php if ($canManage): ?>
+                    <?= render_customer_info_request_quick_form($customer) ?>
+                <?php endif; ?>
                 <?php if ($canManage || $canDelete): ?>
                     <div class="customer-actions">
                         <?php if ($canManage): ?>
@@ -6738,6 +6761,67 @@ function render_recent_customer_card(array $customer, bool $canManage): string
         <?php endif; ?>
     </article>
     <?php
+    return (string) ob_get_clean();
+}
+
+function render_customer_info_request_quick_form(array $customer): string
+{
+    $contacts = is_array($customer['contacts'] ?? null) ? $customer['contacts'] : [];
+    $recipient = [
+        'name' => trim((string) ($customer['contact_name'] ?? '')),
+        'email' => trim((string) ($customer['email'] ?? '')),
+        'phone' => normalize_phone_number($customer['phone'] ?? ''),
+    ];
+
+    foreach ($contacts as $contact) {
+        if (!is_array($contact)) {
+            continue;
+        }
+
+        $candidate = [
+            'name' => trim((string) ($contact['full_name'] ?? '')),
+            'email' => trim((string) ($contact['email'] ?? '')),
+            'phone' => normalize_phone_number($contact['phone'] ?? ''),
+        ];
+
+        if ($candidate['email'] !== '' || $candidate['phone'] !== '') {
+            $recipient = $candidate;
+            break;
+        }
+    }
+
+    ob_start();
+    ?>
+    <div class="customer-info-request-card">
+        <div>
+            <strong>Eksik yetkili bilgilerini tamamlat</strong>
+            <span>Cari bilgisindeki bilgilendirme yapılacak kişiler eksikse 48 saat geçerli tek kullanımlık link gönderin.</span>
+        </div>
+        <form method="post" action="<?= h(url('/customers')) ?>" class="customer-info-request-form">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="send_customer_info_request">
+            <input type="hidden" name="request_customer_id" value="<?= h((string) ($customer['id'] ?? '')) ?>">
+            <input type="hidden" name="request_expires_hours" value="48">
+            <label>
+                Yetkili
+                <input name="request_contact_name" value="<?= h($recipient['name']) ?>" placeholder="Ad soyad">
+            </label>
+            <label>
+                E-posta
+                <input type="email" name="request_email" value="<?= h($recipient['email']) ?>" placeholder="mail@firma.com">
+            </label>
+            <label>
+                Telefon
+                <input name="request_phone" value="<?= h($recipient['phone']) ?>" placeholder="0549 576 05 49">
+            </label>
+            <div class="customer-info-request-actions">
+                <button type="submit" name="request_channel" value="mail" class="button small secondary">Mail gönder</button>
+                <button type="submit" name="request_channel" value="whatsapp" class="button small whatsapp" formtarget="takip_whatsapp_web">WhatsApp aç</button>
+            </div>
+        </form>
+    </div>
+    <?php
+
     return (string) ob_get_clean();
 }
 
@@ -7215,8 +7299,13 @@ function handle_customer_info_request_submit(): void
     $returnTo = safe_return_path($_POST['return_to'] ?? '/');
 
     try {
-        send_customer_info_request(new CustomerInfoRequestRepository(), $_POST);
-        flash('success', 'Cari bilgi talep maili gönderildi.');
+        $requestResult = send_customer_info_request(new CustomerInfoRequestRepository(), $_POST);
+        if (($requestResult['channel'] ?? '') === 'whatsapp' && !empty($requestResult['whatsapp_url'])) {
+            header('Location: ' . (string) $requestResult['whatsapp_url']);
+            return;
+        }
+
+        flash('success', 'Cari bilgi talep maili gönderildi. Link 48 saat geçerli olacak.');
     } catch (Throwable $e) {
         flash('error', $e->getMessage());
     }
@@ -7270,17 +7359,39 @@ function validate_customer_form(array $data): array
     return $errors;
 }
 
-function send_customer_info_request(CustomerInfoRequestRepository $repo, array $data): void
+function send_customer_info_request(CustomerInfoRequestRepository $repo, array $data): array
 {
+    $channel = (string) ($data['request_channel'] ?? 'mail');
+    $channel = in_array($channel, ['mail', 'whatsapp'], true) ? $channel : 'mail';
     $email = trim((string) ($data['request_email'] ?? ''));
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    if ($channel === 'mail' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
         throw new RuntimeException('Cari bilgi talebi için geçerli bir e-posta adresi girin.');
+    }
+    if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        throw new RuntimeException('Cari bilgi talebi için geçerli bir e-posta adresi girin.');
+    }
+
+    $phone = normalize_phone_number($data['request_phone'] ?? '');
+    $whatsappNumber = $channel === 'whatsapp' ? whatsapp_number_from_phone($phone) : null;
+    if ($channel === 'whatsapp' && $whatsappNumber === null) {
+        throw new RuntimeException('WhatsApp göndermek için geçerli bir telefon numarası girin.');
     }
 
     $recipientName = trim((string) ($data['request_contact_name'] ?? ''));
     $customerId = empty($data['request_customer_id']) ? null : (int) $data['request_customer_id'];
-    $request = $repo->create($email, $customerId, (int) ($_SESSION['user_id'] ?? 0), $recipientName);
+    $expiresHours = max(1, min(168, (int) ($data['request_expires_hours'] ?? 48)));
+    $request = $repo->create($email, $customerId, (int) ($_SESSION['user_id'] ?? 0), $recipientName, $expiresHours);
     $link = absolute_app_url('/cari-bilgi/' . $request['token']);
+
+    if ($channel === 'whatsapp') {
+        return [
+            'channel' => 'whatsapp',
+            'request' => $request,
+            'link' => $link,
+            'whatsapp_url' => whatsapp_web_url((string) $whatsappNumber, customer_info_whatsapp_message($request, $link)),
+        ];
+    }
+
     $settings = (new SettingsRepository())->all();
     $mail = MailTemplate::renderCustomerInfoRequest($settings, $request, $link);
     $result = Mailer::sendWithResult(
@@ -7294,6 +7405,25 @@ function send_customer_info_request(CustomerInfoRequestRepository $repo, array $
     if (!$result['ok']) {
         throw new RuntimeException((string) $result['error']);
     }
+
+    return [
+        'channel' => 'mail',
+        'request' => $request,
+        'link' => $link,
+    ];
+}
+
+function customer_info_whatsapp_message(array $request, string $link): string
+{
+    $name = trim((string) ($request['recipient_name'] ?? ''));
+    $greeting = $name !== '' ? 'Merhaba ' . $name . ',' : 'Merhaba,';
+    $expiresAt = !empty($request['expires_at']) ? date('d.m.Y H:i', strtotime((string) $request['expires_at'])) : '48 saat';
+
+    return $greeting
+        . "\n\nCari kartınızdaki bilgilendirme yapılacak yetkili kişi bilgileri eksik görünüyor. Ürün yenileme bildirimi ve teklif süreçlerini doğru kişilere ulaştırabilmemiz için aşağıdaki güvenli linkten firma ve yetkili bilgilerinizi tamamlamanızı rica ederiz."
+        . "\n\nLink: " . $link
+        . "\n\nBağlantı geçerlilik süresi: " . $expiresAt
+        . "\nBilgiler gönderildikten sonra link otomatik kapanır.";
 }
 
 function send_customer_info_completed_notification(array $request, int $customerId, array $values): array
@@ -7329,7 +7459,7 @@ function send_customer_info_completed_notification(array $request, int $customer
 function customer_info_status_label(string $status): string
 {
     return match ($status) {
-        'submitted' => 'Tamamlandi',
+        'submitted' => 'Tamamlandı',
         'expired' => 'Süresi doldu',
         default => 'Bekliyor',
     };

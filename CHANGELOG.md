@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.2] - 2026-05-08
+
+- Müşteri kartlarına eksik yetkili/cari bilgilerini 48 saat geçerli tek kullanımlık linkle mail veya WhatsApp üzerinden isteme akışı eklendi.
+- Cari bilgi formu mevcut müşteri ve yetkili bilgileriyle açılarak müşterinin eksik bilgilendirme kişilerini tamamlaması kolaylaştırıldı.
+
 ## [2.0.1] - 2026-05-08
 
 - Müşteri teklif onayından sonra Paraşüt satış faturası otomatik oluşturma akışı eklendi.
