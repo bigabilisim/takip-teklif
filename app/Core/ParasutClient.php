@@ -139,6 +139,42 @@ final class ParasutClient
         ];
     }
 
+    public function fetchAllProducts(int $maxPages = 200): array
+    {
+        $companyId = $this->companyId();
+        $products = [];
+        $totalPages = null;
+        $maxPages = max(1, min($maxPages, 500));
+
+        for ($page = 1; $page <= $maxPages; $page++) {
+            $params = [
+                'sort' => 'name',
+                'page[number]' => $page,
+                'page[size]' => 25,
+            ];
+            $response = $this->request('GET', sprintf('/v4/%s/products?%s', rawurlencode($companyId), http_build_query($params)));
+            $pageProducts = $this->mapProducts($response['data'] ?? []);
+            if ($pageProducts === []) {
+                break;
+            }
+
+            foreach ($pageProducts as $product) {
+                $productId = (string) ($product['id'] ?? '');
+                if ($productId === '') {
+                    continue;
+                }
+                $products[$productId] = $product;
+            }
+
+            $totalPages = isset($response['meta']['total_pages']) ? (int) $response['meta']['total_pages'] : $totalPages;
+            if ($totalPages !== null && $page >= $totalPages) {
+                break;
+            }
+        }
+
+        return array_values($products);
+    }
+
     public function createSalesInvoiceFromOffer(array $offer, array $lines): array
     {
         $companyId = $this->companyId();
@@ -489,6 +525,55 @@ final class ParasutClient
             'supplier' => 'Tedarikci',
             default => $accountType,
         };
+    }
+
+    private function mapProducts(array $items): array
+    {
+        $products = [];
+
+        foreach ($items as $product) {
+            if (!is_array($product)) {
+                continue;
+            }
+
+            $attrs = is_array($product['attributes'] ?? null) ? $product['attributes'] : [];
+            $currency = strtoupper(trim((string) ($attrs['currency'] ?? 'TRY')));
+            if ($currency === 'TRL' || $currency === 'TL') {
+                $currency = 'TRY';
+            }
+            if (!in_array($currency, ['TRY', 'USD', 'EUR'], true)) {
+                $currency = 'TRY';
+            }
+
+            $stockCount = $attrs['stock_count']
+                ?? $attrs['inventory_count']
+                ?? $attrs['available_stock_count']
+                ?? $attrs['remaining_stock_count']
+                ?? null;
+
+            $isArchived = !empty($attrs['archived'])
+                || !empty($attrs['is_archived'])
+                || (array_key_exists('is_active', $attrs) && empty($attrs['is_active']));
+
+            $products[] = [
+                'id' => (string) ($product['id'] ?? ''),
+                'name' => (string) ($attrs['name'] ?? ''),
+                'code' => (string) ($attrs['code'] ?? $attrs['item_code'] ?? ''),
+                'barcode' => (string) ($attrs['barcode'] ?? ''),
+                'brand' => (string) ($attrs['brand'] ?? ''),
+                'unit' => (string) ($attrs['unit'] ?? 'Adet'),
+                'currency' => $currency,
+                'list_price' => (float) ($attrs['list_price'] ?? $attrs['sales_price'] ?? 0),
+                'buying_price' => isset($attrs['buying_price']) ? (float) $attrs['buying_price'] : null,
+                'vat_rate' => (float) ($attrs['vat_rate'] ?? 20),
+                'inventory_tracking' => !empty($attrs['inventory_tracking']),
+                'stock_count' => $stockCount !== null ? (float) $stockCount : null,
+                'is_archived' => $isArchived,
+                'raw' => $product,
+            ];
+        }
+
+        return $products;
     }
 
     private function exportContacts(string $companyId): array

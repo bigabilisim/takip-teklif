@@ -22,6 +22,7 @@ final class RenewalRepository
     private static bool $notificationDeliverySchemaEnsured = false;
     private static bool $supplierQuoteSchemaEnsured = false;
     private static bool $customerOfferSchemaEnsured = false;
+    private static bool $stockItemSchemaEnsured = false;
     private static bool $salesOfferSchemaEnsured = false;
     private static bool $phoneNormalizationEnsured = false;
 
@@ -38,6 +39,7 @@ final class RenewalRepository
         $this->ensureNotificationDeliverySchema();
         $this->ensureSupplierQuoteSchema();
         $this->ensureCustomerOfferSchema();
+        $this->ensureStockItemSchema();
         $this->ensureSalesOfferSchema();
         $this->ensurePhoneNormalization();
     }
@@ -637,6 +639,179 @@ final class RenewalRepository
             $this->db->query($sql)->fetchAll(),
             static fn (array $method): bool => !self::isRemovedPaymentMethodName((string) ($method['name'] ?? ''))
         ));
+    }
+
+    public function stockItems(string $query = '', int $limit = 300): array
+    {
+        $query = trim($query);
+        $limit = max(1, min($limit, 1000));
+        if ($query === '') {
+            $stmt = $this->db->prepare(
+                'SELECT *
+                 FROM stock_items
+                 WHERE is_active = 1
+                 ORDER BY name ASC, code ASC
+                 LIMIT :limit'
+            );
+            $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+
+            return $stmt->fetchAll();
+        }
+
+        $needle = '%' . $query . '%';
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM stock_items
+             WHERE is_active = 1
+               AND (
+                   name LIKE :needle
+                   OR code LIKE :needle
+                   OR barcode LIKE :needle
+                   OR brand LIKE :needle
+               )
+             ORDER BY
+                CASE
+                    WHEN name LIKE :starts THEN 0
+                    WHEN code LIKE :starts THEN 1
+                    ELSE 2
+                END,
+                name ASC
+             LIMIT :limit'
+        );
+        $stmt->bindValue('needle', $needle);
+        $stmt->bindValue('starts', $query . '%');
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    public function stockItemStats(): array
+    {
+        $row = $this->db->query(
+            "SELECT
+                COUNT(*) AS total,
+                SUM(is_active = 1) AS active,
+                SUM(source = 'parasut') AS parasut_total,
+                MAX(last_synced_at) AS last_synced_at
+             FROM stock_items"
+        )->fetch() ?: [];
+
+        return [
+            'total' => (int) ($row['total'] ?? 0),
+            'active' => (int) ($row['active'] ?? 0),
+            'parasut_total' => (int) ($row['parasut_total'] ?? 0),
+            'last_synced_at' => (string) ($row['last_synced_at'] ?? ''),
+        ];
+    }
+
+    public function syncStockItemsFromParasut(array $products): array
+    {
+        $created = 0;
+        $updated = 0;
+        $seenIds = [];
+
+        $existsStmt = $this->db->prepare(
+            "SELECT id FROM stock_items WHERE source = 'parasut' AND parasut_product_id = :parasut_product_id LIMIT 1"
+        );
+        $upsertStmt = $this->db->prepare(
+            'INSERT INTO stock_items
+                (parasut_product_id, name, code, barcode, brand, unit, currency, list_price, buying_price, vat_rate,
+                 inventory_tracking, stock_count, is_active, is_archived, source, raw_payload, last_synced_at)
+             VALUES
+                (:parasut_product_id, :name, :code, :barcode, :brand, :unit, :currency, :list_price, :buying_price, :vat_rate,
+                 :inventory_tracking, :stock_count, :is_active, :is_archived, :source, :raw_payload, NOW())
+             ON DUPLICATE KEY UPDATE
+                name = VALUES(name),
+                code = VALUES(code),
+                barcode = VALUES(barcode),
+                brand = VALUES(brand),
+                unit = VALUES(unit),
+                currency = VALUES(currency),
+                list_price = VALUES(list_price),
+                buying_price = VALUES(buying_price),
+                vat_rate = VALUES(vat_rate),
+                inventory_tracking = VALUES(inventory_tracking),
+                stock_count = VALUES(stock_count),
+                is_active = VALUES(is_active),
+                is_archived = VALUES(is_archived),
+                raw_payload = VALUES(raw_payload),
+                last_synced_at = NOW(),
+                updated_at = NOW()'
+        );
+
+        $this->db->beginTransaction();
+        try {
+            foreach ($products as $product) {
+                if (!is_array($product)) {
+                    continue;
+                }
+
+                $parasutProductId = trim((string) ($product['id'] ?? ''));
+                $name = trim((string) ($product['name'] ?? ''));
+                if ($parasutProductId === '' || $name === '') {
+                    continue;
+                }
+
+                $seenIds[] = $parasutProductId;
+                $existsStmt->execute(['parasut_product_id' => $parasutProductId]);
+                $exists = (bool) $existsStmt->fetchColumn();
+                $isArchived = !empty($product['is_archived']) ? 1 : 0;
+
+                $upsertStmt->execute([
+                    'parasut_product_id' => $parasutProductId,
+                    'name' => $name,
+                    'code' => $this->nullableString($product['code'] ?? ''),
+                    'barcode' => $this->nullableString($product['barcode'] ?? ''),
+                    'brand' => $this->nullableString($product['brand'] ?? ''),
+                    'unit' => $this->nullableString($product['unit'] ?? 'Adet'),
+                    'currency' => self::normalizeCurrency($product['currency'] ?? 'TRY'),
+                    'list_price' => max(0.0, (float) ($product['list_price'] ?? 0)),
+                    'buying_price' => array_key_exists('buying_price', $product) && $product['buying_price'] !== null ? max(0.0, (float) $product['buying_price']) : null,
+                    'vat_rate' => max(0.0, min(100.0, (float) ($product['vat_rate'] ?? 20))),
+                    'inventory_tracking' => !empty($product['inventory_tracking']) ? 1 : 0,
+                    'stock_count' => array_key_exists('stock_count', $product) && $product['stock_count'] !== null ? (float) $product['stock_count'] : null,
+                    'is_active' => $isArchived ? 0 : 1,
+                    'is_archived' => $isArchived,
+                    'source' => 'parasut',
+                    'raw_payload' => json_encode($product['raw'] ?? $product, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                ]);
+
+                if ($exists) {
+                    $updated++;
+                } else {
+                    $created++;
+                }
+            }
+
+            $inactive = 0;
+            if ($seenIds !== []) {
+                $uniqueSeenIds = array_values(array_unique($seenIds));
+                $placeholders = implode(',', array_fill(0, count($uniqueSeenIds), '?'));
+                $stmt = $this->db->prepare(
+                    "UPDATE stock_items
+                     SET is_active = 0, updated_at = NOW()
+                     WHERE source = 'parasut'
+                       AND parasut_product_id IS NOT NULL
+                       AND parasut_product_id NOT IN ({$placeholders})"
+                );
+                $stmt->execute($uniqueSeenIds);
+                $inactive = $stmt->rowCount();
+            }
+
+            $this->db->commit();
+
+            return [
+                'created' => $created,
+                'updated' => $updated,
+                'inactive' => $inactive,
+                'total' => $created + $updated,
+            ];
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
     }
 
     public function offerTemplates(bool $includeInactive = false): array
@@ -3318,6 +3493,7 @@ final class RenewalRepository
             "CREATE TABLE IF NOT EXISTS offer_template_items (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 template_id INT UNSIGNED NOT NULL,
+                stock_item_id INT UNSIGNED NULL,
                 title VARCHAR(190) NOT NULL,
                 brand VARCHAR(120) NULL,
                 description TEXT NULL,
@@ -3328,7 +3504,8 @@ final class RenewalRepository
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 CONSTRAINT fk_offer_template_items_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE CASCADE,
-                INDEX idx_offer_template_items_template (template_id, sort_order)
+                INDEX idx_offer_template_items_template (template_id, sort_order),
+                INDEX idx_offer_template_items_stock (stock_item_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
 
@@ -3361,6 +3538,7 @@ final class RenewalRepository
             "CREATE TABLE IF NOT EXISTS sales_offer_items (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 offer_id INT UNSIGNED NOT NULL,
+                stock_item_id INT UNSIGNED NULL,
                 title VARCHAR(190) NOT NULL,
                 brand VARCHAR(120) NULL,
                 description TEXT NULL,
@@ -3375,11 +3553,56 @@ final class RenewalRepository
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
-                INDEX idx_sales_offer_items_offer (offer_id, sort_order)
+                INDEX idx_sales_offer_items_offer (offer_id, sort_order),
+                INDEX idx_sales_offer_items_stock (stock_item_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
 
+        $this->ensureColumn('offer_template_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER template_id');
+        $this->ensureIndex('offer_template_items', 'idx_offer_template_items_stock', 'INDEX idx_offer_template_items_stock (stock_item_id)');
+        $this->ensureColumn('sales_offer_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER offer_id');
+        $this->ensureIndex('sales_offer_items', 'idx_sales_offer_items_stock', 'INDEX idx_sales_offer_items_stock (stock_item_id)');
+
         self::$salesOfferSchemaEnsured = true;
+    }
+
+    private function ensureStockItemSchema(): void
+    {
+        if (self::$stockItemSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS stock_items (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                parasut_product_id VARCHAR(64) NULL,
+                name VARCHAR(190) NOT NULL,
+                code VARCHAR(120) NULL,
+                barcode VARCHAR(120) NULL,
+                brand VARCHAR(120) NULL,
+                unit VARCHAR(40) NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                list_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                buying_price DECIMAL(12,2) NULL,
+                vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                inventory_tracking TINYINT(1) NOT NULL DEFAULT 0,
+                stock_count DECIMAL(12,2) NULL,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                is_archived TINYINT(1) NOT NULL DEFAULT 0,
+                source VARCHAR(30) NOT NULL DEFAULT 'parasut',
+                raw_payload MEDIUMTEXT NULL,
+                last_synced_at DATETIME NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_stock_items_parasut_product (parasut_product_id),
+                INDEX idx_stock_items_search (is_active, name),
+                INDEX idx_stock_items_code (code),
+                INDEX idx_stock_items_source (source),
+                INDEX idx_stock_items_synced (last_synced_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        self::$stockItemSchemaEnsured = true;
     }
 
     private function ensurePhoneNormalization(): void
@@ -4738,12 +4961,14 @@ final class RenewalRepository
             $quantity = max(0.01, (float) str_replace(',', '.', (string) ($row['quantity'] ?? 1)));
             $unitPrice = max(0.0, (float) str_replace(',', '.', (string) ($row['unit_price'] ?? 0)));
             $vatRate = max(0.0, min(100.0, (float) str_replace(',', '.', (string) ($row['vat_rate'] ?? 20))));
+            $stockItemId = max(0, (int) ($row['stock_item_id'] ?? 0));
 
             if ($title === '' && $brand === '' && $description === '' && $unitPrice <= 0.0) {
                 continue;
             }
 
             $items[] = [
+                'stock_item_id' => $stockItemId > 0 ? $stockItemId : null,
                 'title' => $title !== '' ? $title : 'Teklif kalemi',
                 'brand' => $brand,
                 'description' => $description,
@@ -4763,14 +4988,15 @@ final class RenewalRepository
 
         $stmt = $this->db->prepare(
             'INSERT INTO offer_template_items
-                (template_id, title, brand, description, quantity, unit_price, vat_rate, sort_order)
+                (template_id, stock_item_id, title, brand, description, quantity, unit_price, vat_rate, sort_order)
              VALUES
-                (:template_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :sort_order)'
+                (:template_id, :stock_item_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :sort_order)'
         );
 
         foreach (array_values($items) as $index => $item) {
             $stmt->execute([
                 'template_id' => $templateId,
+                'stock_item_id' => empty($item['stock_item_id']) ? null : (int) $item['stock_item_id'],
                 'title' => $item['title'],
                 'brand' => $this->nullableString($item['brand'] ?? ''),
                 'description' => $this->nullableString($item['description'] ?? ''),
@@ -4789,9 +5015,9 @@ final class RenewalRepository
 
         $stmt = $this->db->prepare(
             'INSERT INTO sales_offer_items
-                (offer_id, title, brand, description, quantity, unit_price, vat_rate, line_subtotal, line_vat, line_total, currency, sort_order)
+                (offer_id, stock_item_id, title, brand, description, quantity, unit_price, vat_rate, line_subtotal, line_vat, line_total, currency, sort_order)
              VALUES
-                (:offer_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :line_subtotal, :line_vat, :line_total, :currency, :sort_order)'
+                (:offer_id, :stock_item_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :line_subtotal, :line_vat, :line_total, :currency, :sort_order)'
         );
 
         foreach (array_values($items) as $index => $item) {
@@ -4800,6 +5026,7 @@ final class RenewalRepository
             $lineTotal = round($lineSubtotal + $lineVat, 2);
             $stmt->execute([
                 'offer_id' => $offerId,
+                'stock_item_id' => empty($item['stock_item_id']) ? null : (int) $item['stock_item_id'],
                 'title' => $item['title'],
                 'brand' => $this->nullableString($item['brand'] ?? ''),
                 'description' => $this->nullableString($item['description'] ?? ''),

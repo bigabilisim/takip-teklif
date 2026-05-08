@@ -364,10 +364,40 @@ ensure_table($pdo, 'offer_templates', "
         INDEX idx_offer_templates_active (is_active, name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_table($pdo, 'stock_items', "
+    CREATE TABLE stock_items (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        parasut_product_id VARCHAR(64) NULL,
+        name VARCHAR(190) NOT NULL,
+        code VARCHAR(120) NULL,
+        barcode VARCHAR(120) NULL,
+        brand VARCHAR(120) NULL,
+        unit VARCHAR(40) NULL,
+        currency CHAR(3) NOT NULL DEFAULT 'TRY',
+        list_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        buying_price DECIMAL(12,2) NULL,
+        vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+        inventory_tracking TINYINT(1) NOT NULL DEFAULT 0,
+        stock_count DECIMAL(12,2) NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        is_archived TINYINT(1) NOT NULL DEFAULT 0,
+        source VARCHAR(30) NOT NULL DEFAULT 'parasut',
+        raw_payload MEDIUMTEXT NULL,
+        last_synced_at DATETIME NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_stock_items_parasut_product (parasut_product_id),
+        INDEX idx_stock_items_search (is_active, name),
+        INDEX idx_stock_items_code (code),
+        INDEX idx_stock_items_source (source),
+        INDEX idx_stock_items_synced (last_synced_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
 ensure_table($pdo, 'offer_template_items', "
     CREATE TABLE offer_template_items (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         template_id INT UNSIGNED NOT NULL,
+        stock_item_id INT UNSIGNED NULL,
         title VARCHAR(190) NOT NULL,
         brand VARCHAR(120) NULL,
         description TEXT NULL,
@@ -378,9 +408,12 @@ ensure_table($pdo, 'offer_template_items', "
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_offer_template_items_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE CASCADE,
-        INDEX idx_offer_template_items_template (template_id, sort_order)
+        INDEX idx_offer_template_items_template (template_id, sort_order),
+        INDEX idx_offer_template_items_stock (stock_item_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'offer_template_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER template_id');
+ensure_index($pdo, 'offer_template_items', 'idx_offer_template_items_stock', 'INDEX idx_offer_template_items_stock (stock_item_id)');
 ensure_table($pdo, 'sales_offers', "
     CREATE TABLE sales_offers (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -409,6 +442,7 @@ ensure_table($pdo, 'sales_offer_items', "
     CREATE TABLE sales_offer_items (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         offer_id INT UNSIGNED NOT NULL,
+        stock_item_id INT UNSIGNED NULL,
         title VARCHAR(190) NOT NULL,
         brand VARCHAR(120) NULL,
         description TEXT NULL,
@@ -423,9 +457,12 @@ ensure_table($pdo, 'sales_offer_items', "
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
-        INDEX idx_sales_offer_items_offer (offer_id, sort_order)
+        INDEX idx_sales_offer_items_offer (offer_id, sort_order),
+        INDEX idx_sales_offer_items_stock (stock_item_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'sales_offer_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER offer_id');
+ensure_index($pdo, 'sales_offer_items', 'idx_sales_offer_items_stock', 'INDEX idx_sales_offer_items_stock (stock_item_id)');
 ensure_table($pdo, 'renewal_decisions', "
     CREATE TABLE renewal_decisions (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

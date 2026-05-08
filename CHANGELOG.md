@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.9] - 2026-05-08
+
+- Paraşüt ürün/hizmet kataloğu yerel stok kalemi tablosuna senkronlanabilir hale getirildi.
+- Yeni teklif ve teklif şablonu kalemleri yerel stok kataloğundan seçilerek fiyat, para birimi ve KDV bilgisini otomatik doldurur.
+
 ## [2.0.8] - 2026-05-08
 
 - Dashboard sağ tarafı yeni teklif modülü olarak düzenlendi; yeni teklif butonu ve son teklif taslakları eklendi.

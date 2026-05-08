@@ -651,6 +651,10 @@
         const list = offerForm.querySelector('[data-offer-line-list]');
         const template = offerForm.querySelector('[data-offer-line-template]');
         const addButton = offerForm.querySelector('[data-offer-add-line]');
+        const stockSearchUrl = offerForm.dataset.stockSearchUrl || '';
+        const stockList = document.getElementById('stock-item-options');
+        const stockCache = new Map();
+        let stockSearchTimer = null;
         const numberValue = (input, fallback = 0) => {
             const value = String(input?.value || '').replace(',', '.');
             const parsed = Number(value);
@@ -662,6 +666,115 @@
             currency: currencySelect?.value || 'TRY',
         });
         const rows = () => Array.from(offerForm.querySelectorAll('[data-offer-line]'));
+        const optionDisplayValue = (item) => [item.name, item.code, item.brand].filter(Boolean).join(' | ');
+        const appendStockOptions = (items) => {
+            if (!stockList || !Array.isArray(items)) {
+                return;
+            }
+            const existingIds = new Set(Array.from(stockList.options).map((option) => option.dataset.stockId || ''));
+            items.forEach((item) => {
+                const id = String(item.id || '');
+                const name = String(item.name || '').trim();
+                if (!id || !name || existingIds.has(id)) {
+                    return;
+                }
+                const option = document.createElement('option');
+                option.value = optionDisplayValue(item) || name;
+                option.dataset.stockId = id;
+                option.dataset.title = name;
+                option.dataset.brand = String(item.brand || '');
+                option.dataset.description = item.code ? `Kod: ${item.code}` : '';
+                option.dataset.unitPrice = String(item.list_price ?? 0);
+                option.dataset.vatRate = String(item.vat_rate ?? 20);
+                option.dataset.currency = String(item.currency || 'TRY');
+                stockList.appendChild(option);
+                existingIds.add(id);
+            });
+        };
+        const stockOptionFor = (input) => {
+            if (!stockList || !input) {
+                return null;
+            }
+            const value = String(input.value || '').trim();
+            if (!value) {
+                return null;
+            }
+
+            return Array.from(stockList.options).find((option) => {
+                return option.value === value || option.dataset.title === value;
+            }) || null;
+        };
+        const applyStockSelection = (input) => {
+            const option = stockOptionFor(input);
+            const row = input.closest('[data-offer-line]');
+            if (!row) {
+                return false;
+            }
+
+            const stockInput = row.querySelector('[data-stock-item-id]');
+            if (!option) {
+                if (stockInput) {
+                    stockInput.value = '';
+                }
+                return false;
+            }
+
+            if (stockInput) {
+                stockInput.value = option.dataset.stockId || '';
+            }
+            input.value = option.dataset.title || input.value;
+
+            const brandInput = row.querySelector('[data-stock-brand]');
+            if (brandInput) {
+                brandInput.value = option.dataset.brand || '';
+            }
+            const descriptionInput = row.querySelector('[data-stock-description]');
+            if (descriptionInput && (!descriptionInput.value.trim() || descriptionInput.dataset.fromStock === '1')) {
+                descriptionInput.value = option.dataset.description || '';
+                descriptionInput.dataset.fromStock = '1';
+            }
+            const unitInput = row.querySelector('[data-offer-unit]');
+            if (unitInput) {
+                unitInput.value = Number(option.dataset.unitPrice || 0).toFixed(2);
+            }
+            const vatInput = row.querySelector('[data-offer-vat-rate]');
+            if (vatInput) {
+                vatInput.value = Number(option.dataset.vatRate || 20).toFixed(2);
+            }
+            if (currencySelect && option.dataset.currency) {
+                currencySelect.value = option.dataset.currency;
+            }
+
+            return true;
+        };
+        const searchStockItems = (input) => {
+            if (!stockSearchUrl) {
+                return;
+            }
+            const query = String(input.value || '').trim();
+            if (query.length < 2) {
+                return;
+            }
+            if (stockCache.has(query)) {
+                appendStockOptions(stockCache.get(query));
+                applyStockSelection(input);
+                return;
+            }
+
+            clearTimeout(stockSearchTimer);
+            stockSearchTimer = window.setTimeout(() => {
+                const url = `${stockSearchUrl}?q=${encodeURIComponent(query)}`;
+                fetch(url, { headers: { Accept: 'application/json' } })
+                    .then((response) => response.ok ? response.json() : null)
+                    .then((payload) => {
+                        const items = payload?.ok && Array.isArray(payload.data) ? payload.data : [];
+                        stockCache.set(query, items);
+                        appendStockOptions(items);
+                        applyStockSelection(input);
+                    })
+                    .catch(() => {});
+            }, 220);
+        };
         const reindexRows = () => {
             rows().forEach((row, index) => {
                 row.querySelectorAll('[name]').forEach((input) => {
@@ -743,8 +856,21 @@
                 syncTotals();
             }
         });
-        offerForm.addEventListener('input', syncTotals);
-        offerForm.addEventListener('change', syncTotals);
+        offerForm.addEventListener('input', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.matches('[data-stock-title]')) {
+                searchStockItems(target);
+                applyStockSelection(target);
+            }
+            syncTotals();
+        });
+        offerForm.addEventListener('change', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.matches('[data-stock-title]')) {
+                applyStockSelection(target);
+            }
+            syncTotals();
+        });
         reindexRows();
         syncTotals();
     });

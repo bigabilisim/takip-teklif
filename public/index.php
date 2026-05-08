@@ -131,6 +131,9 @@ try {
         render_logs();
     } elseif ($path === '/api/parasut/contacts' && $method === 'GET') {
         handle_parasut_contacts_api();
+    } elseif ($path === '/api/stock-items' && $method === 'GET') {
+        require_json_permission('renewals.manage');
+        handle_stock_items_api($repo);
     } elseif ($path === '/api/push/public-key' && $method === 'GET') {
         handle_push_public_key();
     } elseif ($path === '/api/push/subscribe' && $method === 'POST') {
@@ -295,12 +298,15 @@ try {
     } elseif ($path === '/settings/offer-templates') {
         require_permission('settings.manage');
         handle_offer_templates($repo, $method);
+    } elseif ($path === '/settings/stock-items') {
+        require_permission('settings.manage');
+        handle_stock_items($repo, $method);
     } elseif ($path === '/settings/grapesjs') {
         require_permission('settings.manage');
         handle_grapesjs_template($method);
     } elseif ($path === '/settings') {
         require_permission('settings.manage');
-        handle_settings($method);
+        handle_settings($repo, $method);
     } elseif ($path === '/settings/microsoft/start') {
         require_permission('settings.manage');
         handle_microsoft_start();
@@ -378,6 +384,15 @@ function handle_parasut_contacts_api(): void
     }
 
     exit;
+}
+
+function handle_stock_items_api(RenewalRepository $repo): void
+{
+    $items = $repo->stockItems((string) ($_GET['q'] ?? ''), 25);
+    json_response([
+        'ok' => true,
+        'data' => array_map(static fn (array $item): array => stock_item_payload($item), $items),
+    ]);
 }
 
 function require_json_any_permission(array $permissions): void
@@ -5472,6 +5487,7 @@ function render_dashboard(RenewalRepository $repo): void
 function handle_sales_offer_create(RenewalRepository $repo, string $method): void
 {
     $templates = $repo->offerTemplates();
+    $stockItems = $repo->stockItems('', 250);
     $templateId = max(0, (int) ($_GET['template_id'] ?? 0));
     $blankMode = !empty($_GET['blank']);
     $selectedTemplate = $templateId > 0 ? $repo->findOfferTemplate($templateId) : null;
@@ -5501,7 +5517,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
         }
     }
 
-    render_layout('Yeni Teklif', static function () use ($templates, $selectedTemplate, $blankMode, $errors, $formData): void {
+    render_layout('Yeni Teklif', static function () use ($templates, $stockItems, $selectedTemplate, $blankMode, $errors, $formData): void {
         ?>
         <div class="page-title">
             <div>
@@ -5516,6 +5532,8 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
         <?php foreach ($errors as $error): ?>
             <div class="alert error"><?= h($error) ?></div>
         <?php endforeach; ?>
+
+        <?= render_stock_item_datalist($stockItems) ?>
 
         <?php if (!$blankMode && !$selectedTemplate && $errors === []): ?>
             <section class="offer-start-grid">
@@ -5551,7 +5569,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
                     </div>
                     <a class="button small secondary" href="<?= h(url('/offers/create')) ?>">Şablon seçimine dön</a>
                 </div>
-                <form method="post" class="form-grid offer-builder-form" data-offer-builder-form>
+                <form method="post" class="form-grid offer-builder-form" data-offer-builder-form data-stock-search-url="<?= h(url('/api/stock-items')) ?>">
                     <?= csrf_field() ?>
                     <input type="hidden" name="template_id" value="<?= h((string) ($formData['template_id'] ?? '')) ?>">
                     <div class="form-grid three span-2">
@@ -5622,6 +5640,117 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
     });
 }
 
+function handle_stock_items(RenewalRepository $repo, string $method): void
+{
+    $errors = [];
+
+    if ($method === 'POST') {
+        verify_csrf();
+        $action = (string) ($_POST['action'] ?? '');
+
+        try {
+            if ($action === 'sync_parasut_products') {
+                $products = (new ParasutClient())->fetchAllProducts();
+                $summary = $repo->syncStockItemsFromParasut($products);
+                flash(
+                    'success',
+                    'Paraşüt ürünleri içeri alındı. Yeni: ' . (int) $summary['created']
+                    . ', güncellenen: ' . (int) $summary['updated']
+                    . ', pasife alınan: ' . (int) $summary['inactive']
+                    . '.'
+                );
+                redirect('/settings/stock-items');
+            }
+        } catch (Throwable $e) {
+            $errors[] = $e->getMessage();
+        }
+    }
+
+    $query = trim((string) ($_GET['q'] ?? ''));
+    $stats = $repo->stockItemStats();
+    $items = $repo->stockItems($query, 250);
+
+    render_layout('Stok / Teklif Kalemleri', static function () use ($errors, $query, $stats, $items): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Ayarlar</p>
+                <h1>Stok / teklif kalemleri</h1>
+            </div>
+            <div class="page-actions">
+                <a href="<?= h(url('/settings/offer-templates')) ?>" class="button secondary">Teklif şablonları</a>
+                <a href="<?= h(url('/settings')) ?>" class="button secondary">Ayarlara dön</a>
+            </div>
+        </div>
+
+        <?php foreach ($errors as $error): ?>
+            <div class="alert error"><?= h($error) ?></div>
+        <?php endforeach; ?>
+
+        <section class="stock-sync-panel">
+            <div>
+                <p class="eyebrow">Paraşüt ürün kataloğu</p>
+                <h2>Ürünleri bir kere içeri alın, teklifleri yerel stoktan hazırlayın.</h2>
+                <p>Teklif ve şablon ekranları Paraşüt’e tekrar tekrar sorgu atmaz; buradaki yerel katalogdan beslenir. Paraşüt’te değişiklik yaptığınızda bu senkronizasyonu tekrar çalıştırmanız yeterli.</p>
+            </div>
+            <form method="post" onsubmit="return confirm('Paraşüt ürün/hizmet kataloğu yerel stok tablosuna işlensin mi?')">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="sync_parasut_products">
+                <button type="submit" class="button primary">Paraşüt’ten tüm ürünleri içeri al</button>
+            </form>
+        </section>
+
+        <section class="stock-summary-grid">
+            <article>
+                <span>Toplam kalem</span>
+                <strong><?= h((string) $stats['total']) ?></strong>
+            </article>
+            <article>
+                <span>Aktif kalem</span>
+                <strong><?= h((string) $stats['active']) ?></strong>
+            </article>
+            <article>
+                <span>Paraşüt kaynaklı</span>
+                <strong><?= h((string) $stats['parasut_total']) ?></strong>
+            </article>
+            <article>
+                <span>Son senkron</span>
+                <strong><?= h($stats['last_synced_at'] !== '' ? date('d.m.Y H:i', strtotime((string) $stats['last_synced_at'])) : '-') ?></strong>
+            </article>
+        </section>
+
+        <form method="get" class="filter-bar stock-filter">
+            <input name="q" value="<?= h($query) ?>" placeholder="Ürün adı, kod, barkod veya marka ara">
+            <button class="button secondary" type="submit">Filtrele</button>
+        </form>
+
+        <section class="stock-board">
+            <?php if ($items === []): ?>
+                <div class="empty">Stok kalemi bulunamadı. Önce Paraşüt ürünlerini içeri alabilirsiniz.</div>
+            <?php else: ?>
+                <?php foreach ($items as $item): ?>
+                    <article class="stock-item-card">
+                        <div>
+                            <span><?= h((string) (($item['code'] ?? '') ?: ($item['barcode'] ?? '') ?: 'Stok')) ?></span>
+                            <strong><?= h((string) $item['name']) ?></strong>
+                            <em><?= h(trim((string) (($item['brand'] ?? '') . ' ' . ($item['unit'] ?? '')))) ?></em>
+                        </div>
+                        <div class="stock-price">
+                            <span><?= h(money_format_local($item['list_price'] ?? 0, (string) ($item['currency'] ?? 'TRY'))) ?></span>
+                            <small>KDV %<?= h(number_format((float) ($item['vat_rate'] ?? 20), 2, ',', '.')) ?></small>
+                        </div>
+                        <div class="stock-meta">
+                            <span><?= !empty($item['inventory_tracking']) ? 'Stok takipli' : 'Stok takipsiz' ?></span>
+                            <strong><?= $item['stock_count'] !== null ? h(number_format((float) $item['stock_count'], 2, ',', '.')) : '-' ?></strong>
+                        </div>
+                    </article>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </section>
+        <?php
+    });
+}
+
 function handle_offer_templates(RenewalRepository $repo, string $method): void
 {
     $errors = [];
@@ -5656,8 +5785,9 @@ function handle_offer_templates(RenewalRepository $repo, string $method): void
     }
 
     $templates = $repo->offerTemplates(true);
+    $stockItems = $repo->stockItems('', 250);
 
-    render_layout('Teklif Şablonları', static function () use ($templates, $errors): void {
+    render_layout('Teklif Şablonları', static function () use ($templates, $stockItems, $errors): void {
         ?>
         <div class="page-title">
             <div>
@@ -5673,6 +5803,8 @@ function handle_offer_templates(RenewalRepository $repo, string $method): void
         <?php foreach ($errors as $error): ?>
             <div class="alert error"><?= h($error) ?></div>
         <?php endforeach; ?>
+
+        <?= render_stock_item_datalist($stockItems) ?>
 
         <section class="offer-template-board">
             <?php if ($templates === []): ?>
@@ -5695,7 +5827,7 @@ function handle_offer_templates(RenewalRepository $repo, string $method): void
                             <span>Detay</span>
                             <strong>Düzenle</strong>
                         </summary>
-                        <form method="post" class="form-grid offer-template-form" data-offer-builder-form>
+                        <form method="post" class="form-grid offer-template-form" data-offer-builder-form data-stock-search-url="<?= h(url('/api/stock-items')) ?>">
                             <?= csrf_field() ?>
                             <input type="hidden" name="action" value="update_template">
                             <input type="hidden" name="id" value="<?= h((string) $template['id']) ?>">
@@ -5725,7 +5857,7 @@ function handle_offer_templates(RenewalRepository $repo, string $method): void
                     </div>
                     <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
                 </div>
-                <form method="post" class="form-grid offer-template-form" data-offer-builder-form>
+                <form method="post" class="form-grid offer-template-form" data-offer-builder-form data-stock-search-url="<?= h(url('/api/stock-items')) ?>">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="create_template">
                     <?= render_offer_template_fields(['currency' => 'TRY', 'items' => [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']]]) ?>
@@ -5825,6 +5957,54 @@ function sales_offer_status_badge(string $status): string
     };
 }
 
+function stock_item_payload(array $item): array
+{
+    return [
+        'id' => (int) ($item['id'] ?? 0),
+        'name' => (string) ($item['name'] ?? ''),
+        'code' => (string) ($item['code'] ?? ''),
+        'barcode' => (string) ($item['barcode'] ?? ''),
+        'brand' => (string) ($item['brand'] ?? ''),
+        'unit' => (string) ($item['unit'] ?? ''),
+        'currency' => (string) ($item['currency'] ?? 'TRY'),
+        'list_price' => (float) ($item['list_price'] ?? 0),
+        'vat_rate' => (float) ($item['vat_rate'] ?? 20),
+        'stock_count' => $item['stock_count'] ?? null,
+    ];
+}
+
+function render_stock_item_datalist(array $stockItems): string
+{
+    ob_start();
+    ?>
+    <datalist id="stock-item-options">
+        <?php foreach ($stockItems as $item): ?>
+            <?php
+            $payload = stock_item_payload($item);
+            $parts = array_filter([
+                $payload['name'],
+                $payload['code'] !== '' ? $payload['code'] : null,
+                $payload['brand'] !== '' ? $payload['brand'] : null,
+            ]);
+            $value = implode(' | ', $parts);
+            ?>
+            <option
+                value="<?= h($value) ?>"
+                data-stock-id="<?= h((string) $payload['id']) ?>"
+                data-title="<?= h($payload['name']) ?>"
+                data-brand="<?= h($payload['brand']) ?>"
+                data-description="<?= h($payload['code'] !== '' ? 'Kod: ' . $payload['code'] : '') ?>"
+                data-unit-price="<?= h(number_format($payload['list_price'], 2, '.', '')) ?>"
+                data-vat-rate="<?= h(number_format($payload['vat_rate'], 2, '.', '')) ?>"
+                data-currency="<?= h($payload['currency']) ?>"
+            ></option>
+        <?php endforeach; ?>
+    </datalist>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
 function render_offer_template_fields(array $template): string
 {
     $items = (array) ($template['items'] ?? []);
@@ -5892,6 +6072,7 @@ function render_offer_builder_item_row(int|string $index, array $item): string
     ob_start();
     ?>
     <div class="offer-builder-line" data-offer-line>
+        <input type="hidden" name="<?= h($namePrefix) ?>[stock_item_id]" value="<?= h((string) ($item['stock_item_id'] ?? '')) ?>" data-stock-item-id>
         <div class="offer-builder-line-head">
             <strong>Kalem</strong>
             <button type="button" class="button small danger" data-offer-remove-line>Kaldır</button>
@@ -5899,11 +6080,12 @@ function render_offer_builder_item_row(int|string $index, array $item): string
         <div class="form-grid three">
             <label>
                 Ürün / hizmet
-                <input name="<?= h($namePrefix) ?>[title]" value="<?= h((string) ($item['title'] ?? '')) ?>" placeholder="Kamera, NVR, lisans..." required>
+                <input name="<?= h($namePrefix) ?>[title]" value="<?= h((string) ($item['title'] ?? '')) ?>" placeholder="Kamera, NVR, lisans..." list="stock-item-options" data-stock-title autocomplete="off" required>
+                <span class="field-help offer-stock-hint">Stok kataloğundan seçerseniz marka, fiyat, KDV ve para birimi otomatik gelir.</span>
             </label>
             <label>
                 Marka / model
-                <input name="<?= h($namePrefix) ?>[brand]" value="<?= h((string) ($item['brand'] ?? '')) ?>" placeholder="Hikvision, Sophos...">
+                <input name="<?= h($namePrefix) ?>[brand]" value="<?= h((string) ($item['brand'] ?? '')) ?>" placeholder="Hikvision, Sophos..." data-stock-brand>
             </label>
             <label>
                 Adet
@@ -5921,7 +6103,7 @@ function render_offer_builder_item_row(int|string $index, array $item): string
             </label>
             <label>
                 Açıklama
-                <input name="<?= h($namePrefix) ?>[description]" value="<?= h((string) ($item['description'] ?? '')) ?>" placeholder="Montaj, teslim, kapsam...">
+                <input name="<?= h($namePrefix) ?>[description]" value="<?= h((string) ($item['description'] ?? '')) ?>" placeholder="Montaj, teslim, kapsam..." data-stock-description>
             </label>
         </div>
         <div class="offer-line-preview">
@@ -9666,7 +9848,7 @@ function handle_grapesjs_template(string $method): void
     }, grapesjs_assets());
 }
 
-function handle_settings(string $method): void
+function handle_settings(RenewalRepository $repo, string $method): void
 {
     $settingsRepo = new SettingsRepository();
     $parasutClient = new ParasutClient();
@@ -9842,8 +10024,9 @@ function handle_settings(string $method): void
     $canFlows = Auth::can('flows.view');
     $canLogs = Auth::can('logs.view');
     $databaseConfig = app_config('database', []);
+    $stockStats = $repo->stockItemStats();
 
-    render_layout('Ayarlar', static function () use ($settings, $token, $error, $parasutClient, $parasutStatus, $canDefinitions, $canUsers, $canFlows, $canLogs, $databaseConfig): void {
+    render_layout('Ayarlar', static function () use ($settings, $token, $error, $parasutClient, $parasutStatus, $stockStats, $canDefinitions, $canUsers, $canFlows, $canLogs, $databaseConfig): void {
         $hasMicrosoftToken = !empty($token['refresh_token']);
         $expiresAt = !empty($token['expires_at']) ? date('d.m.Y H:i', (int) $token['expires_at']) : '-';
         $logoUrl = branding_logo_url($settings);
@@ -9860,6 +10043,7 @@ function handle_settings(string $method): void
                 <?php endif; ?>
                 <a href="<?= h(url('/settings/grapesjs')) ?>" class="button primary">Mail şablon tasarımı</a>
                 <a href="<?= h(url('/settings/offer-templates')) ?>" class="button secondary">Teklif şablonları</a>
+                <a href="<?= h(url('/settings/stock-items')) ?>" class="button secondary">Stok kalemleri</a>
                 <?php if ($canDefinitions): ?>
                     <a href="<?= h(url('/settings/definitions')) ?>" class="button secondary">Tanımlamalar</a>
                 <?php endif; ?>
@@ -10263,6 +10447,22 @@ function handle_settings(string $method): void
                         <span>Kamera sistemi, lisans paketi veya bakım hizmeti gibi hazır kalemli teklifleri buradan yönetin.</span>
                     </div>
                     <a href="<?= h(url('/settings/offer-templates')) ?>" class="button secondary full settings-form">Teklif şablonlarını aç</a>
+                </div>
+
+                <div class="settings-card" data-settings-card data-settings-key="stock-items" data-settings-group="integration">
+                    <div class="section-head">
+                        <h2>Stok / teklif kalemleri</h2>
+                        <span class="badge active"><?= h((string) $stockStats['active']) ?> aktif</span>
+                    </div>
+                    <div class="settings-note">
+                        <strong>Paraşüt ürün kataloğu</strong>
+                        <span>Ürün ve hizmetleri yerel stok tablosuna alıp tekliflerde hızlı seçebilirsiniz.</span>
+                    </div>
+                    <div class="settings-meta">
+                        <span>Son senkron</span>
+                        <strong><?= h($stockStats['last_synced_at'] !== '' ? date('d.m.Y H:i', strtotime((string) $stockStats['last_synced_at'])) : '-') ?></strong>
+                    </div>
+                    <a href="<?= h(url('/settings/stock-items')) ?>" class="button secondary full settings-form">Stok kalemlerini yönet</a>
                 </div>
 
                 <div class="settings-card" id="bank-transfer-settings" data-settings-card data-settings-key="bank-transfer" data-settings-group="integration">
