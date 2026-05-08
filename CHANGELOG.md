@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.3] - 2026-05-08
+
+- Alan adı ve hosting yenilemeleri için daha doğal, satış baskısı oluşturmayan ancak servis kesintisi riskini anlatan bilgilendirme metni eklendi.
+- Alan adı, hosting ve e-posta hosting tanımlarındaki varsayılan bilgilendirme metni aynı içerikle güncellenecek şekilde hazırlandı.
+
 ## [2.0.2] - 2026-05-08
 
 - Müşteri kartlarına eksik yetkili/cari bilgilerini 48 saat geçerli tek kullanımlık linkle mail veya WhatsApp üzerinden isteme akışı eklendi.

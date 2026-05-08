@@ -2530,7 +2530,84 @@ final class RenewalRepository
             $this->db->exec('ALTER TABLE renewal_definitions ADD notification_info TEXT NULL AFTER kind');
         }
 
+        $this->seedDomainHostingNotificationInfo();
         self::$definitionSchemaEnsured = true;
+    }
+
+    private function seedDomainHostingNotificationInfo(): void
+    {
+        try {
+            $this->db->exec(
+                "CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key VARCHAR(120) PRIMARY KEY,
+                    setting_value MEDIUMTEXT NULL,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+
+            $key = 'maintenance.definition_domain_hosting_info_v1';
+            $stmt = $this->db->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :setting_key LIMIT 1');
+            $stmt->execute(['setting_key' => $key]);
+            if ((string) $stmt->fetchColumn() === '1') {
+                return;
+            }
+
+            $names = self::domainHostingDefinitionNames();
+            $placeholders = implode(', ', array_fill(0, count($names), '?'));
+            $existsStmt = $this->db->prepare("SELECT COUNT(*) FROM renewal_definitions WHERE kind = 'product' AND name IN ({$placeholders})");
+            $existsStmt->execute($names);
+            if ((int) $existsStmt->fetchColumn() < 1) {
+                $insertStmt = $this->db->prepare(
+                    'INSERT INTO renewal_definitions (name, kind, notification_info, is_active)
+                     VALUES (:name, "product", :notification_info, 1)
+                     ON DUPLICATE KEY UPDATE notification_info = VALUES(notification_info), is_active = 1, updated_at = NOW()'
+                );
+                $insertStmt->execute([
+                    'name' => 'Alan Adı ve Hosting Yenileme',
+                    'notification_info' => self::domainHostingNotificationInfo(),
+                ]);
+            }
+
+            $updateStmt = $this->db->prepare(
+                "UPDATE renewal_definitions
+                 SET notification_info = ?,
+                     is_active = 1,
+                     updated_at = NOW()
+                 WHERE kind = 'product'
+                   AND name IN ({$placeholders})"
+            );
+            $updateStmt->execute(array_merge([self::domainHostingNotificationInfo()], $names));
+
+            $doneStmt = $this->db->prepare(
+                'INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                 VALUES (:setting_key, "1", NOW())
+                 ON DUPLICATE KEY UPDATE setting_value = "1", updated_at = NOW()'
+            );
+            $doneStmt->execute(['setting_key' => $key]);
+        } catch (\Throwable) {
+            // Default content must not block the panel if a host limits maintenance writes.
+        }
+    }
+
+    private static function domainHostingDefinitionNames(): array
+    {
+        return [
+            'Alan Adı ve Hosting Yenileme',
+            'Alan Adi ve Hosting Yenileme',
+            'Alan Adı Hosting Yenileme',
+            'Alan Adi Hosting Yenileme',
+            'Alan Adı ve Hosting Yenilemesi',
+            'Alan Adi ve Hosting Yenilemesi',
+            'Alan Adı Yenileme',
+            'Alan Adi Yenileme',
+            'Web Hosting',
+            'E-posta Hosting',
+        ];
+    }
+
+    private static function domainHostingNotificationInfo(): string
+    {
+        return 'Alan adı ve hosting yenilemeleri genellikle sessiz ilerleyen, ancak süresi kaçırıldığında etkisi hızlı hissedilen süreçlerdir. Süre dolduğunda web sitesi, e-posta hesapları, DNS yönlendirmeleri ve bağlı servislerde erişim kesintileri yaşanabilir. Alan adı tarafında ilk günlerde yenileme çoğu zaman yapılabilse de, bekleme veya kurtarma dönemine girildiğinde ek ücret, kesinti süresi ve alan adının kaybedilmesi riski oluşabilir. Hosting tarafında ise dosya, yedek ve e-posta erişimi etkilenebileceği için yenileme tercihinin süre dolmadan netleşmesi önerilir.';
     }
 
     private function ensurePaymentMethodSchema(): void

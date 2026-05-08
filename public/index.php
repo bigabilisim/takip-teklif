@@ -9055,7 +9055,7 @@ function template_test_row(): array
         'currency' => 'TRY',
         'payment_method' => '',
         'payment_customer_choice' => 1,
-        'definition_notification_info' => 'Alan adının süresi bittikten sonraki 20 gün içinde alan adı normal ücretle yenilenebilir. Bu süre içinde alan adına bağlı web sitesi, e-mailler ve benzer servisler durabilir.',
+        'definition_notification_info' => 'Alan adı ve hosting yenilemeleri genellikle sessiz ilerleyen, ancak süresi kaçırıldığında etkisi hızlı hissedilen süreçlerdir. Süre dolduğunda web sitesi, e-posta hesapları, DNS yönlendirmeleri ve bağlı servislerde erişim kesintileri yaşanabilir. Alan adı tarafında ilk günlerde yenileme çoğu zaman yapılabilse de, bekleme veya kurtarma dönemine girildiğinde ek ücret, kesinti süresi ve alan adının kaybedilmesi riski oluşabilir.',
         'renewal_date' => date('Y-m-d', strtotime('+15 days')),
         'notes' => 'Bu test maili şablonun kontrolü için gönderildi.',
     ];
