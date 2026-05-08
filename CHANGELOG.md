@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.7] - 2026-05-08
+
+- Ürün/hizmet tanımlarının tamamı için kategori bazlı bilgilendirme açıklamaları eklendi.
+- Boş açıklamaya sahip mevcut tanımlar, panel açılışında doğal ama riskleri anlatan metinlerle otomatik tamamlanacak hale getirildi.
+
 ## [2.0.6] - 2026-05-08
 
 - Onaylı müşteri teklifleri için Paraşüt faturası otomatik oluşmazsa dashboard aksiyonlarına manuel gönderim tuşu eklendi.

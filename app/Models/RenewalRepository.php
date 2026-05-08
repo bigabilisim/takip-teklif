@@ -2559,11 +2559,11 @@ final class RenewalRepository
             $this->db->exec('ALTER TABLE renewal_definitions ADD notification_info TEXT NULL AFTER kind');
         }
 
-        $this->seedDomainHostingNotificationInfo();
+        $this->seedRenewalDefinitionNotificationInfo();
         self::$definitionSchemaEnsured = true;
     }
 
-    private function seedDomainHostingNotificationInfo(): void
+    private function seedRenewalDefinitionNotificationInfo(): void
     {
         try {
             $this->db->exec(
@@ -2574,38 +2574,51 @@ final class RenewalRepository
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
             );
 
-            $key = 'maintenance.definition_domain_hosting_info_v1';
+            $key = 'maintenance.definition_notification_info_catalog_v1';
             $stmt = $this->db->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :setting_key LIMIT 1');
             $stmt->execute(['setting_key' => $key]);
             if ((string) $stmt->fetchColumn() === '1') {
                 return;
             }
 
-            $names = self::domainHostingDefinitionNames();
-            $placeholders = implode(', ', array_fill(0, count($names), '?'));
-            $existsStmt = $this->db->prepare("SELECT COUNT(*) FROM renewal_definitions WHERE kind = 'product' AND name IN ({$placeholders})");
-            $existsStmt->execute($names);
-            if ((int) $existsStmt->fetchColumn() < 1) {
-                $insertStmt = $this->db->prepare(
-                    'INSERT INTO renewal_definitions (name, kind, notification_info, is_active)
-                     VALUES (:name, "product", :notification_info, 1)
-                     ON DUPLICATE KEY UPDATE notification_info = VALUES(notification_info), is_active = 1, updated_at = NOW()'
-                );
+            $insertStmt = $this->db->prepare(
+                'INSERT INTO renewal_definitions (name, kind, notification_info, is_active)
+                 VALUES (:name, :kind, :notification_info, 1)
+                 ON DUPLICATE KEY UPDATE
+                    notification_info = CASE
+                        WHEN notification_info IS NULL OR notification_info = "" THEN VALUES(notification_info)
+                        ELSE notification_info
+                    END,
+                    is_active = 1,
+                    updated_at = NOW()'
+            );
+            foreach (self::defaultRenewalDefinitionRows() as [$name, $kind]) {
                 $insertStmt->execute([
-                    'name' => 'Alan Adı ve Hosting Yenileme',
-                    'notification_info' => self::domainHostingNotificationInfo(),
+                    'name' => $name,
+                    'kind' => $kind,
+                    'notification_info' => self::definitionNotificationInfo($name, $kind),
                 ]);
             }
 
             $updateStmt = $this->db->prepare(
-                "UPDATE renewal_definitions
-                 SET notification_info = ?,
-                     is_active = 1,
+                'UPDATE renewal_definitions
+                 SET notification_info = :notification_info,
                      updated_at = NOW()
-                 WHERE kind = 'product'
-                   AND name IN ({$placeholders})"
+                 WHERE id = :id
+                   AND (notification_info IS NULL OR notification_info = "")'
             );
-            $updateStmt->execute(array_merge([self::domainHostingNotificationInfo()], $names));
+            $rows = $this->db->query('SELECT id, name, kind, notification_info FROM renewal_definitions')->fetchAll();
+            foreach ($rows as $row) {
+                $info = trim((string) ($row['notification_info'] ?? ''));
+                if ($info !== '') {
+                    continue;
+                }
+
+                $updateStmt->execute([
+                    'id' => (int) $row['id'],
+                    'notification_info' => self::definitionNotificationInfo((string) $row['name'], (string) $row['kind']),
+                ]);
+            }
 
             $doneStmt = $this->db->prepare(
                 'INSERT INTO app_settings (setting_key, setting_value, updated_at)
@@ -2618,20 +2631,112 @@ final class RenewalRepository
         }
     }
 
-    private static function domainHostingDefinitionNames(): array
+    private static function defaultRenewalDefinitionRows(): array
     {
         return [
-            'Alan Adı ve Hosting Yenileme',
-            'Alan Adi ve Hosting Yenileme',
-            'Alan Adı Hosting Yenileme',
-            'Alan Adi Hosting Yenileme',
-            'Alan Adı ve Hosting Yenilemesi',
-            'Alan Adi ve Hosting Yenilemesi',
-            'Alan Adı Yenileme',
-            'Alan Adi Yenileme',
-            'Web Hosting',
-            'E-posta Hosting',
+            ['Microsoft 365 Lisansi', 'product'],
+            ['Google Workspace Lisansi', 'product'],
+            ['E-posta Hosting', 'product'],
+            ['Alan Adi ve Hosting Yenileme', 'product'],
+            ['Alan Adi Yenileme', 'product'],
+            ['Web Hosting', 'product'],
+            ['SSL Sertifikasi', 'product'],
+            ['Antivirus / EDR Lisansi', 'product'],
+            ['Firewall UTM Lisansi', 'product'],
+            ['VPN Lisansi', 'product'],
+            ['Yedekleme Yazilimi Lisansi', 'product'],
+            ['Sunucu Lisansi', 'product'],
+            ['Windows Server CAL', 'product'],
+            ['SQL Server Lisansi', 'product'],
+            ['ERP Lisansi', 'product'],
+            ['CRM Lisansi', 'product'],
+            ['Bulut Sunucu', 'product'],
+            ['IP Santral Lisansi', 'product'],
+            ['Kamera Kayit Yazilimi Lisansi', 'product'],
+            ['Bakim ve Destek Sozlesmesi', 'service'],
+            ['Helpdesk Destek Hizmeti', 'service'],
+            ['Sunucu Bakim Hizmeti', 'service'],
+            ['Network Bakim Hizmeti', 'service'],
+            ['Web Site Bakim Hizmeti', 'service'],
+            ['Yedekleme Hizmeti', 'service'],
+            ['Felaket Kurtarma Hizmeti', 'service'],
+            ['Siber Guvenlik Izleme Hizmeti', 'service'],
+            ['E-posta Guvenligi Hizmeti', 'service'],
+            ['Penetrasyon Testi', 'service'],
+            ['KVKK Danismanlik Hizmeti', 'service'],
         ];
+    }
+
+    private static function definitionNotificationInfo(string $name, string $kind): string
+    {
+        $normalized = self::normalizedDefinitionName($name);
+
+        if (str_contains($normalized, 'alan adi') || str_contains($normalized, 'hosting')) {
+            return self::domainHostingNotificationInfo();
+        }
+
+        if (str_contains($normalized, 'ssl')) {
+            return 'SSL sertifikası yenilenmediğinde web sitesi teknik olarak yayında olsa bile tarayıcılar ziyaretçilere güvenlik uyarısı gösterebilir. Bu uyarılar kullanıcı güvenini düşürür, formlar ve ödeme adımları daha az tercih edilir hale gelir ve bazı entegrasyonlar güvenli bağlantı kabul etmediği için çalışmayabilir. Sertifika süresi dolmadan yenileme yapılması, kesintisiz ve güven veren bir erişim için önemlidir.';
+        }
+
+        if (str_contains($normalized, 'microsoft 365') || str_contains($normalized, 'google workspace')) {
+            return 'Bulut çalışma lisanslarında yenileme gecikirse e-posta, takvim, dosya paylaşımı ve kullanıcı oturumları etkilenebilir. İlk aşamada uyarılar görünse bile süre uzadığında hesap erişimleri, kota ve yönetim işlemleri kısıtlanabilir. İş akışlarının ve ekip içi iletişimin kesintiye uğramaması için lisans durumunun süre dolmadan netleştirilmesi önerilir.';
+        }
+
+        if (str_contains($normalized, 'antivirus') || str_contains($normalized, 'edr')) {
+            return 'Antivirüs ve EDR lisansları yalnızca kurulu yazılımı değil; güncel tehdit imzalarını, merkezi yönetimi, olay kayıtlarını ve müdahale kabiliyetini de kapsar. Süre dolduğunda cihazlar çalışmaya devam ediyor gibi görünse bile yeni tehditlere karşı görünürlük ve koruma seviyesi düşebilir. Güvenlik zincirinde boşluk oluşmaması için yenileme kararının gecikmeden verilmesi önemlidir.';
+        }
+
+        if (str_contains($normalized, 'firewall') || str_contains($normalized, 'utm') || str_contains($normalized, 'vpn')) {
+            return 'Firewall, UTM ve VPN lisanslarında süre dolumu internet erişimini her zaman anında kesmeyebilir; ancak web filtreleme, saldırı önleme, VPN erişimi, güvenlik güncellemeleri ve raporlama gibi kritik katmanlar etkilenebilir. Bu durum dış tehditlere karşı savunmayı zayıflatır ve uzaktan erişim sürekliliğini riske atabilir. Yenilemenin süre bitmeden planlanması önerilir.';
+        }
+
+        if (str_contains($normalized, 'yedekleme') || str_contains($normalized, 'felaket kurtarma')) {
+            return 'Yedekleme ve felaket kurtarma çözümleri sorun yaşanmadan önce sessiz çalışan ama ihtiyaç anında kritik hale gelen sistemlerdir. Lisans veya hizmet süresi dolduğunda yeni yedeklerin alınması, saklama politikaları, izleme uyarıları veya geri dönüş desteği etkilenebilir. Veri kaybı riskini büyütmemek için yenileme ve test süreçlerinin süre dolmadan tamamlanması önemlidir.';
+        }
+
+        if (str_contains($normalized, 'bulut')) {
+            return 'Bulut sunucu hizmetlerinde süre veya ödeme takibi gecikirse kaynaklar, yedekler, IP erişimi ve bağlı servisler etkilenebilir. Bazı sağlayıcılar kısa süreli uyarı dönemi sunsa da gecikme uzadığında servis durdurma veya veri erişiminde kısıtlama riski oluşabilir. Canlı sistemlerin etkilenmemesi için yenileme planı önceden yapılmalıdır.';
+        }
+
+        if (str_contains($normalized, 'bakim') || str_contains($normalized, 'destek') || str_contains($normalized, 'helpdesk') || str_contains($normalized, 'network') || str_contains($normalized, 'web site')) {
+            return 'Bakım ve destek hizmetleri sorun çıkmadığı dönemlerde arka planda kalır; ancak ihtiyaç anında müdahale süresi ve kapsamı belirleyen ana güvencedir. Hizmet süresi yenilenmezse planlı kontroller, öncelikli destek, güncelleme takibi ve arıza müdahalesi kapsam dışı kalabilir. Operasyonun aksamaması için hizmet devamlılığının süre dolmadan netleşmesi önerilir.';
+        }
+
+        if (str_contains($normalized, 'sunucu') || str_contains($normalized, 'server cal') || str_contains($normalized, 'sql server')) {
+            return 'Sunucu ve veritabanı lisansları erişim, yasal kullanım, güncelleme ve destek sürekliliği açısından önemlidir. Yenileme veya lisans takibi geciktiğinde kullanıcı erişimleri, denetim süreçleri, üretici desteği ve güvenlik güncellemeleri riskli hale gelebilir. İş kritik sistemlerde sürpriz kesinti yaşamamak için lisans durumunun önceden planlanması önerilir.';
+        }
+
+        if (str_contains($normalized, 'erp') || str_contains($normalized, 'crm')) {
+            return 'ERP ve CRM lisansları satış, muhasebe, stok, müşteri takibi ve entegrasyon süreçlerinin merkezinde yer alır. Süre dolumu veya bakım yenilemesinin gecikmesi kullanıcı erişimlerini, güncelleme hakkını, destek taleplerini ve bağlı entegrasyonları etkileyebilir. Operasyonun aksamaması için yenileme kararının süre dolmadan netleşmesi faydalıdır.';
+        }
+
+        if (str_contains($normalized, 'santral')) {
+            return 'IP santral lisansı veya hizmet süresi dolduğunda dahili görüşmeler, dış hat kullanımı, çağrı yönlendirme, kayıt ve raporlama gibi telefon süreçleri etkilenebilir. Çağrı trafiği müşteriye doğrudan temas ettiği için küçük bir kesinti bile operasyonel görünürlüğü azaltabilir. Yenilemenin süre dolmadan tamamlanması önerilir.';
+        }
+
+        if (str_contains($normalized, 'kamera') || str_contains($normalized, 'kayit')) {
+            return 'Kamera kayıt yazılımı ve izleme lisansları güvenlik olaylarında geriye dönük inceleme yapabilmek için kritik öneme sahiptir. Süre dolduğunda canlı izleme çalışıyor gibi görünse bile kayıt, arşivleme, uzaktan erişim veya alarm entegrasyonları etkilenebilir. Kayıt bütünlüğünün bozulmaması için yenileme zamanında yapılmalıdır.';
+        }
+
+        if (str_contains($normalized, 'siber guvenlik') || str_contains($normalized, 'e-posta guvenligi') || str_contains($normalized, 'penetrasyon') || str_contains($normalized, 'kvkk')) {
+            return 'Güvenlik ve uyumluluk hizmetleri düzenli takip edilmediğinde riskler görünmez hale gelebilir. İzleme, test, raporlama veya danışmanlık süresinin bitmesi; zafiyetlerin geç fark edilmesine, e-posta tehditlerinin artmasına ve uyum süreçlerinde eksik kayıt oluşmasına neden olabilir. Risklerin büyümeden yönetilebilmesi için hizmet takviminin kesintisiz sürmesi önerilir.';
+        }
+
+        if ($kind === 'service') {
+            return 'Bu hizmetin yenilemesi gecikirse destek kapsamı, müdahale süresi, planlı kontroller ve hizmet sürekliliği etkilenebilir. Günlük işleyişte sorun görünmese bile ihtiyaç anında kapsam dışı kalma veya yeniden planlama gecikmesi yaşanabilir. Süre dolmadan yenileme kararı verilmesi operasyonel süreklilik açısından önemlidir.';
+        }
+
+        return 'Bu ürünün yenilemesi zamanında planlanmadığında lisans, destek, güncelleme veya erişim sürekliliği etkilenebilir. İlk anda sistem çalışıyor gibi görünse bile süre uzadıkça servis kısıtları, güvenlik açıkları, ek maliyetler veya kullanım kesintileri oluşabilir. Yenileme kararının süre dolmadan netleşmesi önerilir.';
+    }
+
+    private static function normalizedDefinitionName(string $name): string
+    {
+        $name = mb_strtolower($name);
+        $search = ['ı', 'ğ', 'ü', 'ş', 'ö', 'ç', 'İ'];
+        $replace = ['i', 'g', 'u', 's', 'o', 'c', 'i'];
+
+        return str_replace($search, $replace, $name);
     }
 
     private static function domainHostingNotificationInfo(): string

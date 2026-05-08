@@ -739,11 +739,68 @@ function seed_default_renewal_definitions(PDO $pdo): void
 
 function default_renewal_definition_info(string $name): ?string
 {
-    if ($name === 'Alan Adi Yenileme') {
-        return 'Alan adının süresi bittikten sonraki 20 gün içinde alan adı normal ücretle yenilenebilir. Bu süre içinde, alan adına bağlı web sitesi, e-mailler ve benzer bütün servisler duracaktır. 20 günü aştığı taktirde ise alan adı kurtarma periyoduna girer ve normal ücretle yenilenemez, böyle bir durumda yenilemek isterseniz destek bildirimi açarak güncel kurtarma ücretini sorabilirsiniz. Süre bitiminden 20 gün geçtikten sonra alan adınızı kurtarabileceğiniz ve sahipliğini sağlayabileceğiniz konusunda garanti verememekteyiz. Firmalar arası farklılıklar göstermektedir.';
+    $normalized = normalized_definition_name($name);
+
+    if (str_contains($normalized, 'alan adi') || str_contains($normalized, 'hosting')) {
+        return 'Alan adı ve hosting yenilemeleri genellikle sessiz ilerleyen, ancak süresi kaçırıldığında etkisi hızlı hissedilen süreçlerdir. Süre dolduğunda web sitesi, e-posta hesapları, DNS yönlendirmeleri ve bağlı servislerde erişim kesintileri yaşanabilir. Alan adı tarafında ilk günlerde yenileme çoğu zaman yapılabilse de, bekleme veya kurtarma dönemine girildiğinde ek ücret, kesinti süresi ve alan adının kaybedilmesi riski oluşabilir. Hosting tarafında ise dosya, yedek ve e-posta erişimi etkilenebileceği için yenileme tercihinin süre dolmadan netleşmesi önerilir.';
     }
 
-    return null;
+    if (str_contains($normalized, 'ssl')) {
+        return 'SSL sertifikası yenilenmediğinde web sitesi teknik olarak yayında olsa bile tarayıcılar ziyaretçilere güvenlik uyarısı gösterebilir. Bu uyarılar kullanıcı güvenini düşürür, formlar ve ödeme adımları daha az tercih edilir hale gelir ve bazı entegrasyonlar güvenli bağlantı kabul etmediği için çalışmayabilir. Sertifika süresi dolmadan yenileme yapılması, kesintisiz ve güven veren bir erişim için önemlidir.';
+    }
+
+    if (str_contains($normalized, 'microsoft 365') || str_contains($normalized, 'google workspace')) {
+        return 'Bulut çalışma lisanslarında yenileme gecikirse e-posta, takvim, dosya paylaşımı ve kullanıcı oturumları etkilenebilir. İlk aşamada uyarılar görünse bile süre uzadığında hesap erişimleri, kota ve yönetim işlemleri kısıtlanabilir. İş akışlarının ve ekip içi iletişimin kesintiye uğramaması için lisans durumunun süre dolmadan netleştirilmesi önerilir.';
+    }
+
+    if (str_contains($normalized, 'antivirus') || str_contains($normalized, 'edr')) {
+        return 'Antivirüs ve EDR lisansları yalnızca kurulu yazılımı değil; güncel tehdit imzalarını, merkezi yönetimi, olay kayıtlarını ve müdahale kabiliyetini de kapsar. Süre dolduğunda cihazlar çalışmaya devam ediyor gibi görünse bile yeni tehditlere karşı görünürlük ve koruma seviyesi düşebilir. Güvenlik zincirinde boşluk oluşmaması için yenileme kararının gecikmeden verilmesi önemlidir.';
+    }
+
+    if (str_contains($normalized, 'firewall') || str_contains($normalized, 'utm') || str_contains($normalized, 'vpn')) {
+        return 'Firewall, UTM ve VPN lisanslarında süre dolumu internet erişimini her zaman anında kesmeyebilir; ancak web filtreleme, saldırı önleme, VPN erişimi, güvenlik güncellemeleri ve raporlama gibi kritik katmanlar etkilenebilir. Bu durum dış tehditlere karşı savunmayı zayıflatır ve uzaktan erişim sürekliliğini riske atabilir. Yenilemenin süre bitmeden planlanması önerilir.';
+    }
+
+    if (str_contains($normalized, 'yedekleme') || str_contains($normalized, 'felaket kurtarma')) {
+        return 'Yedekleme ve felaket kurtarma çözümleri sorun yaşanmadan önce sessiz çalışan ama ihtiyaç anında kritik hale gelen sistemlerdir. Lisans veya hizmet süresi dolduğunda yeni yedeklerin alınması, saklama politikaları, izleme uyarıları veya geri dönüş desteği etkilenebilir. Veri kaybı riskini büyütmemek için yenileme ve test süreçlerinin süre dolmadan tamamlanması önemlidir.';
+    }
+
+    if (str_contains($normalized, 'bulut')) {
+        return 'Bulut sunucu hizmetlerinde süre veya ödeme takibi gecikirse kaynaklar, yedekler, IP erişimi ve bağlı servisler etkilenebilir. Bazı sağlayıcılar kısa süreli uyarı dönemi sunsa da gecikme uzadığında servis durdurma veya veri erişiminde kısıtlama riski oluşabilir. Canlı sistemlerin etkilenmemesi için yenileme planı önceden yapılmalıdır.';
+    }
+
+    if (str_contains($normalized, 'bakim') || str_contains($normalized, 'destek') || str_contains($normalized, 'helpdesk') || str_contains($normalized, 'network') || str_contains($normalized, 'web site')) {
+        return 'Bakım ve destek hizmetleri sorun çıkmadığı dönemlerde arka planda kalır; ancak ihtiyaç anında müdahale süresi ve kapsamı belirleyen ana güvencedir. Hizmet süresi yenilenmezse planlı kontroller, öncelikli destek, güncelleme takibi ve arıza müdahalesi kapsam dışı kalabilir. Operasyonun aksamaması için hizmet devamlılığının süre dolmadan netleşmesi önerilir.';
+    }
+
+    if (str_contains($normalized, 'sunucu') || str_contains($normalized, 'server cal') || str_contains($normalized, 'sql server')) {
+        return 'Sunucu ve veritabanı lisansları erişim, yasal kullanım, güncelleme ve destek sürekliliği açısından önemlidir. Yenileme veya lisans takibi geciktiğinde kullanıcı erişimleri, denetim süreçleri, üretici desteği ve güvenlik güncellemeleri riskli hale gelebilir. İş kritik sistemlerde sürpriz kesinti yaşamamak için lisans durumunun önceden planlanması önerilir.';
+    }
+
+    if (str_contains($normalized, 'erp') || str_contains($normalized, 'crm')) {
+        return 'ERP ve CRM lisansları satış, muhasebe, stok, müşteri takibi ve entegrasyon süreçlerinin merkezinde yer alır. Süre dolumu veya bakım yenilemesinin gecikmesi kullanıcı erişimlerini, güncelleme hakkını, destek taleplerini ve bağlı entegrasyonları etkileyebilir. Operasyonun aksamaması için yenileme kararının süre dolmadan netleşmesi faydalıdır.';
+    }
+
+    if (str_contains($normalized, 'santral')) {
+        return 'IP santral lisansı veya hizmet süresi dolduğunda dahili görüşmeler, dış hat kullanımı, çağrı yönlendirme, kayıt ve raporlama gibi telefon süreçleri etkilenebilir. Çağrı trafiği müşteriye doğrudan temas ettiği için küçük bir kesinti bile operasyonel görünürlüğü azaltabilir. Yenilemenin süre dolmadan tamamlanması önerilir.';
+    }
+
+    if (str_contains($normalized, 'kamera') || str_contains($normalized, 'kayit')) {
+        return 'Kamera kayıt yazılımı ve izleme lisansları güvenlik olaylarında geriye dönük inceleme yapabilmek için kritik öneme sahiptir. Süre dolduğunda canlı izleme çalışıyor gibi görünse bile kayıt, arşivleme, uzaktan erişim veya alarm entegrasyonları etkilenebilir. Kayıt bütünlüğünün bozulmaması için yenileme zamanında yapılmalıdır.';
+    }
+
+    if (str_contains($normalized, 'siber guvenlik') || str_contains($normalized, 'e-posta guvenligi') || str_contains($normalized, 'penetrasyon') || str_contains($normalized, 'kvkk')) {
+        return 'Güvenlik ve uyumluluk hizmetleri düzenli takip edilmediğinde riskler görünmez hale gelebilir. İzleme, test, raporlama veya danışmanlık süresinin bitmesi; zafiyetlerin geç fark edilmesine, e-posta tehditlerinin artmasına ve uyum süreçlerinde eksik kayıt oluşmasına neden olabilir. Risklerin büyümeden yönetilebilmesi için hizmet takviminin kesintisiz sürmesi önerilir.';
+    }
+
+    return 'Bu ürün veya hizmetin yenilemesi zamanında planlanmadığında lisans, destek, güncelleme veya erişim sürekliliği etkilenebilir. İlk anda sistem çalışıyor gibi görünse bile süre uzadıkça servis kısıtları, güvenlik açıkları, ek maliyetler veya kullanım kesintileri oluşabilir. Yenileme kararının süre dolmadan netleşmesi önerilir.';
+}
+
+function normalized_definition_name(string $name): string
+{
+    $name = mb_strtolower($name);
+
+    return str_replace(['ı', 'ğ', 'ü', 'ş', 'ö', 'ç', 'İ'], ['i', 'g', 'u', 's', 'o', 'c', 'i'], $name);
 }
 
 function seed_default_renewal_periods(PDO $pdo): void
