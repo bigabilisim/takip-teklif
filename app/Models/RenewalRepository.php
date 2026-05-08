@@ -2041,6 +2041,7 @@ final class RenewalRepository
                     r.brand,
                     r.kind,
                     r.license_key,
+                    r.payment_method AS renewal_payment_method,
                     r.renewal_date,
                     r.start_date,
                     c.company_name,
@@ -2074,6 +2075,7 @@ final class RenewalRepository
                     r.brand,
                     r.kind,
                     r.license_key,
+                    r.payment_method AS renewal_payment_method,
                     r.renewal_date,
                     r.start_date,
                     c.company_name,
@@ -2166,6 +2168,43 @@ final class RenewalRepository
                AND status = 'approved'
                AND COALESCE(parasut_invoice_id, '') = ''
              ORDER BY responded_at DESC, created_at DESC, id DESC
+             LIMIT 1"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function latestApprovedCustomerOfferWithParasutInvoice(int $renewalId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT cor.*,
+                    r.customer_id,
+                    r.title,
+                    r.brand,
+                    r.kind,
+                    r.license_key,
+                    r.payment_method AS renewal_payment_method,
+                    r.renewal_date,
+                    r.start_date,
+                    c.company_name,
+                    c.contact_name,
+                    c.email AS customer_email,
+                    c.phone AS customer_phone,
+                    c.tax_office AS customer_tax_office,
+                    c.tax_number AS customer_tax_number,
+                    c.city AS customer_city,
+                    c.district AS customer_district,
+                    c.address AS customer_address,
+                    c.parasut_contact_id
+             FROM customer_offer_requests cor
+             INNER JOIN renewals r ON r.id = cor.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             WHERE cor.renewal_id = :renewal_id
+               AND cor.status = 'approved'
+               AND COALESCE(cor.parasut_invoice_id, '') <> ''
+             ORDER BY cor.responded_at DESC, cor.created_at DESC, cor.id DESC
              LIMIT 1"
         );
         $stmt->execute(['renewal_id' => $renewalId]);
@@ -2375,6 +2414,23 @@ final class RenewalRepository
         ]);
 
         return $stmt->fetchAll();
+    }
+
+    public function latestPaidPayment(int $renewalId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT *
+             FROM renewal_payments
+             WHERE renewal_id = :renewal_id
+               AND status = 'paid'
+               AND COALESCE(payment_id, '') <> ''
+             ORDER BY COALESCE(paid_at, updated_at, created_at) DESC, id DESC
+             LIMIT 1"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
     }
 
     public function createIyzicoPayment(array $data): int

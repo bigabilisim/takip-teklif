@@ -175,7 +175,7 @@ final class ParasutClient
         return array_values($products);
     }
 
-    public function createSalesInvoiceFromOffer(array $offer, array $lines): array
+    public function createSalesInvoiceFromOffer(array $offer, array $lines, ?array $payment = null): array
     {
         $companyId = $this->companyId();
         $contactId = trim((string) ($offer['parasut_contact_id'] ?? ''));
@@ -232,7 +232,7 @@ final class ParasutClient
                     'description' => mb_substr($description, 0, 255),
                     'issue_date' => date('Y-m-d'),
                     'currency' => $currency,
-                    'invoice_note' => 'Bu fatura Hızlı Takip ve Teklif Platformu üzerinden onaylanan teklif #' . (int) ($offer['id'] ?? 0) . ' için oluşturuldu.',
+                    'invoice_note' => $this->salesInvoiceNote($offer, $payment),
                 ],
                 'relationships' => [
                     'contact' => [
@@ -259,6 +259,101 @@ final class ParasutClient
             'gross_total' => $attributes['gross_total'] ?? null,
             'raw' => $response,
         ];
+    }
+
+    public function updateSalesInvoiceNote(string $invoiceId, string $note): array
+    {
+        $invoiceId = trim($invoiceId);
+        if ($invoiceId === '') {
+            throw new RuntimeException('Paraşüt fatura ID boş olamaz.');
+        }
+
+        $companyId = $this->companyId();
+        $payload = [
+            'data' => [
+                'id' => $invoiceId,
+                'type' => 'sales_invoices',
+                'attributes' => [
+                    'invoice_note' => mb_substr(trim($note), 0, 5000),
+                ],
+            ],
+        ];
+
+        $response = $this->request('PUT', sprintf('/v4/%s/sales_invoices/%s?include=details,contact', rawurlencode($companyId), rawurlencode($invoiceId)), $payload);
+        $data = $response['data'] ?? [];
+        $attributes = is_array($data['attributes'] ?? null) ? $data['attributes'] : [];
+
+        return [
+            'id' => (string) ($data['id'] ?? $invoiceId),
+            'invoice_no' => (string) ($attributes['invoice_no'] ?? ''),
+            'invoice_note' => (string) ($attributes['invoice_note'] ?? ''),
+            'raw' => $response,
+        ];
+    }
+
+    public function salesInvoiceNote(array $offer, ?array $payment = null): string
+    {
+        $lines = [
+            'Bu fatura Hızlı Takip ve Teklif Platformu üzerinden onaylanan teklif #' . (int) ($offer['id'] ?? 0) . ' için oluşturuldu.',
+        ];
+
+        $method = trim((string) (($offer['renewal_payment_method'] ?? '') ?: ($offer['payment_method'] ?? '')));
+        $provider = $payment !== null ? $this->paymentProviderLabel((string) ($payment['provider'] ?? '')) : '';
+        if ($method === '' && $provider !== '') {
+            $method = 'Kredi kartı / ' . $provider;
+        } elseif ($method !== '' && $provider !== '' && !str_contains(mb_strtolower($method, 'UTF-8'), mb_strtolower($provider, 'UTF-8'))) {
+            $method .= ' / ' . $provider;
+        }
+
+        if ($method !== '') {
+            $lines[] = 'Ödeme yöntemi: ' . $method;
+        }
+
+        if ($payment !== null && $payment !== []) {
+            $paymentId = trim((string) ($payment['payment_id'] ?? ''));
+            $conversationId = trim((string) ($payment['conversation_id'] ?? ''));
+            $paidAt = trim((string) (($payment['paid_at'] ?? '') ?: ($payment['updated_at'] ?? '') ?: ($payment['created_at'] ?? '')));
+            $amount = $this->formatPaymentAmount($payment);
+
+            if ($paymentId !== '') {
+                $lines[] = 'Ödeme ID: ' . $paymentId;
+            }
+            if (!empty($payment['id'])) {
+                $lines[] = 'Sistem ödeme kayıt no: #' . (int) $payment['id'];
+            }
+            if ($conversationId !== '') {
+                $lines[] = 'Ödeme numarası / Conversation ID: ' . $conversationId;
+            }
+            if ($paidAt !== '') {
+                $timestamp = strtotime($paidAt);
+                $lines[] = 'Ödeme tarihi: ' . ($timestamp !== false ? date('d.m.Y H:i:s', $timestamp) : $paidAt);
+            }
+            if ($amount !== '') {
+                $lines[] = 'Ödeme tutarı: ' . $amount;
+            }
+        }
+
+        return mb_substr(implode("\n", $lines), 0, 5000);
+    }
+
+    private function paymentProviderLabel(string $provider): string
+    {
+        return match (mb_strtolower(trim($provider), 'UTF-8')) {
+            'iyzico' => 'iyzico',
+            'paytr' => 'PayTR',
+            default => trim($provider),
+        };
+    }
+
+    private function formatPaymentAmount(array $payment): string
+    {
+        if (!isset($payment['amount']) || (float) $payment['amount'] <= 0) {
+            return '';
+        }
+
+        $currency = strtoupper(trim((string) ($payment['currency'] ?? 'TRY'))) ?: 'TRY';
+
+        return number_format((float) $payment['amount'], 2, ',', '.') . ' ' . $currency;
     }
 
     private function contactSearchFilters(string $query): array

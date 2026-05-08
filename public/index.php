@@ -1015,6 +1015,8 @@ function create_parasut_invoice_for_customer_offer(RenewalRepository $repo, int 
     }
 
     if (trim((string) ($offer['parasut_invoice_id'] ?? '')) !== '') {
+        $noteUpdate = sync_parasut_invoice_note_for_offer($repo, $offer);
+
         return [
             'ok' => true,
             'already_created' => true,
@@ -1022,12 +1024,14 @@ function create_parasut_invoice_for_customer_offer(RenewalRepository $repo, int 
                 'id' => (string) ($offer['parasut_invoice_id'] ?? ''),
                 'invoice_no' => (string) ($offer['parasut_invoice_no'] ?? ''),
             ],
+            'note_update' => $noteUpdate,
         ];
     }
 
     try {
         $lines = $repo->customerOfferLines($offerId);
-        $invoice = (new ParasutClient())->createSalesInvoiceFromOffer($offer, $lines);
+        $payment = $repo->latestPaidPayment((int) ($offer['renewal_id'] ?? 0));
+        $invoice = (new ParasutClient())->createSalesInvoiceFromOffer($offer, $lines, $payment);
         if (trim((string) ($invoice['id'] ?? '')) === '') {
             throw new RuntimeException('Paraşüt fatura ID dönmedi.');
         }
@@ -1040,6 +1044,48 @@ function create_parasut_invoice_for_customer_offer(RenewalRepository $repo, int 
 
         return ['ok' => false, 'error' => $e->getMessage()];
     }
+}
+
+function sync_parasut_invoice_note_for_offer(RenewalRepository $repo, array $offer): ?array
+{
+    $invoiceId = trim((string) ($offer['parasut_invoice_id'] ?? ''));
+    $renewalId = (int) ($offer['renewal_id'] ?? 0);
+    if ($invoiceId === '' || $renewalId < 1) {
+        return null;
+    }
+
+    $payment = $repo->latestPaidPayment($renewalId);
+    if (!$payment) {
+        return null;
+    }
+
+    try {
+        $client = new ParasutClient();
+        $note = $client->salesInvoiceNote($offer, $payment);
+
+        return $client->updateSalesInvoiceNote($invoiceId, $note);
+    } catch (Throwable $e) {
+        error_log('Paraşüt fatura notu güncellenemedi: ' . $e->getMessage());
+
+        return [
+            'ok' => false,
+            'error' => $e->getMessage(),
+        ];
+    }
+}
+
+function sync_parasut_invoice_note_for_latest_paid_renewal(RenewalRepository $repo, int $renewalId): ?array
+{
+    if ($renewalId < 1) {
+        return null;
+    }
+
+    $offer = $repo->latestApprovedCustomerOfferWithParasutInvoice($renewalId);
+    if (!$offer) {
+        return null;
+    }
+
+    return sync_parasut_invoice_note_for_offer($repo, $offer);
 }
 
 function customer_offer_recipients_from_request(RenewalRepository $repo, array $row): array
@@ -3794,6 +3840,9 @@ function handle_iyzico_callback(string $method): void
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
         if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
             notify_payment_received($payment, $response, 'renewal');
+        }
+        if ($localStatus === 'paid') {
+            sync_parasut_invoice_note_for_latest_paid_renewal($repo, (int) ($payment['renewal_id'] ?? 0));
         }
     } catch (Throwable $e) {
         $message = $e->getMessage();

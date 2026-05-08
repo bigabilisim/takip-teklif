@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.12] - 2026-05-08
+
+- Paraşüt faturası oluşturulurken fatura notuna başarılı ödeme yöntemi, ödeme ID, sistem ödeme kayıt no, ödeme numarası, tarih ve tutar bilgileri otomatik eklenir.
+- Onaylı müşteri tekliflerinden oluşturulan Paraşüt faturaları artık en son başarılı ödeme kaydıyla ilişkilendirilmiş açıklama taşır.
+- Kart ödemesi fatura oluştuktan sonra tamamlanırsa mevcut Paraşüt faturasının notu ödeme bilgileriyle otomatik güncellenir.
+
 ## [2.0.11] - 2026-05-08
 
 - Yeni teklif oluşturma ekranındaki firma alanı mevcut carileri canlı arama ile listeleyecek hale getirildi.
