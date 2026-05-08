@@ -6305,11 +6305,14 @@ function render_offer_builder_item_row(int|string $index, array $item): string
             <strong>Kalem</strong>
             <button type="button" class="button small danger" data-offer-remove-line>Kaldır</button>
         </div>
-        <div class="form-grid three">
+        <div class="offer-line-info">
+            <span aria-hidden="true">i</span>
+            <p>Stok kataloğundan seçim yaparsanız marka, fiyat, KDV ve para birimi otomatik doldurulur.</p>
+        </div>
+        <div class="offer-builder-line-row">
             <label>
                 Ürün / hizmet
                 <input name="<?= h($namePrefix) ?>[title]" value="<?= h((string) ($item['title'] ?? '')) ?>" placeholder="Kamera, NVR, lisans..." list="stock-item-options" data-stock-title autocomplete="off" required>
-                <span class="field-help offer-stock-hint">Stok kataloğundan seçerseniz marka, fiyat, KDV ve para birimi otomatik gelir.</span>
             </label>
             <label>
                 Marka / model
@@ -6320,7 +6323,7 @@ function render_offer_builder_item_row(int|string $index, array $item): string
                 <input type="number" min="0.01" step="0.01" name="<?= h($namePrefix) ?>[quantity]" value="<?= h(number_format($quantity > 0 ? $quantity : 1, 2, '.', '')) ?>" data-offer-qty>
             </label>
         </div>
-        <div class="form-grid three">
+        <div class="offer-builder-line-row">
             <label>
                 Birim fiyat
                 <input type="number" min="0" step="0.01" name="<?= h($namePrefix) ?>[unit_price]" value="<?= h(number_format($unitPrice, 2, '.', '')) ?>" data-offer-unit>

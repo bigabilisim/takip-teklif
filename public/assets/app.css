@@ -1216,8 +1216,8 @@ h3 {
 
 .offer-builder-line {
     display: grid;
-    gap: 10px;
-    padding: 12px;
+    gap: 12px;
+    padding: 14px;
     border: 1px solid #dbe7e2;
     border-radius: 9px;
     background: #fbfdfc;
@@ -1228,6 +1228,46 @@ h3 {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+}
+
+.offer-line-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    width: fit-content;
+    max-width: 100%;
+    padding: 9px 11px;
+    border: 1px solid rgba(20, 132, 118, 0.22);
+    border-radius: 8px;
+    background: #eef8f5;
+    color: #5f7069;
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1.35;
+}
+
+.offer-line-info span {
+    display: inline-grid;
+    place-items: center;
+    flex: 0 0 20px;
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    background: #148476;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.offer-line-info p {
+    margin: 1px 0 0;
+}
+
+.offer-builder-line-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
 }
 
 .offer-line-preview {
@@ -6680,6 +6720,7 @@ label {
     .form-grid.three,
     .offer-builder-form,
     .offer-template-form,
+    .offer-builder-line-row,
     .section-fields.two,
     .item-grid,
     .grapesjs-test-card,

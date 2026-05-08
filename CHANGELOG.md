@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.14] - 2026-05-08
+
+- Yeni teklif kalemleri iki satırlı özel düzene alındı; stok kataloğu uyarısı `i` rozetli bilgi kutusu olarak gösterilir.
+
 ## [2.0.13] - 2026-05-08
 
 - Yeni teklif ekranında cari seçilince öneri kutusunun kapanması ve seçilen carinin e-posta/telefon bilgilerinin otomatik forma yazılması sağlamlaştırıldı.
