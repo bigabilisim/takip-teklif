@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.16] - 2026-05-08
+
+- Cari bilgi talebi mailleri artık Mail Logları ekranına başarılı veya başarısız durumuyla yazılır.
+- Mail gönderim sonucu, log ekranında gerçekten gönderime hazırlanan mail gövdesiyle takip edilebilir.
+
 ## [2.0.15] - 2026-05-08
 
 - Manuel ödeme linkinde canlı iyzico için müşteri e-postası eksikse kullanıcıdan e-posta alınıp kaydedildikten sonra kredi kartı ödeme akışı otomatik yeniden başlatılır.

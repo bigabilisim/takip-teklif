@@ -16,12 +16,17 @@ final class Mailer
 
     public static function sendWithResult(string $to, string $subject, string $body, bool $isHtml = false, array $inlineAttachments = [], array $attachments = []): array
     {
+        $preparedBody = $body;
+        $preparedIsHtml = $isHtml;
+
         try {
             $settings = self::settings();
             $driver = $settings['mail.driver'] ?? 'log';
             $branded = MailTemplate::prepareBrandedMail($settings, $body, $isHtml, $inlineAttachments);
             $body = (string) $branded['body'];
             $isHtml = (bool) $branded['is_html'];
+            $preparedBody = $body;
+            $preparedIsHtml = $isHtml;
             $inlineAttachments = is_array($branded['inline_attachments'] ?? null) ? $branded['inline_attachments'] : [];
             $inlineAttachments = $isHtml ? self::prepareInlineAttachments($inlineAttachments) : [];
             $attachments = self::prepareAttachments($attachments);
@@ -36,9 +41,9 @@ final class Mailer
                 self::sendLog($settings, $to, $subject, $body, $isHtml, $inlineAttachments, $attachments);
             }
 
-            return ['ok' => true, 'error' => null];
+            return ['ok' => true, 'error' => null, 'body' => $preparedBody, 'is_html' => $preparedIsHtml];
         } catch (\Throwable $e) {
-            return ['ok' => false, 'error' => $e->getMessage()];
+            return ['ok' => false, 'error' => $e->getMessage(), 'body' => $preparedBody, 'is_html' => $preparedIsHtml];
         }
     }
 

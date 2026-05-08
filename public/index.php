@@ -8487,6 +8487,13 @@ function send_customer_info_request(CustomerInfoRequestRepository $repo, array $
         (bool) $mail['is_html'],
         $mail['inline_attachments'] ?? []
     );
+    log_customer_info_request_mail(
+        $email,
+        'Cari bilgi formu',
+        (string) ($result['body'] ?? $mail['body']),
+        !empty($result['ok']) ? 'sent' : 'failed',
+        !empty($result['ok']) ? null : (string) ($result['error'] ?? 'Mail gönderimi başarısız.')
+    );
 
     if (!$result['ok']) {
         throw new RuntimeException((string) $result['error']);
@@ -8497,6 +8504,25 @@ function send_customer_info_request(CustomerInfoRequestRepository $repo, array $
         'request' => $request,
         'link' => $link,
     ];
+}
+
+function log_customer_info_request_mail(string $email, string $subject, string $body, string $status, ?string $error = null): void
+{
+    try {
+        $stmt = Database::connection()->prepare(
+            'INSERT INTO mail_logs (renewal_id, recipient_email, subject, body, status, error_message, sent_at)
+             VALUES (NULL, :recipient_email, :subject, :body, :status, :error_message, NOW())'
+        );
+        $stmt->execute([
+            'recipient_email' => $email,
+            'subject' => $subject,
+            'body' => $body,
+            'status' => $status === 'sent' ? 'sent' : 'failed',
+            'error_message' => $error,
+        ]);
+    } catch (Throwable $e) {
+        error_log('Cari bilgi talebi mail logu yazılamadı: ' . $e->getMessage());
+    }
 }
 
 function customer_info_whatsapp_message(array $request, string $link): string
