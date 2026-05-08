@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.8] - 2026-05-08
+
+- Dashboard sağ tarafı yeni teklif modülü olarak düzenlendi; yeni teklif butonu ve son teklif taslakları eklendi.
+- Ayarlar bölümüne teklif şablonları eklendi; boş teklif veya hazır şablondan teklif taslağı oluşturma akışı hazırlandı.
+
 ## [2.0.7] - 2026-05-08
 
 - Ürün/hizmet tanımlarının tamamı için kategori bazlı bilgilendirme açıklamaları eklendi.

@@ -506,6 +506,79 @@ CREATE TABLE supplier_unsubscriptions (
     INDEX idx_supplier_unsubscriptions_supplier (supplier_id, supplier_contact_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE offer_templates (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(190) NOT NULL,
+    description TEXT NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_by INT UNSIGNED NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_offer_templates_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_offer_templates_name (name),
+    INDEX idx_offer_templates_active (is_active, name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE offer_template_items (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    template_id INT UNSIGNED NOT NULL,
+    title VARCHAR(190) NOT NULL,
+    brand VARCHAR(120) NULL,
+    description TEXT NULL,
+    quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+    unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+    sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_offer_template_items_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE CASCADE,
+    INDEX idx_offer_template_items_template (template_id, sort_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE sales_offers (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    template_id INT UNSIGNED NULL,
+    title VARCHAR(190) NOT NULL,
+    customer_name VARCHAR(190) NOT NULL,
+    customer_email VARCHAR(190) NULL,
+    customer_phone VARCHAR(60) NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    status ENUM('draft', 'sent', 'approved', 'revision_requested', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+    subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    notes TEXT NULL,
+    created_by INT UNSIGNED NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
+    CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_sales_offers_status (status, updated_at),
+    INDEX idx_sales_offers_template (template_id),
+    INDEX idx_sales_offers_customer (customer_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE sales_offer_items (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    offer_id INT UNSIGNED NOT NULL,
+    title VARCHAR(190) NOT NULL,
+    brand VARCHAR(120) NULL,
+    description TEXT NULL,
+    quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+    unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+    line_subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    line_vat DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    line_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+    INDEX idx_sales_offer_items_offer (offer_id, sort_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE mail_logs (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     renewal_id INT UNSIGNED NULL,

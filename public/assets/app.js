@@ -643,6 +643,112 @@
         syncCustomerOfferTotals();
     });
 
+    document.querySelectorAll('[data-offer-builder-form]').forEach((offerForm) => {
+        const currencySelect = offerForm.querySelector('[data-offer-builder-currency]');
+        const subtotalOutput = offerForm.querySelector('[data-offer-subtotal]');
+        const vatOutput = offerForm.querySelector('[data-offer-vat]');
+        const totalOutput = offerForm.querySelector('[data-offer-total]');
+        const list = offerForm.querySelector('[data-offer-line-list]');
+        const template = offerForm.querySelector('[data-offer-line-template]');
+        const addButton = offerForm.querySelector('[data-offer-add-line]');
+        const numberValue = (input, fallback = 0) => {
+            const value = String(input?.value || '').replace(',', '.');
+            const parsed = Number(value);
+
+            return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const formatter = () => new Intl.NumberFormat('tr-TR', {
+            style: 'currency',
+            currency: currencySelect?.value || 'TRY',
+        });
+        const rows = () => Array.from(offerForm.querySelectorAll('[data-offer-line]'));
+        const reindexRows = () => {
+            rows().forEach((row, index) => {
+                row.querySelectorAll('[name]').forEach((input) => {
+                    input.name = input.name.replace(/items\[[^\]]+\]/, `items[${index}]`);
+                });
+            });
+        };
+        const updateRemoveButtons = () => {
+            const count = rows().length;
+            rows().forEach((row) => {
+                const remove = row.querySelector('[data-offer-remove-line]');
+                if (remove) {
+                    remove.disabled = count <= 1;
+                }
+            });
+        };
+        const syncTotals = () => {
+            let subtotal = 0;
+            let vatTotal = 0;
+            let total = 0;
+            rows().forEach((row) => {
+                const quantity = Math.max(0, numberValue(row.querySelector('[data-offer-qty]'), 1));
+                const unit = Math.max(0, numberValue(row.querySelector('[data-offer-unit]'), 0));
+                const vatRate = Math.max(0, numberValue(row.querySelector('[data-offer-vat-rate]'), 0));
+                const lineSubtotal = quantity * unit;
+                const lineVat = lineSubtotal * (vatRate / 100);
+                const lineTotal = lineSubtotal + lineVat;
+                subtotal += lineSubtotal;
+                vatTotal += lineVat;
+                total += lineTotal;
+
+                const subtotalPreview = row.querySelector('[data-offer-line-subtotal]');
+                const totalPreview = row.querySelector('[data-offer-line-total]');
+                if (subtotalPreview) {
+                    subtotalPreview.textContent = formatter().format(lineSubtotal);
+                }
+                if (totalPreview) {
+                    totalPreview.textContent = formatter().format(lineTotal);
+                }
+            });
+
+            if (subtotalOutput) {
+                subtotalOutput.textContent = formatter().format(subtotal);
+            }
+            if (vatOutput) {
+                vatOutput.textContent = formatter().format(vatTotal);
+            }
+            if (totalOutput) {
+                totalOutput.textContent = formatter().format(total);
+            }
+            updateRemoveButtons();
+        };
+
+        addButton?.addEventListener('click', () => {
+            if (!list || !template) {
+                return;
+            }
+            const index = rows().length;
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = template.innerHTML.replaceAll('__INDEX__', String(index)).trim();
+            const row = wrapper.firstElementChild;
+            if (row) {
+                list.appendChild(row);
+                reindexRows();
+                syncTotals();
+            }
+        });
+
+        offerForm.addEventListener('click', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const remove = target?.closest('[data-offer-remove-line]');
+            if (!remove) {
+                return;
+            }
+            const row = remove.closest('[data-offer-line]');
+            if (row && rows().length > 1) {
+                row.remove();
+                reindexRows();
+                syncTotals();
+            }
+        });
+        offerForm.addEventListener('input', syncTotals);
+        offerForm.addEventListener('change', syncTotals);
+        reindexRows();
+        syncTotals();
+    });
+
     document.querySelectorAll('[data-supplier-quote-card]').forEach((quoteCard) => {
         const currencySelect = quoteCard.querySelector('[data-supplier-price-currency]');
         const quantity = Math.max(0, Number(String(quoteCard.dataset.quantity || '1').replace(',', '.')) || 1);

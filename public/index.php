@@ -145,6 +145,9 @@ try {
             redirect('/');
         }
         render_renewals($repo);
+    } elseif ($path === '/offers/create') {
+        require_permission('renewals.manage');
+        handle_sales_offer_create($repo, $method);
     } elseif ($path === '/renewals/create') {
         require_permission('renewals.manage');
         handle_renewal_form($repo, $method);
@@ -289,6 +292,9 @@ try {
     } elseif ($path === '/settings/definitions') {
         require_permission('definitions.manage');
         handle_definitions($repo, $method);
+    } elseif ($path === '/settings/offer-templates') {
+        require_permission('settings.manage');
+        handle_offer_templates($repo, $method);
     } elseif ($path === '/settings/grapesjs') {
         require_permission('settings.manage');
         handle_grapesjs_template($method);
@@ -5375,6 +5381,7 @@ function render_dashboard(RenewalRepository $repo): void
 {
     $stats = $repo->stats();
     $upcoming = $repo->upcoming();
+    $salesOffers = $repo->dashboardSalesOffers();
     $canManageRenewals = Auth::can('renewals.manage');
     $canRequestCustomerInfo = Auth::can('customers.manage');
     $canViewRenewals = Auth::can('renewals.view');
@@ -5382,7 +5389,7 @@ function render_dashboard(RenewalRepository $repo): void
     $exchangeRates = ExchangeRates::latest();
     $customersForRequest = $canRequestCustomerInfo ? $repo->customers() : [];
 
-    render_layout('Dashboard', static function () use ($stats, $upcoming, $canManageRenewals, $canRequestCustomerInfo, $canViewRenewals, $showDetails, $exchangeRates, $customersForRequest): void {
+    render_layout('Dashboard', static function () use ($stats, $upcoming, $salesOffers, $canManageRenewals, $canRequestCustomerInfo, $canViewRenewals, $showDetails, $exchangeRates, $customersForRequest): void {
         ?>
         <div class="page-title">
             <div>
@@ -5395,6 +5402,7 @@ function render_dashboard(RenewalRepository $repo): void
                         <button type="button" class="button secondary" data-dialog-open="customer-info-request-dialog">Cari bilgi talep et</button>
                     <?php endif; ?>
                     <?php if ($canManageRenewals): ?>
+                        <a href="<?= h(url('/offers/create')) ?>" class="button primary">Yeni Teklif</a>
                         <details class="action-menu">
                             <summary class="button primary">Yeni Takip</summary>
                             <div class="action-menu-list">
@@ -5432,7 +5440,21 @@ function render_dashboard(RenewalRepository $repo): void
                     <?= render_dashboard_lane($upcoming, 'renewals', $canManageRenewals, false, true, 'Takipte ürün veya hizmet bulunmuyor.') ?>
                 </div>
 
-                <div class="dashboard-lane dashboard-lane-empty" aria-hidden="true"></div>
+                <div class="dashboard-lane dashboard-lane-offers">
+                    <div class="lane-head">
+                        <div>
+                            <p class="eyebrow">Teklifler</p>
+                            <h2>Hazırlanan teklifler</h2>
+                        </div>
+                        <div class="lane-head-actions">
+                            <span class="lane-count"><?= h((string) count($salesOffers)) ?></span>
+                            <?php if ($canManageRenewals): ?>
+                                <a class="button small primary" href="<?= h(url('/offers/create')) ?>">Yeni teklif</a>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <?= render_sales_offer_lane($salesOffers, $canManageRenewals) ?>
+                </div>
             </section>
         <?php else: ?>
             <section class="panel">
@@ -5445,6 +5467,471 @@ function render_dashboard(RenewalRepository $repo): void
         </div>
         <?php
     });
+}
+
+function handle_sales_offer_create(RenewalRepository $repo, string $method): void
+{
+    $templates = $repo->offerTemplates();
+    $templateId = max(0, (int) ($_GET['template_id'] ?? 0));
+    $blankMode = !empty($_GET['blank']);
+    $selectedTemplate = $templateId > 0 ? $repo->findOfferTemplate($templateId) : null;
+    $errors = [];
+    $formData = [
+        'template_id' => $selectedTemplate['id'] ?? null,
+        'offer_title' => $selectedTemplate ? (string) $selectedTemplate['name'] : '',
+        'customer_name' => '',
+        'customer_email' => '',
+        'customer_phone' => '',
+        'currency' => $selectedTemplate ? (string) $selectedTemplate['currency'] : 'TRY',
+        'notes' => $selectedTemplate ? (string) ($selectedTemplate['description'] ?? '') : '',
+        'items' => $selectedTemplate['items'] ?? [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']],
+    ];
+
+    if ($method === 'POST') {
+        verify_csrf();
+        $formData = $_POST;
+        $formData['created_by'] = (int) ($_SESSION['user_id'] ?? 0);
+
+        try {
+            $offerId = $repo->createSalesOffer($formData);
+            flash('success', 'Yeni teklif taslak olarak oluşturuldu: #' . $offerId);
+            redirect('/');
+        } catch (Throwable $e) {
+            $errors[] = $e->getMessage();
+        }
+    }
+
+    render_layout('Yeni Teklif', static function () use ($templates, $selectedTemplate, $blankMode, $errors, $formData): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Teklifler</p>
+                <h1>Yeni teklif oluştur</h1>
+            </div>
+            <div class="page-actions">
+                <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
+            </div>
+        </div>
+
+        <?php foreach ($errors as $error): ?>
+            <div class="alert error"><?= h($error) ?></div>
+        <?php endforeach; ?>
+
+        <?php if (!$blankMode && !$selectedTemplate && $errors === []): ?>
+            <section class="offer-start-grid">
+                <article class="offer-start-card blank">
+                    <span>Boş teklif</span>
+                    <h2>Şablonsuz yeni teklif aç</h2>
+                    <p>Müşteri, kalem ve fiyatları sıfırdan girerek teklif hazırlayın.</p>
+                    <a class="button primary" href="<?= h(url('/offers/create?blank=1')) ?>">Boş teklif aç</a>
+                </article>
+                <article class="offer-start-card">
+                    <span>Şablondan oluştur</span>
+                    <h2>Hazır teklif şablonu getir</h2>
+                    <p>Daha önce hazırladığınız kamera sistemi, lisans paketi veya hizmet tekliflerini tek tıkla başlatın.</p>
+                    <a class="button secondary" href="<?= h(url('/settings/offer-templates')) ?>">Şablonları yönet</a>
+                </article>
+                <?php foreach ($templates as $template): ?>
+                    <article class="offer-template-pick-card">
+                        <strong><?= h((string) $template['name']) ?></strong>
+                        <span><?= h((string) count((array) ($template['items'] ?? []))) ?> kalem · <?= h((string) $template['currency']) ?></span>
+                        <?php if (!empty($template['description'])): ?>
+                            <p><?= h((string) $template['description']) ?></p>
+                        <?php endif; ?>
+                        <a class="button small primary" href="<?= h(url('/offers/create?template_id=' . (int) $template['id'])) ?>">Şablonu getir</a>
+                    </article>
+                <?php endforeach; ?>
+            </section>
+        <?php else: ?>
+            <section class="panel offer-builder-panel">
+                <div class="section-head">
+                    <div>
+                        <h2><?= $selectedTemplate ? 'Şablondan teklif' : 'Boş teklif' ?></h2>
+                        <span><?= $selectedTemplate ? h((string) $selectedTemplate['name']) . ' şablonu ile başlatıldı.' : 'Kalemleri ve fiyatları kendiniz belirleyin.' ?></span>
+                    </div>
+                    <a class="button small secondary" href="<?= h(url('/offers/create')) ?>">Şablon seçimine dön</a>
+                </div>
+                <form method="post" class="form-grid offer-builder-form" data-offer-builder-form>
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="template_id" value="<?= h((string) ($formData['template_id'] ?? '')) ?>">
+                    <div class="form-grid three span-2">
+                        <label>
+                            Teklif başlığı
+                            <input name="offer_title" value="<?= h((string) ($formData['offer_title'] ?? '')) ?>" placeholder="Örn: 4 kameralı güvenlik sistemi" required>
+                        </label>
+                        <label>
+                            Firma / müşteri
+                            <input name="customer_name" value="<?= h((string) ($formData['customer_name'] ?? '')) ?>" required>
+                        </label>
+                        <label>
+                            Para birimi
+                            <select name="currency" data-offer-builder-currency>
+                                <?= option('TRY', 'TRY', (string) ($formData['currency'] ?? 'TRY')) ?>
+                                <?= option('USD', 'USD', (string) ($formData['currency'] ?? 'TRY')) ?>
+                                <?= option('EUR', 'EUR', (string) ($formData['currency'] ?? 'TRY')) ?>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="form-grid two span-2">
+                        <label>
+                            E-posta
+                            <input type="email" name="customer_email" value="<?= h((string) ($formData['customer_email'] ?? '')) ?>" placeholder="musteri@firma.com">
+                        </label>
+                        <label>
+                            Telefon
+                            <input name="customer_phone" value="<?= h((string) ($formData['customer_phone'] ?? '')) ?>" placeholder="0549 576 05 49">
+                        </label>
+                    </div>
+                    <label class="span-2">
+                        Not
+                        <textarea name="notes" rows="3" placeholder="Teklif özel notu, teslim süresi veya kapsam bilgisi"><?= h((string) ($formData['notes'] ?? '')) ?></textarea>
+                    </label>
+
+                    <div class="offer-line-editor span-2">
+                        <div class="section-head compact">
+                            <div>
+                                <h3>Teklif kalemleri</h3>
+                                <span>Şablondan gelen kalemleri değiştirebilir veya yeni kalem ekleyebilirsiniz.</span>
+                            </div>
+                            <button type="button" class="button small secondary" data-offer-add-line>+ Kalem ekle</button>
+                        </div>
+                        <div class="offer-line-list" data-offer-line-list>
+                            <?php foreach (array_values((array) ($formData['items'] ?? [])) as $index => $item): ?>
+                                <?= render_offer_builder_item_row((int) $index, (array) $item) ?>
+                            <?php endforeach; ?>
+                        </div>
+                        <template data-offer-line-template>
+                            <?= render_offer_builder_item_row('__INDEX__', []) ?>
+                        </template>
+                    </div>
+
+                    <div class="customer-offer-total-preview offer-builder-total span-2">
+                        <span>Ara toplam: <b data-offer-subtotal>-</b></span>
+                        <span>KDV: <b data-offer-vat>-</b></span>
+                        <span>KDV dahil: <b data-offer-total>-</b></span>
+                    </div>
+
+                    <div class="form-actions span-2">
+                        <a href="<?= h(url('/')) ?>" class="button secondary">Vazgeç</a>
+                        <button type="submit" class="button primary">Teklifi taslak oluştur</button>
+                    </div>
+                </form>
+            </section>
+        <?php endif; ?>
+        <?php
+    });
+}
+
+function handle_offer_templates(RenewalRepository $repo, string $method): void
+{
+    $errors = [];
+
+    if ($method === 'POST') {
+        verify_csrf();
+        $action = (string) ($_POST['action'] ?? 'create_template');
+
+        try {
+            if ($action === 'create_template') {
+                $data = $_POST;
+                $data['created_by'] = (int) ($_SESSION['user_id'] ?? 0);
+                $repo->createOfferTemplate($data);
+                flash('success', 'Teklif şablonu oluşturuldu.');
+                redirect('/settings/offer-templates');
+            }
+
+            if ($action === 'update_template') {
+                $repo->updateOfferTemplate((int) ($_POST['id'] ?? 0), $_POST);
+                flash('success', 'Teklif şablonu güncellendi.');
+                redirect('/settings/offer-templates');
+            }
+
+            if ($action === 'delete_template') {
+                $repo->deleteOfferTemplate((int) ($_POST['id'] ?? 0));
+                flash('success', 'Teklif şablonu silindi.');
+                redirect('/settings/offer-templates');
+            }
+        } catch (Throwable $e) {
+            $errors[] = $e->getMessage();
+        }
+    }
+
+    $templates = $repo->offerTemplates(true);
+
+    render_layout('Teklif Şablonları', static function () use ($templates, $errors): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Ayarlar</p>
+                <h1>Teklif şablonları</h1>
+            </div>
+            <div class="page-actions">
+                <button type="button" class="button primary" data-dialog-open="offer-template-create-dialog">Yeni şablon</button>
+                <a href="<?= h(url('/settings')) ?>" class="button secondary">Ayarlara dön</a>
+            </div>
+        </div>
+
+        <?php foreach ($errors as $error): ?>
+            <div class="alert error"><?= h($error) ?></div>
+        <?php endforeach; ?>
+
+        <section class="offer-template-board">
+            <?php if ($templates === []): ?>
+                <div class="empty">Henüz teklif şablonu yok. İlk şablonu oluşturup teklif tarafını hızlandırabilirsiniz.</div>
+            <?php endif; ?>
+            <?php foreach ($templates as $template): ?>
+                <article class="offer-template-card <?= empty($template['is_active']) ? 'inactive' : '' ?>">
+                    <div class="section-head compact">
+                        <div>
+                            <h2><?= h((string) $template['name']) ?></h2>
+                            <span><?= h((string) $template['currency']) ?> · <?= h((string) count((array) ($template['items'] ?? []))) ?> kalem</span>
+                        </div>
+                        <span class="badge <?= !empty($template['is_active']) ? 'active' : 'cancelled' ?>"><?= !empty($template['is_active']) ? 'Aktif' : 'Pasif' ?></span>
+                    </div>
+                    <?php if (!empty($template['description'])): ?>
+                        <p class="muted compact"><?= h((string) $template['description']) ?></p>
+                    <?php endif; ?>
+                    <details class="definition-card-details">
+                        <summary>
+                            <span>Detay</span>
+                            <strong>Düzenle</strong>
+                        </summary>
+                        <form method="post" class="form-grid offer-template-form" data-offer-builder-form>
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="action" value="update_template">
+                            <input type="hidden" name="id" value="<?= h((string) $template['id']) ?>">
+                            <?= render_offer_template_fields($template) ?>
+                            <div class="form-actions span-2">
+                                <button type="submit" class="button primary">Şablonu kaydet</button>
+                            </div>
+                        </form>
+                        <form method="post" class="definition-delete-form" onsubmit="return confirm('Bu teklif şablonu silinsin mi? Eski teklifler etkilenmez.')">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="action" value="delete_template">
+                            <input type="hidden" name="id" value="<?= h((string) $template['id']) ?>">
+                            <button type="submit" class="button danger small">Şablonu sil</button>
+                        </form>
+                    </details>
+                </article>
+            <?php endforeach; ?>
+        </section>
+
+        <dialog class="app-dialog definition-dialog offer-template-dialog" id="offer-template-create-dialog" <?= $errors !== [] ? 'data-auto-open-dialog' : '' ?>>
+            <div class="app-dialog-body">
+                <div class="section-head dialog-head">
+                    <div>
+                        <p class="eyebrow">Yeni şablon</p>
+                        <h2>Teklif şablonu oluştur</h2>
+                        <span>Örneğin “4 kameralı sistem” gibi sık kullanılan teklifleri buradan hazırlayın.</span>
+                    </div>
+                    <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+                </div>
+                <form method="post" class="form-grid offer-template-form" data-offer-builder-form>
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="create_template">
+                    <?= render_offer_template_fields(['currency' => 'TRY', 'items' => [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']]]) ?>
+                    <div class="form-actions span-2">
+                        <button type="button" class="button secondary" data-dialog-close>Vazgeç</button>
+                        <button type="submit" class="button primary">Şablonu oluştur</button>
+                    </div>
+                </form>
+            </div>
+        </dialog>
+        <?php
+    });
+}
+
+function render_sales_offer_lane(array $offers, bool $canManage): string
+{
+    if ($offers === []) {
+        return '<div class="empty lane-empty">Henüz teklif taslağı yok. Sağ tarafı artık teklif modülü için kullanıyoruz.</div>';
+    }
+
+    ob_start();
+    ?>
+    <div class="dashboard-card-list">
+        <?php foreach ($offers as $offer): ?>
+            <details class="dashboard-track-card offers sales-offer-card">
+                <summary class="track-summary">
+                    <span class="track-main">
+                        <small>Teklif / Cari</small>
+                        <strong><?= h((string) $offer['customer_name']) ?></strong>
+                        <em><?= h((string) $offer['title']) ?></em>
+                    </span>
+                    <span class="track-days">
+                        <small>Tutar</small>
+                        <strong><?= h(money_format_local($offer['total'] ?? 0, (string) ($offer['currency'] ?? 'TRY'))) ?></strong>
+                    </span>
+                    <span class="badge <?= h(sales_offer_status_badge((string) ($offer['status'] ?? 'draft'))) ?>">
+                        <?= h(sales_offer_status_label((string) ($offer['status'] ?? 'draft'))) ?>
+                    </span>
+                    <span class="track-toggle">Göster</span>
+                </summary>
+                <div class="track-body">
+                    <div class="track-meta-grid">
+                        <div>
+                            <span>Şablon</span>
+                            <strong><?= h((string) (($offer['template_name'] ?? '') ?: 'Boş teklif')) ?></strong>
+                        </div>
+                        <div>
+                            <span>Oluşturma</span>
+                            <strong><?= h(date('d.m.Y H:i', strtotime((string) $offer['created_at']))) ?></strong>
+                        </div>
+                        <div>
+                            <span>Ara toplam</span>
+                            <strong><?= h(money_format_local($offer['subtotal'] ?? 0, (string) ($offer['currency'] ?? 'TRY'))) ?></strong>
+                        </div>
+                        <div>
+                            <span>KDV dahil</span>
+                            <strong><?= h(money_format_local($offer['total'] ?? 0, (string) ($offer['currency'] ?? 'TRY'))) ?></strong>
+                        </div>
+                    </div>
+                    <?php if (!empty($offer['notes'])): ?>
+                        <div class="settings-note compact"><?= nl2br(h((string) $offer['notes']), false) ?></div>
+                    <?php endif; ?>
+                    <?php if ($canManage): ?>
+                        <div class="track-actions">
+                            <a class="button small secondary" href="<?= h(url('/offers/create')) ?>">Yeni teklif</a>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </details>
+        <?php endforeach; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function sales_offer_status_label(string $status): string
+{
+    return match ($status) {
+        'sent' => 'Gönderildi',
+        'approved' => 'Onaylandı',
+        'revision_requested' => 'Revize istendi',
+        'rejected' => 'Reddedildi',
+        'expired' => 'Süresi doldu',
+        default => 'Taslak',
+    };
+}
+
+function sales_offer_status_badge(string $status): string
+{
+    return match ($status) {
+        'approved' => 'active',
+        'revision_requested' => 'pending',
+        'rejected', 'expired' => 'cancelled',
+        'sent' => 'warning',
+        default => 'muted',
+    };
+}
+
+function render_offer_template_fields(array $template): string
+{
+    $items = (array) ($template['items'] ?? []);
+    if ($items === []) {
+        $items = [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']];
+    }
+
+    ob_start();
+    ?>
+    <div class="form-grid three span-2">
+        <label>
+            Şablon adı
+            <input name="template_name" value="<?= h((string) ($template['name'] ?? '')) ?>" placeholder="Örn: 4 kameralı sistem" required>
+        </label>
+        <label>
+            Para birimi
+            <select name="currency" data-offer-builder-currency>
+                <?= option('TRY', 'TRY', (string) ($template['currency'] ?? 'TRY')) ?>
+                <?= option('USD', 'USD', (string) ($template['currency'] ?? 'TRY')) ?>
+                <?= option('EUR', 'EUR', (string) ($template['currency'] ?? 'TRY')) ?>
+            </select>
+        </label>
+        <label>
+            Kısa açıklama
+            <input name="description" value="<?= h((string) ($template['description'] ?? '')) ?>" placeholder="Kamera paketi, lisans paketi...">
+        </label>
+    </div>
+
+    <div class="offer-line-editor span-2">
+        <div class="section-head compact">
+            <div>
+                <h3>Şablon kalemleri</h3>
+                <span>Yeni teklif açıldığında bu kalemler otomatik gelir.</span>
+            </div>
+            <button type="button" class="button small secondary" data-offer-add-line>+ Kalem ekle</button>
+        </div>
+        <div class="offer-line-list" data-offer-line-list>
+            <?php foreach (array_values($items) as $index => $item): ?>
+                <?= render_offer_builder_item_row((int) $index, (array) $item) ?>
+            <?php endforeach; ?>
+        </div>
+        <template data-offer-line-template>
+            <?= render_offer_builder_item_row('__INDEX__', []) ?>
+        </template>
+    </div>
+    <div class="customer-offer-total-preview offer-builder-total span-2">
+        <span>Ara toplam: <b data-offer-subtotal>-</b></span>
+        <span>KDV: <b data-offer-vat>-</b></span>
+        <span>KDV dahil: <b data-offer-total>-</b></span>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_offer_builder_item_row(int|string $index, array $item): string
+{
+    $quantity = (float) ($item['quantity'] ?? 1);
+    $unitPrice = (float) ($item['unit_price'] ?? 0);
+    $vatRate = (float) ($item['vat_rate'] ?? 20);
+    $lineSubtotal = $quantity * $unitPrice;
+    $lineTotal = $lineSubtotal + ($lineSubtotal * $vatRate / 100);
+    $namePrefix = 'items[' . (string) $index . ']';
+
+    ob_start();
+    ?>
+    <div class="offer-builder-line" data-offer-line>
+        <div class="offer-builder-line-head">
+            <strong>Kalem</strong>
+            <button type="button" class="button small danger" data-offer-remove-line>Kaldır</button>
+        </div>
+        <div class="form-grid three">
+            <label>
+                Ürün / hizmet
+                <input name="<?= h($namePrefix) ?>[title]" value="<?= h((string) ($item['title'] ?? '')) ?>" placeholder="Kamera, NVR, lisans..." required>
+            </label>
+            <label>
+                Marka / model
+                <input name="<?= h($namePrefix) ?>[brand]" value="<?= h((string) ($item['brand'] ?? '')) ?>" placeholder="Hikvision, Sophos...">
+            </label>
+            <label>
+                Adet
+                <input type="number" min="0.01" step="0.01" name="<?= h($namePrefix) ?>[quantity]" value="<?= h(number_format($quantity > 0 ? $quantity : 1, 2, '.', '')) ?>" data-offer-qty>
+            </label>
+        </div>
+        <div class="form-grid three">
+            <label>
+                Birim fiyat
+                <input type="number" min="0" step="0.01" name="<?= h($namePrefix) ?>[unit_price]" value="<?= h(number_format($unitPrice, 2, '.', '')) ?>" data-offer-unit>
+            </label>
+            <label>
+                KDV %
+                <input type="number" min="0" max="100" step="0.01" name="<?= h($namePrefix) ?>[vat_rate]" value="<?= h(number_format($vatRate, 2, '.', '')) ?>" data-offer-vat-rate>
+            </label>
+            <label>
+                Açıklama
+                <input name="<?= h($namePrefix) ?>[description]" value="<?= h((string) ($item['description'] ?? '')) ?>" placeholder="Montaj, teslim, kapsam...">
+            </label>
+        </div>
+        <div class="offer-line-preview">
+            <span>Toplam: <b data-offer-line-subtotal><?= h(money_format_local($lineSubtotal, 'TRY')) ?></b></span>
+            <span>KDV dahil: <b data-offer-line-total><?= h(money_format_local($lineTotal, 'TRY')) ?></b></span>
+        </div>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
 }
 
 function render_flows(RenewalRepository $repo): void
@@ -9372,6 +9859,7 @@ function handle_settings(string $method): void
                     <a href="<?= h(url('/settings/users')) ?>" class="button primary">Kullanıcılar</a>
                 <?php endif; ?>
                 <a href="<?= h(url('/settings/grapesjs')) ?>" class="button primary">Mail şablon tasarımı</a>
+                <a href="<?= h(url('/settings/offer-templates')) ?>" class="button secondary">Teklif şablonları</a>
                 <?php if ($canDefinitions): ?>
                     <a href="<?= h(url('/settings/definitions')) ?>" class="button secondary">Tanımlamalar</a>
                 <?php endif; ?>
@@ -9763,6 +10251,18 @@ function handle_settings(string $method): void
                         </div>
                         <button type="submit" class="button primary full">iyzico ayarlarını kaydet</button>
                     </form>
+                </div>
+
+                <div class="settings-card" data-settings-card data-settings-key="offer-templates" data-settings-group="integration">
+                    <div class="section-head">
+                        <h2>Teklif şablonları</h2>
+                        <span class="badge active">Şablon</span>
+                    </div>
+                    <div class="settings-note">
+                        <strong>Tekrarlı teklifleri hızlandırın</strong>
+                        <span>Kamera sistemi, lisans paketi veya bakım hizmeti gibi hazır kalemli teklifleri buradan yönetin.</span>
+                    </div>
+                    <a href="<?= h(url('/settings/offer-templates')) ?>" class="button secondary full settings-form">Teklif şablonlarını aç</a>
                 </div>
 
                 <div class="settings-card" id="bank-transfer-settings" data-settings-card data-settings-key="bank-transfer" data-settings-group="integration">

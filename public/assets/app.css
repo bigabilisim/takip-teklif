@@ -805,6 +805,14 @@ h3 {
     margin-bottom: 12px;
 }
 
+.lane-head-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .lane-head h2 {
     margin: 2px 0 0;
     font-size: 18px;
@@ -1065,6 +1073,119 @@ h3 {
     background: linear-gradient(180deg, #fbfcfb 0%, #ffffff 100%);
     border-style: dashed;
     box-shadow: none;
+}
+
+.sales-offer-card .track-summary {
+    grid-template-columns: minmax(0, 1fr) minmax(96px, auto) auto auto;
+}
+
+.offer-start-grid,
+.offer-template-board {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    align-items: start;
+}
+
+.offer-start-card,
+.offer-template-pick-card,
+.offer-template-card {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #ffffff;
+    box-shadow: 0 14px 32px rgba(18, 37, 34, 0.08);
+}
+
+.offer-start-card {
+    min-height: 185px;
+    align-content: start;
+    background: linear-gradient(180deg, #f2faf7 0%, #ffffff 70%);
+}
+
+.offer-start-card.blank {
+    border-color: rgba(20, 124, 114, 0.28);
+}
+
+.offer-start-card span,
+.offer-template-pick-card span {
+    color: var(--primary-strong);
+    font-size: 12px;
+    font-weight: 900;
+    text-transform: uppercase;
+}
+
+.offer-start-card h2,
+.offer-template-card h2 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 1.1;
+}
+
+.offer-start-card p,
+.offer-template-pick-card p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.offer-template-card.inactive {
+    opacity: 0.68;
+}
+
+.offer-builder-panel {
+    max-width: 1180px;
+}
+
+.offer-builder-form,
+.offer-template-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.offer-line-editor,
+.offer-line-list {
+    display: grid;
+    gap: 12px;
+}
+
+.offer-builder-line {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #dbe7e2;
+    border-radius: 9px;
+    background: #fbfdfc;
+}
+
+.offer-builder-line-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.offer-line-preview {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #e2ebe7;
+}
+
+.offer-line-preview span {
+    display: inline-flex;
+    gap: 6px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    background: #eef7f4;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
 }
 
 .collection-stats {
@@ -3872,6 +3993,10 @@ td.actions {
     grid-row: 5;
 }
 
+.settings-card[data-settings-key="offer-templates"] {
+    grid-row: 6;
+}
+
 .settings-card[data-settings-key="database"] {
     grid-row: 2;
 }
@@ -5966,6 +6091,11 @@ label {
         min-height: 180px;
     }
 
+    .offer-start-grid,
+    .offer-template-board {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .grid-2,
     .customer-board,
     .customers-layout,
@@ -6172,6 +6302,8 @@ label {
     .grid-2,
     .form-grid.two,
     .form-grid.three,
+    .offer-builder-form,
+    .offer-template-form,
     .section-fields.two,
     .item-grid,
     .grapesjs-test-card,
@@ -6230,6 +6362,12 @@ label {
     .dashboard-upcoming .renewal-summary,
     .dashboard-upcoming .renewal-summary-readonly {
         grid-template-columns: 1fr 1fr;
+    }
+
+    .offer-start-grid,
+    .offer-template-board,
+    .sales-offer-card .track-summary {
+        grid-template-columns: 1fr;
     }
 
     .renewal-days,

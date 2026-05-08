@@ -22,6 +22,7 @@ final class RenewalRepository
     private static bool $notificationDeliverySchemaEnsured = false;
     private static bool $supplierQuoteSchemaEnsured = false;
     private static bool $customerOfferSchemaEnsured = false;
+    private static bool $salesOfferSchemaEnsured = false;
     private static bool $phoneNormalizationEnsured = false;
 
     public function __construct()
@@ -37,6 +38,7 @@ final class RenewalRepository
         $this->ensureNotificationDeliverySchema();
         $this->ensureSupplierQuoteSchema();
         $this->ensureCustomerOfferSchema();
+        $this->ensureSalesOfferSchema();
         $this->ensurePhoneNormalization();
     }
 
@@ -635,6 +637,176 @@ final class RenewalRepository
             $this->db->query($sql)->fetchAll(),
             static fn (array $method): bool => !self::isRemovedPaymentMethodName((string) ($method['name'] ?? ''))
         ));
+    }
+
+    public function offerTemplates(bool $includeInactive = false): array
+    {
+        $sql = 'SELECT * FROM offer_templates';
+        if (!$includeInactive) {
+            $sql .= ' WHERE is_active = 1';
+        }
+        $sql .= ' ORDER BY is_active DESC, name ASC';
+
+        return $this->attachOfferTemplateItems($this->db->query($sql)->fetchAll());
+    }
+
+    public function findOfferTemplate(int $id): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM offer_templates WHERE id = :id AND is_active = 1 LIMIT 1');
+        $stmt->execute(['id' => $id]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+
+        return $this->attachOfferTemplateItems([$row])[0];
+    }
+
+    public function createOfferTemplate(array $data): int
+    {
+        $name = trim((string) ($data['template_name'] ?? $data['name'] ?? ''));
+        if ($name === '') {
+            throw new \RuntimeException('Teklif şablonu adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Şablon için en az bir kalem girin.');
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'INSERT INTO offer_templates
+                    (name, description, currency, is_active, created_by)
+                 VALUES
+                    (:name, :description, :currency, 1, :created_by)'
+            );
+            $stmt->execute([
+                'name' => $name,
+                'description' => $this->nullableString($data['description'] ?? ''),
+                'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
+                'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
+            ]);
+            $id = (int) $this->db->lastInsertId();
+            $this->replaceOfferTemplateItems($id, $items);
+            $this->db->commit();
+
+            return $id;
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function updateOfferTemplate(int $id, array $data): void
+    {
+        $name = trim((string) ($data['template_name'] ?? $data['name'] ?? ''));
+        if ($name === '') {
+            throw new \RuntimeException('Teklif şablonu adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Şablon için en az bir kalem girin.');
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE offer_templates
+                 SET name = :name,
+                     description = :description,
+                     currency = :currency,
+                     is_active = 1,
+                     updated_at = NOW()
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                'id' => $id,
+                'name' => $name,
+                'description' => $this->nullableString($data['description'] ?? ''),
+                'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
+            ]);
+            $this->replaceOfferTemplateItems($id, $items);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function deleteOfferTemplate(int $id): void
+    {
+        $stmt = $this->db->prepare('UPDATE offer_templates SET is_active = 0, updated_at = NOW() WHERE id = :id');
+        $stmt->execute(['id' => $id]);
+    }
+
+    public function dashboardSalesOffers(int $limit = 8): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT so.*,
+                    ot.name AS template_name
+             FROM sales_offers so
+             LEFT JOIN offer_templates ot ON ot.id = so.template_id
+             ORDER BY so.updated_at DESC, so.created_at DESC, so.id DESC
+             LIMIT :limit'
+        );
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    public function createSalesOffer(array $data): int
+    {
+        $title = trim((string) ($data['offer_title'] ?? $data['title'] ?? ''));
+        $customerName = trim((string) ($data['customer_name'] ?? ''));
+        if ($title === '') {
+            throw new \RuntimeException('Teklif başlığı zorunlu.');
+        }
+        if ($customerName === '') {
+            throw new \RuntimeException('Teklif için firma / müşteri adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Teklif için en az bir kalem girin.');
+        }
+
+        $currency = self::normalizeCurrency($data['currency'] ?? 'TRY');
+        $totals = $this->salesOfferTotals($items);
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'INSERT INTO sales_offers
+                    (template_id, title, customer_name, customer_email, customer_phone, currency, status, subtotal, vat_total, total, notes, created_by)
+                 VALUES
+                    (:template_id, :title, :customer_name, :customer_email, :customer_phone, :currency, :status, :subtotal, :vat_total, :total, :notes, :created_by)'
+            );
+            $stmt->execute([
+                'template_id' => empty($data['template_id']) ? null : (int) $data['template_id'],
+                'title' => $title,
+                'customer_name' => $customerName,
+                'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
+                'customer_phone' => $this->nullableString(\normalize_phone_number($data['customer_phone'] ?? '')),
+                'currency' => $currency,
+                'status' => 'draft',
+                'subtotal' => $totals['subtotal'],
+                'vat_total' => $totals['vat_total'],
+                'total' => $totals['total'],
+                'notes' => $this->nullableString($data['notes'] ?? ''),
+                'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
+            ]);
+            $id = (int) $this->db->lastInsertId();
+            $this->replaceSalesOfferItems($id, $items, $currency);
+            $this->db->commit();
+
+            return $id;
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
     }
 
     public function findPaymentMethodByName(string $name): ?array
@@ -3120,6 +3292,96 @@ final class RenewalRepository
         self::$customerOfferSchemaEnsured = true;
     }
 
+    private function ensureSalesOfferSchema(): void
+    {
+        if (self::$salesOfferSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS offer_templates (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(190) NOT NULL,
+                description TEXT NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_by INT UNSIGNED NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_offer_templates_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_offer_templates_name (name),
+                INDEX idx_offer_templates_active (is_active, name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS offer_template_items (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                template_id INT UNSIGNED NOT NULL,
+                title VARCHAR(190) NOT NULL,
+                brand VARCHAR(120) NULL,
+                description TEXT NULL,
+                quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+                unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_offer_template_items_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE CASCADE,
+                INDEX idx_offer_template_items_template (template_id, sort_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS sales_offers (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                template_id INT UNSIGNED NULL,
+                title VARCHAR(190) NOT NULL,
+                customer_name VARCHAR(190) NOT NULL,
+                customer_email VARCHAR(190) NULL,
+                customer_phone VARCHAR(60) NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                status ENUM('draft', 'sent', 'approved', 'revision_requested', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+                subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                notes TEXT NULL,
+                created_by INT UNSIGNED NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
+                CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                INDEX idx_sales_offers_status (status, updated_at),
+                INDEX idx_sales_offers_template (template_id),
+                INDEX idx_sales_offers_customer (customer_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS sales_offer_items (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_id INT UNSIGNED NOT NULL,
+                title VARCHAR(190) NOT NULL,
+                brand VARCHAR(120) NULL,
+                description TEXT NULL,
+                quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+                unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                line_subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                line_vat DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                line_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+                INDEX idx_sales_offer_items_offer (offer_id, sort_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        self::$salesOfferSchemaEnsured = true;
+    }
+
     private function ensurePhoneNormalization(): void
     {
         if (self::$phoneNormalizationEnsured) {
@@ -4426,6 +4688,148 @@ final class RenewalRepository
         }
 
         return $contacts;
+    }
+
+    private function attachOfferTemplateItems(array $templates): array
+    {
+        if ($templates === []) {
+            return [];
+        }
+
+        $ids = array_map(static fn (array $template): int => (int) $template['id'], $templates);
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM offer_template_items
+             WHERE template_id IN (' . $placeholders . ')
+             ORDER BY template_id ASC, sort_order ASC, id ASC'
+        );
+        $stmt->execute($ids);
+
+        $itemsByTemplate = [];
+        foreach ($stmt->fetchAll() as $item) {
+            $itemsByTemplate[(int) $item['template_id']][] = $item;
+        }
+
+        foreach ($templates as &$template) {
+            $template['items'] = $itemsByTemplate[(int) $template['id']] ?? [];
+        }
+        unset($template);
+
+        return $templates;
+    }
+
+    private function submittedSalesOfferItems(array $data): array
+    {
+        $rows = $data['items'] ?? [];
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $items = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $title = trim((string) ($row['title'] ?? ''));
+            $brand = trim((string) ($row['brand'] ?? ''));
+            $description = trim((string) ($row['description'] ?? ''));
+            $quantity = max(0.01, (float) str_replace(',', '.', (string) ($row['quantity'] ?? 1)));
+            $unitPrice = max(0.0, (float) str_replace(',', '.', (string) ($row['unit_price'] ?? 0)));
+            $vatRate = max(0.0, min(100.0, (float) str_replace(',', '.', (string) ($row['vat_rate'] ?? 20))));
+
+            if ($title === '' && $brand === '' && $description === '' && $unitPrice <= 0.0) {
+                continue;
+            }
+
+            $items[] = [
+                'title' => $title !== '' ? $title : 'Teklif kalemi',
+                'brand' => $brand,
+                'description' => $description,
+                'quantity' => $quantity,
+                'unit_price' => $unitPrice,
+                'vat_rate' => $vatRate,
+            ];
+        }
+
+        return $items;
+    }
+
+    private function replaceOfferTemplateItems(int $templateId, array $items): void
+    {
+        $this->db->prepare('DELETE FROM offer_template_items WHERE template_id = :template_id')
+            ->execute(['template_id' => $templateId]);
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO offer_template_items
+                (template_id, title, brand, description, quantity, unit_price, vat_rate, sort_order)
+             VALUES
+                (:template_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :sort_order)'
+        );
+
+        foreach (array_values($items) as $index => $item) {
+            $stmt->execute([
+                'template_id' => $templateId,
+                'title' => $item['title'],
+                'brand' => $this->nullableString($item['brand'] ?? ''),
+                'description' => $this->nullableString($item['description'] ?? ''),
+                'quantity' => $item['quantity'],
+                'unit_price' => $item['unit_price'],
+                'vat_rate' => $item['vat_rate'],
+                'sort_order' => $index,
+            ]);
+        }
+    }
+
+    private function replaceSalesOfferItems(int $offerId, array $items, string $currency): void
+    {
+        $this->db->prepare('DELETE FROM sales_offer_items WHERE offer_id = :offer_id')
+            ->execute(['offer_id' => $offerId]);
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO sales_offer_items
+                (offer_id, title, brand, description, quantity, unit_price, vat_rate, line_subtotal, line_vat, line_total, currency, sort_order)
+             VALUES
+                (:offer_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :line_subtotal, :line_vat, :line_total, :currency, :sort_order)'
+        );
+
+        foreach (array_values($items) as $index => $item) {
+            $lineSubtotal = round((float) $item['quantity'] * (float) $item['unit_price'], 2);
+            $lineVat = round($lineSubtotal * ((float) $item['vat_rate'] / 100), 2);
+            $lineTotal = round($lineSubtotal + $lineVat, 2);
+            $stmt->execute([
+                'offer_id' => $offerId,
+                'title' => $item['title'],
+                'brand' => $this->nullableString($item['brand'] ?? ''),
+                'description' => $this->nullableString($item['description'] ?? ''),
+                'quantity' => $item['quantity'],
+                'unit_price' => $item['unit_price'],
+                'vat_rate' => $item['vat_rate'],
+                'line_subtotal' => $lineSubtotal,
+                'line_vat' => $lineVat,
+                'line_total' => $lineTotal,
+                'currency' => $currency,
+                'sort_order' => $index,
+            ]);
+        }
+    }
+
+    private function salesOfferTotals(array $items): array
+    {
+        $subtotal = 0.0;
+        $vatTotal = 0.0;
+        foreach ($items as $item) {
+            $lineSubtotal = (float) $item['quantity'] * (float) $item['unit_price'];
+            $subtotal += $lineSubtotal;
+            $vatTotal += $lineSubtotal * ((float) $item['vat_rate'] / 100);
+        }
+
+        return [
+            'subtotal' => round($subtotal, 2),
+            'vat_total' => round($vatTotal, 2),
+            'total' => round($subtotal + $vatTotal, 2),
+        ];
     }
 
     private function baseSelect(): string
