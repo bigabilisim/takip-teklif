@@ -9,6 +9,8 @@ use PDO;
 
 final class RenewalRepository
 {
+    private const STANDARD_REMINDER_DAYS = [30, 20, 15, 7];
+
     private PDO $db;
     private static bool $invoiceSchemaEnsured = false;
     private static bool $paymentSchemaEnsured = false;
@@ -297,7 +299,8 @@ final class RenewalRepository
                       SELECT 1
                       FROM renewal_reminder_rules rrr
                       WHERE rrr.renewal_id = r.id
-                        AND DATEDIFF(r.renewal_date, CURDATE()) <= rrr.days_before
+                        AND rrr.days_before > 7
+                        AND DATEDIFF(r.renewal_date, CURDATE()) = rrr.days_before
                   )
                   OR (
                       NOT EXISTS (
@@ -305,7 +308,7 @@ final class RenewalRepository
                           FROM renewal_reminder_rules rrf
                           WHERE rrf.renewal_id = r.id
                       )
-                      AND r.renewal_date <= DATE_ADD(CURDATE(), INTERVAL r.reminder_days DAY)
+                      AND DATEDIFF(r.renewal_date, CURDATE()) = r.reminder_days
                   )
               )
               AND (r.last_notified_at IS NULL OR DATE(r.last_notified_at) < CURDATE())
@@ -3127,7 +3130,51 @@ final class RenewalRepository
         );
 
         $this->seedExistingRenewalItems();
+        $this->standardizeReminderRulesForExistingRenewals();
         self::$itemSchemaEnsured = true;
+    }
+
+    private function standardizeReminderRulesForExistingRenewals(): void
+    {
+        try {
+            $this->db->exec(
+                "CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key VARCHAR(120) PRIMARY KEY,
+                    setting_value MEDIUMTEXT NULL,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+
+            $key = 'maintenance.standard_reminder_rules_v1';
+            $stmt = $this->db->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :setting_key LIMIT 1');
+            $stmt->execute(['setting_key' => $key]);
+            if ((string) $stmt->fetchColumn() === '1') {
+                return;
+            }
+
+            $this->db->exec('UPDATE renewals SET reminder_days = 30 WHERE reminder_days <> 30');
+            $this->db->exec('DELETE FROM renewal_reminder_rules');
+            $this->db->exec(
+                'INSERT IGNORE INTO renewal_reminder_rules (renewal_id, days_before)
+                 SELECT r.id, reminder_days.days_before
+                 FROM renewals r
+                 JOIN (
+                     SELECT 30 AS days_before
+                     UNION ALL SELECT 20
+                     UNION ALL SELECT 15
+                     UNION ALL SELECT 7
+                 ) reminder_days'
+            );
+
+            $doneStmt = $this->db->prepare(
+                'INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                 VALUES (:setting_key, "1", NOW())
+                 ON DUPLICATE KEY UPDATE setting_value = "1", updated_at = NOW()'
+            );
+            $doneStmt->execute(['setting_key' => $key]);
+        } catch (\Throwable) {
+            // Reminder maintenance should not block the application if the host limits writes.
+        }
     }
 
     private function seedExistingRenewalItems(): void
@@ -3850,7 +3897,7 @@ final class RenewalRepository
     {
         $rows = $data['reminder_rules'] ?? null;
         if (!is_array($rows)) {
-            $rows = [$data['reminder_days'] ?? \app_config('reminders.default_days_before', 30)];
+            $rows = self::STANDARD_REMINDER_DAYS;
         }
 
         $days = [];
@@ -3861,7 +3908,9 @@ final class RenewalRepository
             }
         }
 
-        $days[7] = 7;
+        foreach (self::STANDARD_REMINDER_DAYS as $standardDay) {
+            $days[$standardDay] = $standardDay;
+        }
 
         rsort($days, SORT_NUMERIC);
 

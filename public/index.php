@@ -6373,7 +6373,7 @@ function handle_renewal_form(RenewalRepository $repo, string $method, ?int $id =
                                     <?= render_reminder_input_row((int) $index, (int) $day) ?>
                                 <?php endforeach; ?>
                             </div>
-                            <span class="muted compact">7 gün kala günlük bildirim aktiftir.</span>
+                            <span class="muted compact">30, 20 ve 15 gün kala bilgilendirme; 7 gün ve altında günlük bildirim aktiftir.</span>
                         </div>
 
                         <div class="contact-editor supplier-price-box">
@@ -7671,7 +7671,7 @@ function renewal_reminder_days(?array $renewal = null): array
     }
 
     if (!is_array($rows) || $rows === []) {
-        $rows = [app_config('reminders.default_days_before', 30), 7];
+        $rows = [30, 20, 15, 7];
     }
 
     $days = [];
@@ -7682,7 +7682,9 @@ function renewal_reminder_days(?array $renewal = null): array
         }
     }
 
-    $days[7] = 7;
+    foreach ([30, 20, 15, 7] as $standardDay) {
+        $days[$standardDay] = $standardDay;
+    }
     rsort($days, SORT_NUMERIC);
 
     return array_values($days ?: [7]);
@@ -12071,12 +12073,12 @@ function renewal_can_acknowledge(array $row, ?int $days): bool
 
     $ruleDays = array_filter(array_map('intval', explode(',', (string) ($row['reminder_rule_days'] ?? ''))));
     foreach ($ruleDays as $ruleDay) {
-        if ($ruleDay > 0 && $days <= $ruleDay) {
+        if ($ruleDay > 7 && $days === $ruleDay) {
             return true;
         }
     }
 
-    return $days <= (int) ($row['reminder_days'] ?? 0);
+    return $days === (int) ($row['reminder_days'] ?? 0);
 }
 
 function collection_filter_options(): array

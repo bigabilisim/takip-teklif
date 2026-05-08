@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.5] - 2026-05-08
+
+- Tüm yenileme kartları için bilgilendirme günleri 30, 20, 15 ve 7 gün olarak standart hale getirildi.
+- Bilgilendirme gönderim mantığı 30/20/15 günlerde tekil, 7 gün ve altında günlük tekrar olacak şekilde düzenlendi.
+
 ## [2.0.4] - 2026-05-08
 
 - Yenileme bilgilendirme maillerinden kredi kartı ödeme linki ve butonu kaldırıldı.
