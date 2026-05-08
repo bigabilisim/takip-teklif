@@ -1068,6 +1068,10 @@
 
             return preferred ? String(preferred[key] || '').trim() : '';
         };
+        const closeResults = () => {
+            results.hidden = true;
+            results.innerHTML = '';
+        };
         const customerSearchValue = (customer) => normalizeSearchText([
             customer.name,
             customer.email,
@@ -1080,20 +1084,29 @@
             ]),
         ].join(' '));
         const selectCustomer = (customer) => {
-            input.value = String(customer.name || '');
+            const customerName = String(customer.name || '');
             const nextEmail = String(customer.email || '').trim() || preferredContactValue(customer, 'email');
             const nextPhone = String(customer.phone || '').trim() || preferredContactValue(customer, 'phone');
-            if (email && nextEmail) {
+
+            input.value = customerName;
+            input.dataset.selectedCustomerId = String(customer.id || '');
+            if (email) {
                 email.value = nextEmail;
             }
-            if (phone && nextPhone) {
+            if (phone) {
                 phone.value = nextPhone;
             }
-            results.hidden = true;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            closeResults();
         };
         const renderResults = () => {
             const query = normalizeSearchText(input.value);
             results.innerHTML = '';
+
+            if (input.dataset.selectedCustomerId && query !== '' && offerCustomers.some((customer) => String(customer.id || '') === input.dataset.selectedCustomerId && normalizeSearchText(customer.name || '') === query)) {
+                closeResults();
+                return;
+            }
 
             if (!Array.isArray(offerCustomers) || offerCustomers.length < 1) {
                 results.innerHTML = '<div class="offer-customer-empty">Kayıtlı cari bulunamadı. Manuel yazabilirsiniz.</div>';
@@ -1124,22 +1137,29 @@
                     <strong>${escapeHtml(customer.name || '-')}</strong>
                     <span>${escapeHtml(meta)}</span>
                 `;
+                button.addEventListener('mousedown', (event) => {
+                    event.preventDefault();
+                    selectCustomer(customer);
+                });
                 button.addEventListener('click', () => selectCustomer(customer));
                 results.appendChild(button);
             });
             results.hidden = false;
         };
 
-        input.addEventListener('input', renderResults);
+        input.addEventListener('input', () => {
+            input.dataset.selectedCustomerId = '';
+            renderResults();
+        });
         input.addEventListener('focus', renderResults);
         input.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
-                results.hidden = true;
+                closeResults();
             }
         });
         document.addEventListener('click', (event) => {
             if (!form.contains(event.target)) {
-                results.hidden = true;
+                closeResults();
             }
         });
     });

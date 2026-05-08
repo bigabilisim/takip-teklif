@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.13] - 2026-05-08
+
+- Yeni teklif ekranında cari seçilince öneri kutusunun kapanması ve seçilen carinin e-posta/telefon bilgilerinin otomatik forma yazılması sağlamlaştırıldı.
+
 ## [2.0.12] - 2026-05-08
 
 - Paraşüt faturası oluşturulurken fatura notuna başarılı ödeme yöntemi, ödeme ID, sistem ödeme kayıt no, ödeme numarası, tarih ve tutar bilgileri otomatik eklenir.
