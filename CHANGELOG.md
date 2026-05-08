@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.4] - 2026-05-08
+
+- Yenileme bilgilendirme maillerinden kredi kartı ödeme linki ve butonu kaldırıldı.
+- Mail şablon tasarımındaki kredi kartı ödeme alanları bilgilendirme şablonu kullanılabilir alanlarından çıkarıldı.
+
 ## [2.0.3] - 2026-05-08
 
 - Alan adı ve hosting yenilemeleri için daha doğal, satış baskısı oluşturmayan ancak servis kesintisi riskini anlatan bilgilendirme metni eklendi.

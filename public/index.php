@@ -1486,7 +1486,6 @@ function manual_renewal_mail_body(array $row, string $message): string
     $days = days_until($row['renewal_date'] ?? null);
     $daysLabel = $days === null ? '-' : ($days < 0 ? abs($days) . ' gün geçti' : $days . ' gün');
     $total = money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
-    $paymentLink = PaymentLink::urlForRenewal((int) $row['id'], 60);
     $summaryLink = renewal_summary_url((int) $row['id'], 60);
 
     return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;font-family:Arial,sans-serif;color:#17201c;">'
@@ -1505,7 +1504,6 @@ function manual_renewal_mail_body(array $row, string $message): string
         . manual_mail_row('Ödeme şekli', renewal_payment_label($row))
         . '</table>'
         . '<p style="margin:20px 0 0;"><a href="' . h($summaryLink) . '" style="display:inline-block;background:#eef6f3;color:#0f625b;text-decoration:none;border:1px solid #cfe1db;border-radius:8px;padding:13px 18px;font-weight:700;">PDF / özet sayfasını aç</a></p>'
-        . '<p style="margin:10px 0 0;"><a href="' . h($paymentLink) . '" style="display:inline-block;background:#101b18;color:#ffffff;text-decoration:none;border-radius:8px;padding:13px 18px;font-weight:700;">Ödeme / tercih ekranını aç</a></p>'
         . '</td></tr></table></td></tr></table></body></html>';
 }
 
@@ -8968,18 +8966,6 @@ function template_placeholders(): array
             'label' => 'Ürün satırları',
             'token' => '{{items_table}}',
             'description' => 'Birden fazla ürün varsa ürün, adet ve KDV dahil tutar tablosunu ekler.',
-        ],
-        [
-            'key' => 'payment_action',
-            'label' => 'Kredi kartı ödeme butonu',
-            'token' => '{{payment_action}}',
-            'description' => 'Güvenli kredi kartı ödeme sayfasına doğrudan yönlendiren premium butonu ekler.',
-        ],
-        [
-            'key' => 'payment_choice_url',
-            'label' => 'Kredi kartı ödeme linki',
-            'token' => '{{payment_choice_url}}',
-            'description' => 'Kredi kartı ödeme sayfasına giden güvenli bağlantıyı yazar.',
         ],
         [
             'key' => 'read_ack_action',

@@ -99,8 +99,6 @@ final class MailTemplate
 
               {{items_table}}
 
-              {{payment_action}}
-
               {{read_ack_action}}
 
               <table class="definition-info" role="presentation" width="100%" cellpadding="0" cellspacing="0">
@@ -554,9 +552,9 @@ CSS;
         $html = self::normalizeRemainingMetric($html);
         $html = self::normalizeMetricRow($html);
         $html = self::removeDisabledTemplateFields($html);
+        $html = self::removePaymentTemplateFields($html);
         $html = self::ensurePaymentMethodRow($html);
         $html = self::ensureTotalAmountRow($html);
-        $html = self::ensurePaymentActionBlock($html);
         $html = self::ensureReadAckActionBlock($html);
         $html = self::ensureDefinitionInfoBlock($html);
 
@@ -799,7 +797,6 @@ CSS;
             'Bir Önceki Fatura Numarası: ' . self::invoiceNumberLabel($row),
             'Ödeme şekli: ' . self::paymentMethodLabel($row),
             'Toplam: ' . self::totalAmountLabel($row) . ' KDV dahil',
-            self::paymentActionText($row, $recipient),
             self::readAckActionText($recipient),
             'Bilgilendirme:',
             self::definitionInfoLabel($row),
@@ -825,8 +822,8 @@ CSS;
             'payment_method' => self::escape(self::paymentMethodLabel($row)),
             'total_amount' => self::escape(self::totalAmountLabel($row)),
             'items_table' => self::itemsTableHtml($row),
-            'payment_choice_url' => self::escape(self::creditCardPaymentUrl($row, $recipient)),
-            'payment_action' => self::paymentActionHtml($row, $recipient),
+            'payment_choice_url' => '',
+            'payment_action' => '',
             'read_ack_url' => self::escape((string) ($recipient['read_ack_url'] ?? '')),
             'read_ack_action' => self::readAckActionHtml($recipient),
             'definition_notification_info' => nl2br(self::escape(self::definitionInfoLabel($row)), false),
@@ -935,27 +932,12 @@ CSS;
 
     private static function paymentActionHtml(array $row, array $recipient): string
     {
-        if (!self::shouldShowPaymentAction($row)) {
-            return '';
-        }
-
-        $url = self::escape(self::creditCardPaymentUrl($row, $recipient));
-
-        return '<table class="payment-action" role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            . '<tr><td>'
-            . '<strong>Kredi kartı ile güvenli ödeme</strong>'
-            . '<p>Yenileme işlemini hızlandırmak için güvenli kredi kartı ödeme sayfasına doğrudan geçebilirsiniz.</p>'
-            . '<a class="payment-button" href="' . $url . '">Kredi kartı ile hemen öde</a>'
-            . '</td></tr></table>';
+        return '';
     }
 
     private static function paymentActionText(array $row, array $recipient): string
     {
-        if (!self::shouldShowPaymentAction($row)) {
-            return '';
-        }
-
-        return 'Kredi kartı ile hemen öde: ' . self::creditCardPaymentUrl($row, $recipient);
+        return '';
     }
 
     private static function readAckActionHtml(array $recipient): string
@@ -999,7 +981,7 @@ CSS;
 
     private static function shouldShowPaymentAction(array $row): bool
     {
-        return (int) ($row['id'] ?? 0) > 0;
+        return false;
     }
 
     private static function definitionInfoLabel(array $row): string
@@ -1316,6 +1298,18 @@ CSS;
         return $html;
     }
 
+    private static function removePaymentTemplateFields(string $html): string
+    {
+        $tokens = '\{\{payment_action\}\}';
+        foreach (['table', 'div', 'p', 'span', 'a'] as $tag) {
+            $html = preg_replace('#\s*<' . $tag . '\b[^>]*>(?:(?!</' . $tag . '>).)*' . $tokens . '(?:(?!</' . $tag . '>).)*</' . $tag . '>#isu', '', $html) ?? $html;
+        }
+
+        $html = preg_replace('#\s*<a\b[^>]*\{\{payment_choice_url\}\}[^>]*>.*?</a>#isu', '', $html) ?? $html;
+
+        return str_replace(['{{payment_action}}', '{{payment_choice_url}}'], '', $html);
+    }
+
     private static function ensurePaymentMethodRow(string $html): string
     {
         if (str_contains($html, '{{payment_method}}')) {
@@ -1394,30 +1388,6 @@ CSS;
 
     private static function ensurePaymentActionBlock(string $html): string
     {
-        if (str_contains($html, '{{payment_action}}')) {
-            return $html;
-        }
-
-        $block = "\n\n              {{payment_action}}";
-        $inserted = false;
-
-        $afterInfoTable = preg_replace_callback(
-            '#<table\b[^>]*>.*?</table>#is',
-            static function (array $matches) use ($block, &$inserted): string {
-                if ($inserted || !self::tagHasClass($matches[0], 'info-table')) {
-                    return $matches[0];
-                }
-
-                $inserted = true;
-                return $matches[0] . $block;
-            },
-            $html
-        );
-
-        if ($afterInfoTable !== null && $inserted) {
-            return $afterInfoTable;
-        }
-
         return $html;
     }
 
@@ -1425,10 +1395,6 @@ CSS;
     {
         if (str_contains($html, '{{read_ack_action}}')) {
             return $html;
-        }
-
-        if (str_contains($html, '{{payment_action}}')) {
-            return preg_replace('/\{\{payment_action\}\}/', "{{payment_action}}\n\n              {{read_ack_action}}", $html, 1) ?? $html;
         }
 
         $block = "\n\n              {{read_ack_action}}";
