@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.6] - 2026-05-08
+
+- Onaylı müşteri teklifleri için Paraşüt faturası otomatik oluşmazsa dashboard aksiyonlarına manuel gönderim tuşu eklendi.
+- Müşteri teklif geçmişindeki Paraşüt fatura aksiyonu “Manuel Paraşüt'e gönder” olarak netleştirildi.
+
 ## [2.0.5] - 2026-05-08
 
 - Tüm yenileme kartları için bilgilendirme günleri 30, 20, 15 ve 7 gün olarak standart hale getirildi.

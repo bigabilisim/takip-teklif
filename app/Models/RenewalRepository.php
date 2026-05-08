@@ -1672,6 +1672,32 @@ final class RenewalRepository
         return $offers;
     }
 
+    public function latestApprovedCustomerOfferWaitingParasut(int $renewalId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT id,
+                    renewal_id,
+                    recipient_name,
+                    recipient_email,
+                    total,
+                    currency,
+                    parasut_invoice_status,
+                    parasut_invoice_error,
+                    responded_at,
+                    created_at
+             FROM customer_offer_requests
+             WHERE renewal_id = :renewal_id
+               AND status = 'approved'
+               AND COALESCE(parasut_invoice_id, '') = ''
+             ORDER BY responded_at DESC, created_at DESC, id DESC
+             LIMIT 1"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
     public function deleteCustomerOffer(int $offerId): ?array
     {
         $stmt = $this->db->prepare(

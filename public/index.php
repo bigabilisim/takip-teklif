@@ -4968,7 +4968,7 @@ function handle_customer_offer_public(string $method, string $token): void
                             <?php $invoice = (array) ($parasutInvoiceSummary['invoice'] ?? []); ?>
                             <p class="muted compact">Fatura aktarımı: Paraşüt faturası oluşturuldu<?= !empty($invoice['invoice_no']) ? ' (' . h((string) $invoice['invoice_no']) . ')' : '' ?>.</p>
                         <?php else: ?>
-                            <p class="muted compact">Fatura aktarımı firma yetkilisi tarafından kontrol edilecek.</p>
+                            <p class="muted compact">Fatura aktarımı firma yetkilisi tarafından kontrol edilecek; panelden Manuel Paraşüt'e gönder ile tekrar denenebilir.</p>
                         <?php endif; ?>
                         <?php if ($paymentUrl !== ''): ?>
                             <a class="button primary" href="<?= h($paymentUrl) ?>">Ödeme seçimine geç</a>
@@ -10702,6 +10702,15 @@ function render_renewal_table(array $rows, bool $withActions, bool $withReminder
 
 function render_renewal_actions(array $row, bool $canManage, bool $canDelete, bool $canAcknowledge, bool $canNotify = false): string
 {
+    $manualParasutOffer = null;
+    if ($canManage) {
+        try {
+            $manualParasutOffer = (new RenewalRepository())->latestApprovedCustomerOfferWaitingParasut((int) $row['id']);
+        } catch (Throwable) {
+            $manualParasutOffer = null;
+        }
+    }
+
     ob_start();
     ?>
     <div class="renewal-actions">
@@ -10725,6 +10734,13 @@ function render_renewal_actions(array $row, bool $canManage, bool $canDelete, bo
         <?php endif; ?>
         <?php if ($canManage): ?>
             <button type="button" class="button small primary" data-dialog-open="renewal-customer-send-<?= h($row['id']) ?>">Müşteriye gönder</button>
+            <?php if ($manualParasutOffer): ?>
+                <form method="post" action="<?= h(url('/customer-offers/' . (int) $manualParasutOffer['id'] . '/parasut-invoice')) ?>" onsubmit="return confirm('Onaylı müşteri teklifini manuel olarak Paraşüt faturası şeklinde oluşturalım mı?')">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="return_to" value="<?= h($_SERVER['REQUEST_URI'] ?? route_path()) ?>">
+                    <button type="submit" class="button small primary">Manuel Paraşüt'e gönder</button>
+                </form>
+            <?php endif; ?>
             <button type="button" class="button small secondary" data-dialog-open="manual-price-<?= h($row['id']) ?>">Manuel fiyat ver</button>
             <button type="button" class="button small supplier-price" data-dialog-open="supplier-price-<?= h($row['id']) ?>">Tedarikçiden fiyat al</button>
             <a href="<?= h(url('/renewals/' . $row['id'] . '/edit')) ?>" class="button small">Düzenle</a>
@@ -11295,16 +11311,16 @@ function render_customer_offer_history(array $offers): string
                             <?php elseif ($parasutStatus === 'failed'): ?>
                                 <span>Oluşturulamadı: <?= h((string) ($offer['parasut_invoice_error'] ?? 'Bilinmeyen hata')) ?></span>
                             <?php else: ?>
-                                <span>Henüz oluşturulmadı.</span>
+                                <span>Henüz oluşturulmadı. Manuel Paraşüt'e gönder ile oluşturabilirsiniz.</span>
                             <?php endif; ?>
                         </div>
                     <?php endif; ?>
                     <div class="customer-offer-history-actions">
                         <?php if ($status === 'approved' && $parasutInvoiceId === ''): ?>
-                            <form method="post" action="<?= h(url('/customer-offers/' . (int) $offer['id'] . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu onaylı teklif için Paraşüt faturası oluşturulsun mu?')">
+                            <form method="post" action="<?= h(url('/customer-offers/' . (int) $offer['id'] . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu onaylı teklifi manuel olarak Paraşüt faturası şeklinde oluşturalım mı?')">
                                 <?= csrf_field() ?>
                                 <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
-                                <button type="submit" class="button primary small">Paraşüt faturası oluştur</button>
+                                <button type="submit" class="button primary small">Manuel Paraşüt'e gönder</button>
                             </form>
                         <?php endif; ?>
                         <form method="post" action="<?= h(url('/customer-offers/' . (int) $offer['id'] . '/delete')) ?>" onsubmit="return confirm('Bu müşteri teklif geçmişi silinsin mi? Teklif linki geçersiz olur, müşteriye bilgi maili gönderilmez.')">
