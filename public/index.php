@@ -5662,6 +5662,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
 {
     $templates = $repo->offerTemplates();
     $stockItems = $repo->stockItems('', 250);
+    $customerChoices = manual_payment_customer_choices($repo->customersWithContacts());
     $templateId = max(0, (int) ($_GET['template_id'] ?? 0));
     $blankMode = !empty($_GET['blank']);
     $selectedTemplate = $templateId > 0 ? $repo->findOfferTemplate($templateId) : null;
@@ -5691,7 +5692,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
         }
     }
 
-    render_layout('Yeni Teklif', static function () use ($templates, $stockItems, $selectedTemplate, $blankMode, $errors, $formData): void {
+    render_layout('Yeni Teklif', static function () use ($templates, $stockItems, $customerChoices, $selectedTemplate, $blankMode, $errors, $formData): void {
         ?>
         <div class="page-title">
             <div>
@@ -5708,6 +5709,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
         <?php endforeach; ?>
 
         <?= render_stock_item_datalist($stockItems) ?>
+        <script type="application/json" id="offer-builder-customers-json"><?= json_encode($customerChoices, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '[]' ?></script>
 
         <?php if (!$blankMode && !$selectedTemplate && $errors === []): ?>
             <section class="offer-start-grid">
@@ -5751,10 +5753,13 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
                             Teklif başlığı
                             <input name="offer_title" value="<?= h((string) ($formData['offer_title'] ?? '')) ?>" placeholder="Örn: 4 kameralı güvenlik sistemi" required>
                         </label>
-                        <label>
+                        <div class="offer-customer-field">
+                            <label>
                             Firma / müşteri
-                            <input name="customer_name" value="<?= h((string) ($formData['customer_name'] ?? '')) ?>" required>
-                        </label>
+                                <input name="customer_name" value="<?= h((string) ($formData['customer_name'] ?? '')) ?>" placeholder="Cari unvanı yazın veya seçin" autocomplete="off" data-offer-customer-input required>
+                            </label>
+                            <div class="offer-customer-results" data-offer-customer-results hidden></div>
+                        </div>
                         <label>
                             Para birimi
                             <select name="currency" data-offer-builder-currency>
@@ -5767,11 +5772,11 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
                     <div class="form-grid two span-2">
                         <label>
                             E-posta
-                            <input type="email" name="customer_email" value="<?= h((string) ($formData['customer_email'] ?? '')) ?>" placeholder="musteri@firma.com">
+                            <input type="email" name="customer_email" value="<?= h((string) ($formData['customer_email'] ?? '')) ?>" placeholder="musteri@firma.com" data-offer-customer-email>
                         </label>
                         <label>
                             Telefon
-                            <input name="customer_phone" value="<?= h((string) ($formData['customer_phone'] ?? '')) ?>" placeholder="0549 576 05 49">
+                            <input name="customer_phone" value="<?= h((string) ($formData['customer_phone'] ?? '')) ?>" placeholder="0549 576 05 49" data-offer-customer-phone>
                         </label>
                     </div>
                     <label class="span-2">

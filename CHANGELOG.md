@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.11] - 2026-05-08
+
+- Yeni teklif oluşturma ekranındaki firma alanı mevcut carileri canlı arama ile listeleyecek hale getirildi.
+- Cari seçildiğinde teklif formundaki e-posta ve telefon alanları kayıtlı müşteri/yetkili bilgileriyle otomatik doldurulur.
+
 ## [2.0.10] - 2026-05-08
 
 - Raporlar menüsüne ürün/hizmet bazında yıllık-aylık satış analizi eklendi.

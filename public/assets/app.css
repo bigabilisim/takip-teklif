@@ -1146,6 +1146,64 @@ h3 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.offer-customer-field {
+    position: relative;
+    min-width: 0;
+}
+
+.offer-customer-results {
+    position: absolute;
+    z-index: 30;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    display: grid;
+    gap: 6px;
+    max-height: 300px;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow: 0 16px 40px rgba(18, 37, 34, 0.16);
+}
+
+.offer-customer-result {
+    display: grid;
+    gap: 3px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: #f8fbfa;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+
+.offer-customer-result:hover,
+.offer-customer-result:focus-visible {
+    border-color: rgba(20, 132, 118, 0.42);
+    background: #edf8f5;
+    outline: none;
+}
+
+.offer-customer-result strong {
+    font-size: 14px;
+    line-height: 1.25;
+}
+
+.offer-customer-result span,
+.offer-customer-empty {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.offer-customer-empty {
+    padding: 10px 12px;
+}
+
 .offer-line-editor,
 .offer-line-list {
     display: grid;

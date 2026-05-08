@@ -1042,6 +1042,108 @@
         .replaceAll('Ç', 'c')
         .trim();
 
+    const offerCustomerSource = document.getElementById('offer-builder-customers-json');
+    let offerCustomers = [];
+    try {
+        offerCustomers = offerCustomerSource?.textContent ? JSON.parse(offerCustomerSource.textContent) : [];
+    } catch (error) {
+        offerCustomers = [];
+    }
+
+    document.querySelectorAll('[data-offer-builder-form]').forEach((form) => {
+        const input = form.querySelector('[data-offer-customer-input]');
+        const email = form.querySelector('[data-offer-customer-email]');
+        const phone = form.querySelector('[data-offer-customer-phone]');
+        const results = form.querySelector('[data-offer-customer-results]');
+
+        if (!input || !results) {
+            return;
+        }
+
+        const customerContacts = (customer) => Array.isArray(customer?.contacts) ? customer.contacts : [];
+        const preferredContactValue = (customer, key) => {
+            const contacts = customerContacts(customer);
+            const preferred = contacts.find((contact) => contact.notify && String(contact[key] || '').trim() !== '')
+                || contacts.find((contact) => String(contact[key] || '').trim() !== '');
+
+            return preferred ? String(preferred[key] || '').trim() : '';
+        };
+        const customerSearchValue = (customer) => normalizeSearchText([
+            customer.name,
+            customer.email,
+            customer.phone,
+            customer.tax,
+            ...customerContacts(customer).flatMap((contact) => [
+                contact.name,
+                contact.email,
+                contact.phone,
+            ]),
+        ].join(' '));
+        const selectCustomer = (customer) => {
+            input.value = String(customer.name || '');
+            const nextEmail = String(customer.email || '').trim() || preferredContactValue(customer, 'email');
+            const nextPhone = String(customer.phone || '').trim() || preferredContactValue(customer, 'phone');
+            if (email && nextEmail) {
+                email.value = nextEmail;
+            }
+            if (phone && nextPhone) {
+                phone.value = nextPhone;
+            }
+            results.hidden = true;
+        };
+        const renderResults = () => {
+            const query = normalizeSearchText(input.value);
+            results.innerHTML = '';
+
+            if (!Array.isArray(offerCustomers) || offerCustomers.length < 1) {
+                results.innerHTML = '<div class="offer-customer-empty">Kayıtlı cari bulunamadı. Manuel yazabilirsiniz.</div>';
+                results.hidden = false;
+                return;
+            }
+
+            const matches = offerCustomers
+                .filter((customer) => query === '' || customerSearchValue(customer).includes(query))
+                .slice(0, 10);
+
+            if (matches.length < 1) {
+                results.innerHTML = '<div class="offer-customer-empty">Cari bulunamadı. Manuel yazmaya devam edebilirsiniz.</div>';
+                results.hidden = false;
+                return;
+            }
+
+            matches.forEach((customer) => {
+                const contacts = customerContacts(customer);
+                const meta = [
+                    customer.email || preferredContactValue(customer, 'email') || customer.phone || customer.tax || 'Cari',
+                    contacts.length > 0 ? `${contacts.length} yetkili` : '',
+                ].filter(Boolean).join(' · ');
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'offer-customer-result';
+                button.innerHTML = `
+                    <strong>${escapeHtml(customer.name || '-')}</strong>
+                    <span>${escapeHtml(meta)}</span>
+                `;
+                button.addEventListener('click', () => selectCustomer(customer));
+                results.appendChild(button);
+            });
+            results.hidden = false;
+        };
+
+        input.addEventListener('input', renderResults);
+        input.addEventListener('focus', renderResults);
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                results.hidden = true;
+            }
+        });
+        document.addEventListener('click', (event) => {
+            if (!form.contains(event.target)) {
+                results.hidden = true;
+            }
+        });
+    });
+
     document.querySelectorAll('[data-manual-payment-form]').forEach((form) => {
         const source = document.getElementById('manual-payment-customers-json');
         let customers = [];
