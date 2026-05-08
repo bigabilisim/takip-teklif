@@ -417,6 +417,7 @@ ensure_index($pdo, 'offer_template_items', 'idx_offer_template_items_stock', 'IN
 ensure_table($pdo, 'sales_offers', "
     CREATE TABLE sales_offers (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        offer_number VARCHAR(30) NULL,
         template_id INT UNSIGNED NULL,
         title VARCHAR(190) NOT NULL,
         customer_name VARCHAR(190) NOT NULL,
@@ -433,11 +434,14 @@ ensure_table($pdo, 'sales_offers', "
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
         CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+        UNIQUE KEY uq_sales_offers_number (offer_number),
         INDEX idx_sales_offers_status (status, updated_at),
         INDEX idx_sales_offers_template (template_id),
         INDEX idx_sales_offers_customer (customer_name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
+ensure_index($pdo, 'sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
 ensure_table($pdo, 'sales_offer_items', "
     CREATE TABLE sales_offer_items (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

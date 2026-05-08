@@ -219,9 +219,12 @@ final class ParasutClient
             ];
         }
 
+        $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
         $description = trim((string) ($offer['subject'] ?? ''));
         if ($description === '') {
-            $description = 'Hızlı Takip ve Teklif yenileme teklifi #' . (int) ($offer['id'] ?? 0);
+            $description = 'Hızlı Takip ve Teklif yenileme teklifi ' . ($offerNumber !== '' ? $offerNumber : '#' . (int) ($offer['id'] ?? 0));
+        } elseif ($offerNumber !== '' && !str_contains($description, $offerNumber)) {
+            $description = $offerNumber . ' - ' . $description;
         }
 
         $payload = [
@@ -293,8 +296,9 @@ final class ParasutClient
 
     public function salesInvoiceNote(array $offer, ?array $payment = null): string
     {
+        $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
         $lines = [
-            'Bu fatura Hızlı Takip ve Teklif Platformu üzerinden onaylanan teklif #' . (int) ($offer['id'] ?? 0) . ' için oluşturuldu.',
+            'Bu fatura Hızlı Takip ve Teklif Platformu üzerinden onaylanan teklif ' . ($offerNumber !== '' ? $offerNumber : '#' . (int) ($offer['id'] ?? 0)) . ' için oluşturuldu.',
         ];
 
         $method = trim((string) (($offer['renewal_payment_method'] ?? '') ?: ($offer['payment_method'] ?? '')));

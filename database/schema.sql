@@ -365,6 +365,7 @@ CREATE TABLE renewal_notification_deliveries (
 
 CREATE TABLE supplier_quote_requests (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    quote_number VARCHAR(30) NULL,
     renewal_id INT UNSIGNED NOT NULL,
     supplier_id INT UNSIGNED NULL,
     supplier_contact_id INT UNSIGNED NULL,
@@ -389,6 +390,7 @@ CREATE TABLE supplier_quote_requests (
     CONSTRAINT fk_supplier_quote_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
     CONSTRAINT fk_supplier_quote_requests_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
     CONSTRAINT fk_supplier_quote_requests_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_supplier_quote_requests_number (quote_number),
     UNIQUE KEY uq_supplier_quote_requests_token (token_hash),
     INDEX idx_supplier_quote_requests_renewal (renewal_id, status, created_at),
     INDEX idx_supplier_quote_requests_supplier (supplier_id, created_at),
@@ -568,6 +570,7 @@ CREATE TABLE offer_template_items (
 
 CREATE TABLE sales_offers (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    offer_number VARCHAR(30) NULL,
     template_id INT UNSIGNED NULL,
     title VARCHAR(190) NOT NULL,
     customer_name VARCHAR(190) NOT NULL,
@@ -584,6 +587,7 @@ CREATE TABLE sales_offers (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
     CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_sales_offers_number (offer_number),
     INDEX idx_sales_offers_status (status, updated_at),
     INDEX idx_sales_offers_template (template_id),
     INDEX idx_sales_offers_customer (customer_name)

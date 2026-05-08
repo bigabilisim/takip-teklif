@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.19] - 2026-05-08
+
+- Tedarikçi fiyat talepleri, müşteri yenileme teklifleri ve satış teklifleri için ayrı teklif numarası serileri eklendi (`TT`, `YT`, `TK`).
+- Teklif numaraları mail konusu, mail içeriği, müşteri/tedarikçi formları, teklif geçmişi, dashboard ve Paraşüt fatura notlarında görünür hale getirildi.
+- Mevcut teklif kayıtları oluşturulma yılı ve kayıt ID’sine göre geriye dönük numaralandırılır.
+
 ## [2.0.18] - 2026-05-08
 
 - Başarılı iyzico yenileme ödemesi sonrasında ilgili müşteri teklifi otomatik onaylanır, Paraşüt faturası oluşturulur ve yenileme kaydı yeni periyoda ilerletilir.

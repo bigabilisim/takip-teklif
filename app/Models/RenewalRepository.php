@@ -1103,6 +1103,7 @@ final class RenewalRepository
                 'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
             ]);
             $id = (int) $this->db->lastInsertId();
+            $this->assignGeneratedOfferNumber('sales_offers', 'offer_number', 'TK', $id);
             $this->replaceSalesOfferItems($id, $items, $currency);
             $this->db->commit();
 
@@ -1179,8 +1180,12 @@ final class RenewalRepository
             'message_body' => trim($message),
         ]);
 
+        $id = (int) $this->db->lastInsertId();
+        $quoteNumber = $this->assignGeneratedOfferNumber('supplier_quote_requests', 'quote_number', 'TT', $id);
+
         return [
-            'id' => (int) $this->db->lastInsertId(),
+            'id' => $id,
+            'quote_number' => $quoteNumber,
             'token' => $token,
             'url' => \url('/tedarikci-teklif/' . $token),
             'unsubscribe_url' => \url('/tedarikci-listeden-cik/' . $token),
@@ -1500,7 +1505,7 @@ final class RenewalRepository
 
         $stmt = $this->db->prepare(
             "SELECT sqr.*,
-                    COALESCE(sqr.supplier_name, s.company_name, CASE WHEN sqs.quote_line_id IS NULL THEN \'Manuel fiyat\' ELSE NULL END) AS supplier_display,
+                    COALESCE(sqr.supplier_name, s.company_name, 'Tedarikçi') AS supplier_display,
                     r.title,
                     r.renewal_date,
                     r.supplier_share_customer_info,
@@ -1638,6 +1643,7 @@ final class RenewalRepository
         $stmt = $this->db->prepare(
             'SELECT sqln.*,
                     sqr.renewal_id,
+                    sqr.quote_number,
                     sqr.recipient_email,
                     sqr.contact_name,
                     COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
@@ -1700,6 +1706,7 @@ final class RenewalRepository
             'vat_included' => (int) ($line['vat_included'] ?? 0),
             'delivery_note' => (string) ($line['delivery_note'] ?? ''),
             'note' => (string) ($line['note'] ?? ''),
+            'quote_number' => (string) ($line['quote_number'] ?? ''),
             'supplier_display' => (string) ($line['supplier_display'] ?? ''),
             'contact_name' => (string) ($line['contact_name'] ?? ''),
             'recipient_email' => (string) ($line['recipient_email'] ?? ''),
@@ -1991,6 +1998,7 @@ final class RenewalRepository
                 'created_by' => $createdBy > 0 ? $createdBy : null,
             ]);
             $offerId = (int) $this->db->lastInsertId();
+            $offerNumber = $this->assignGeneratedOfferNumber('customer_offer_requests', 'offer_number', 'YT', $offerId);
 
             $insertLine = $this->db->prepare(
                 'INSERT INTO customer_offer_lines
@@ -2008,6 +2016,7 @@ final class RenewalRepository
 
             return [
                 'id' => $offerId,
+                'offer_number' => $offerNumber,
                 'token' => $token,
                 'url' => \url('/musteri-teklif/' . $token),
                 'renewal_id' => $renewalId,
@@ -2103,10 +2112,13 @@ final class RenewalRepository
     public function customerOfferLines(int $offerId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT *
-             FROM customer_offer_lines
-             WHERE offer_id = :offer_id
-             ORDER BY sort_order ASC, id ASC'
+            'SELECT col.*,
+                    sqr.quote_number AS supplier_quote_number
+             FROM customer_offer_lines col
+             LEFT JOIN supplier_quote_lines sqln ON sqln.id = col.supplier_quote_line_id
+             LEFT JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
+             WHERE col.offer_id = :offer_id
+             ORDER BY col.sort_order ASC, col.id ASC'
         );
         $stmt->execute(['offer_id' => $offerId]);
 
@@ -3540,6 +3552,7 @@ final class RenewalRepository
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS supplier_quote_requests (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                quote_number VARCHAR(30) NULL,
                 renewal_id INT UNSIGNED NOT NULL,
                 supplier_id INT UNSIGNED NULL,
                 supplier_contact_id INT UNSIGNED NULL,
@@ -3564,12 +3577,16 @@ final class RenewalRepository
                 CONSTRAINT fk_supplier_quote_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
                 CONSTRAINT fk_supplier_quote_requests_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
                 CONSTRAINT fk_supplier_quote_requests_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_supplier_quote_requests_number (quote_number),
                 UNIQUE KEY uq_supplier_quote_requests_token (token_hash),
                 INDEX idx_supplier_quote_requests_renewal (renewal_id, status, created_at),
                 INDEX idx_supplier_quote_requests_supplier (supplier_id, created_at),
                 INDEX idx_supplier_quote_requests_email (recipient_email)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('supplier_quote_requests', 'quote_number', 'VARCHAR(30) NULL AFTER id');
+        $this->backfillGeneratedOfferNumbers('supplier_quote_requests', 'quote_number', 'TT');
+        $this->ensureIndex('supplier_quote_requests', 'uq_supplier_quote_requests_number', 'UNIQUE KEY uq_supplier_quote_requests_number (quote_number)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS supplier_quote_lines (
@@ -3704,6 +3721,7 @@ final class RenewalRepository
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS customer_offer_requests (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_number VARCHAR(30) NULL,
                 renewal_id INT UNSIGNED NOT NULL,
                 recipient_email VARCHAR(190) NOT NULL,
                 recipient_name VARCHAR(190) NULL,
@@ -3727,17 +3745,21 @@ final class RenewalRepository
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 CONSTRAINT fk_customer_offer_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
                 CONSTRAINT fk_customer_offer_requests_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_customer_offer_requests_number (offer_number),
                 UNIQUE KEY uq_customer_offer_requests_token (token_hash),
                 INDEX idx_customer_offer_requests_renewal (renewal_id, status, created_at),
                 INDEX idx_customer_offer_requests_email (recipient_email)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('customer_offer_requests', 'offer_number', 'VARCHAR(30) NULL AFTER id');
         $this->ensureColumn('customer_offer_requests', 'view_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER opened_at');
         $this->ensureColumn('customer_offer_requests', 'parasut_invoice_id', 'VARCHAR(64) NULL AFTER total');
         $this->ensureColumn('customer_offer_requests', 'parasut_invoice_no', 'VARCHAR(120) NULL AFTER parasut_invoice_id');
         $this->ensureColumn('customer_offer_requests', 'parasut_invoice_status', "VARCHAR(30) NULL AFTER parasut_invoice_no");
         $this->ensureColumn('customer_offer_requests', 'parasut_invoice_error', 'TEXT NULL AFTER parasut_invoice_status');
         $this->ensureColumn('customer_offer_requests', 'parasut_invoice_created_at', 'DATETIME NULL AFTER parasut_invoice_error');
+        $this->backfillGeneratedOfferNumbers('customer_offer_requests', 'offer_number', 'YT');
+        $this->ensureIndex('customer_offer_requests', 'uq_customer_offer_requests_number', 'UNIQUE KEY uq_customer_offer_requests_number (offer_number)');
         $this->ensureIndex('customer_offer_requests', 'idx_customer_offer_parasut_invoice', 'INDEX idx_customer_offer_parasut_invoice (parasut_invoice_id)');
 
         $this->db->exec(
@@ -3824,6 +3846,7 @@ final class RenewalRepository
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS sales_offers (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_number VARCHAR(30) NULL,
                 template_id INT UNSIGNED NULL,
                 title VARCHAR(190) NOT NULL,
                 customer_name VARCHAR(190) NOT NULL,
@@ -3840,11 +3863,15 @@ final class RenewalRepository
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
                 CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_sales_offers_number (offer_number),
                 INDEX idx_sales_offers_status (status, updated_at),
                 INDEX idx_sales_offers_template (template_id),
                 INDEX idx_sales_offers_customer (customer_name)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
+        $this->backfillGeneratedOfferNumbers('sales_offers', 'offer_number', 'TK');
+        $this->ensureIndex('sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS sales_offer_items (
@@ -4026,6 +4053,87 @@ final class RenewalRepository
         if ((int) $stmt->fetchColumn() === 0) {
             $this->db->exec(sprintf('ALTER TABLE `%s` ADD %s', str_replace('`', '``', $table), $definition));
         }
+    }
+
+    private function assignGeneratedOfferNumber(string $table, string $column, string $prefix, int $id): string
+    {
+        if ($id < 1) {
+            return '';
+        }
+
+        $quotedTable = str_replace('`', '``', $table);
+        $quotedColumn = str_replace('`', '``', $column);
+        $stmt = $this->db->prepare(
+            "SELECT `{$quotedColumn}` AS number_value, created_at
+             FROM `{$quotedTable}`
+             WHERE id = :id
+             LIMIT 1"
+        );
+        $stmt->execute(['id' => $id]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return '';
+        }
+
+        $current = trim((string) ($row['number_value'] ?? ''));
+        if ($current !== '') {
+            return $current;
+        }
+
+        $number = $this->generatedOfferNumber($prefix, $id, (string) ($row['created_at'] ?? ''));
+        $update = $this->db->prepare(
+            "UPDATE `{$quotedTable}`
+             SET `{$quotedColumn}` = :number
+             WHERE id = :id
+               AND COALESCE(`{$quotedColumn}`, '') = ''"
+        );
+        $update->execute([
+            'id' => $id,
+            'number' => $number,
+        ]);
+
+        return $number;
+    }
+
+    private function backfillGeneratedOfferNumbers(string $table, string $column, string $prefix): void
+    {
+        $quotedTable = str_replace('`', '``', $table);
+        $quotedColumn = str_replace('`', '``', $column);
+        $rows = $this->db->query(
+            "SELECT id, created_at
+             FROM `{$quotedTable}`
+             WHERE COALESCE(`{$quotedColumn}`, '') = ''
+             ORDER BY id ASC"
+        )->fetchAll();
+        if ($rows === []) {
+            return;
+        }
+
+        $update = $this->db->prepare(
+            "UPDATE `{$quotedTable}`
+             SET `{$quotedColumn}` = :number
+             WHERE id = :id
+               AND COALESCE(`{$quotedColumn}`, '') = ''"
+        );
+        foreach ($rows as $row) {
+            $id = (int) ($row['id'] ?? 0);
+            if ($id < 1) {
+                continue;
+            }
+
+            $update->execute([
+                'id' => $id,
+                'number' => $this->generatedOfferNumber($prefix, $id, (string) ($row['created_at'] ?? '')),
+            ]);
+        }
+    }
+
+    private function generatedOfferNumber(string $prefix, int $id, string $createdAt = ''): string
+    {
+        $timestamp = $createdAt !== '' ? strtotime($createdAt) : false;
+        $year = $timestamp !== false ? date('Y', $timestamp) : date('Y');
+
+        return sprintf('%s-%s-%06d', strtoupper($prefix), $year, $id);
     }
 
     private function ensureItemSchema(): void

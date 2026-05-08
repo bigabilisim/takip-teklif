@@ -926,7 +926,8 @@ function send_supplier_quote_selection_email(RenewalRepository $repo, array $sel
     }
 
     $subject = mb_substr(
-        'Onaylandı: ' . supplier_customer_label($row) . ' - ' . $itemTitle,
+        (trim((string) ($selected['quote_number'] ?? '')) !== '' ? '[' . trim((string) $selected['quote_number']) . '] ' : '')
+        . 'Onaylandı: ' . supplier_customer_label($row) . ' - ' . $itemTitle,
         0,
         240
     );
@@ -987,13 +988,17 @@ function handle_customer_offer_send(RenewalRepository $repo, int $renewalId): vo
             ], (int) ($_SESSION['user_id'] ?? 0));
 
             $body = customer_offer_mail_body($row, $offer, $message);
-            $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
+            $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
+            $mailSubject = $offerNumber !== '' && !str_contains($subject, $offerNumber)
+                ? '[' . $offerNumber . '] ' . $subject
+                : $subject;
+            $result = Mailer::sendWithResult((string) $recipient['email'], $mailSubject, $body, true);
             $ok = !empty($result['ok']);
             $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
             $repo->logMail(
                 (int) $row['id'],
                 (string) $recipient['email'],
-                $subject,
+                $mailSubject,
                 $body,
                 $ok ? 'sent' : 'failed',
                 $error,
@@ -1355,6 +1360,7 @@ function handle_supplier_price_request_link(RenewalRepository $repo, int $renewa
             $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $recipient, $subject, $message, 'manual');
             $createdLink = [
                 'label' => supplier_quote_recipient_label($recipient),
+                'number' => (string) ($quoteRequest['quote_number'] ?? ''),
                 'url' => (string) $quoteRequest['url'],
                 'created_at' => date('d.m.Y H:i'),
             ];
@@ -1430,16 +1436,21 @@ function send_supplier_quote_request_email(RenewalRepository $repo, array $row, 
         $row,
         $message,
         (string) ($quoteRequest['url'] ?? ''),
-        (string) ($quoteRequest['unsubscribe_url'] ?? '')
+        (string) ($quoteRequest['unsubscribe_url'] ?? ''),
+        (string) ($quoteRequest['quote_number'] ?? '')
     );
-    $result = Mailer::sendWithResult($email, $subject, $body, true);
+    $quoteNumber = trim((string) ($quoteRequest['quote_number'] ?? ''));
+    $mailSubject = $quoteNumber !== '' && !str_contains($subject, $quoteNumber)
+        ? '[' . $quoteNumber . '] ' . $subject
+        : $subject;
+    $result = Mailer::sendWithResult($email, $mailSubject, $body, true);
     $ok = !empty($result['ok']);
     $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
 
     $repo->logMail(
         (int) $row['id'],
         $email,
-        $subject,
+        $mailSubject,
         $body,
         $ok ? 'sent' : 'failed',
         $error,
@@ -1466,7 +1477,8 @@ function close_supplier_quote_requests_if_ready(RenewalRepository $repo, int $re
             continue;
         }
 
-        $subject = 'Teklif talebi kapatıldı: ' . $submittedCount . ' teklif alındı';
+        $quoteNumber = trim((string) ($request['quote_number'] ?? ''));
+        $subject = ($quoteNumber !== '' ? '[' . $quoteNumber . '] ' : '') . 'Teklif talebi kapatıldı: ' . $submittedCount . ' teklif alındı';
         $body = supplier_quote_closed_body($request, $submittedCount);
         $result = Mailer::sendWithResult($email, $subject, $body, true);
         $ok = !empty($result['ok']);
@@ -1543,7 +1555,7 @@ function handle_supplier_price_request_whatsapp(RenewalRepository $repo, int $re
         $subject = 'Lisans fiyat talebi: ' . (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'Yenileme'));
         $message = supplier_price_default_message($row);
         $quoteRequest = $repo->createSupplierQuoteRequest($renewalId, $contact, $subject, $message, 'whatsapp');
-        $whatsappMessage = supplier_price_whatsapp_message($row, $contact, (string) $quoteRequest['url']);
+        $whatsappMessage = supplier_price_whatsapp_message($row, $contact, (string) $quoteRequest['url'], (string) ($quoteRequest['quote_number'] ?? ''));
 
         header('Location: ' . whatsapp_web_url($waNumber, $whatsappMessage));
         exit;
@@ -2413,9 +2425,14 @@ function supplier_price_default_message(array $row): string
     ]);
 }
 
-function supplier_price_request_body(array $row, string $message, string $quoteUrl = '', string $unsubscribeUrl = ''): string
+function supplier_price_request_body(array $row, string $message, string $quoteUrl = '', string $unsubscribeUrl = '', string $quoteNumber = ''): string
 {
-    $rows = [
+    $rows = [];
+    $quoteNumber = trim($quoteNumber);
+    if ($quoteNumber !== '') {
+        $rows['Teklif no'] = $quoteNumber;
+    }
+    $rows += [
         'Müşteri' => supplier_customer_label($row),
         'Ürün / hizmet' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')),
         'Marka' => (string) (($row['brand'] ?? '') ?: '-'),
@@ -2449,7 +2466,12 @@ function supplier_price_request_body(array $row, string $message, string $quoteU
 
 function supplier_quote_closed_body(array $request, int $submittedCount): string
 {
-    $rows = [
+    $rows = [];
+    $quoteNumber = trim((string) ($request['quote_number'] ?? ''));
+    if ($quoteNumber !== '') {
+        $rows['Teklif no'] = $quoteNumber;
+    }
+    $rows += [
         'Müşteri' => supplier_customer_label($request),
         'Kayıt' => (string) ($request['title'] ?? '-'),
         'Alınan teklif sayısı' => (string) $submittedCount,
@@ -2479,7 +2501,12 @@ function supplier_quote_closed_body(array $request, int $submittedCount): string
 function customer_offer_mail_body(array $row, array $offer, string $message): string
 {
     $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
-    $rows = [
+    $rows = [];
+    $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
+    if ($offerNumber !== '') {
+        $rows['Teklif no'] = $offerNumber;
+    }
+    $rows += [
         'Müşteri' => (string) ($row['company_name'] ?? '-'),
         'Kayıt' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')),
         'Ara toplam' => money_format_local($offer['subtotal'] ?? null, $currency),
@@ -2543,7 +2570,12 @@ function supplier_quote_selection_body(array $row, array $selected, string $item
     $contactName = trim((string) ($selected['contact_name'] ?? ''));
     $termLabel = supplier_quote_term_label((string) ($selected['term'] ?? ''), (string) ($selected['custom_term'] ?? ''));
     $price = money_format_local($selected['price'] ?? 0, (string) ($selected['currency'] ?? 'TRY'));
-    $rows = [
+    $rows = [];
+    $quoteNumber = trim((string) ($selected['quote_number'] ?? ''));
+    if ($quoteNumber !== '') {
+        $rows['Teklif no'] = $quoteNumber;
+    }
+    $rows += [
         'Müşteri' => supplier_customer_label($row),
         'Ürün / hizmet' => $itemTitle,
         'Onaylanan vade' => $termLabel,
@@ -2587,10 +2619,14 @@ function supplier_quote_selection_body(array $row, array $selected, string $item
         . '</td></tr></table></td></tr></table></body></html>';
 }
 
-function supplier_price_whatsapp_message(array $row, array $contact, string $quoteUrl = ''): string
+function supplier_price_whatsapp_message(array $row, array $contact, string $quoteUrl = '', string $quoteNumber = ''): string
 {
     $name = trim((string) ($contact['name'] ?? ''));
     $message = supplier_price_default_message($row);
+    $quoteNumber = trim($quoteNumber);
+    if ($quoteNumber !== '') {
+        $message .= "\n\nTeklif no: " . $quoteNumber;
+    }
     if ($quoteUrl !== '') {
         $message .= "\n\nTeklif formu:\n" . $quoteUrl;
     }
@@ -3660,6 +3696,7 @@ function send_supplier_customer_offer_approval_emails(RenewalRepository $repo, a
             'vat_included' => (int) ($line['supplier_vat_included'] ?? 1),
             'delivery_note' => (string) ($line['supplier_delivery_note'] ?? ''),
             'note' => (string) ($line['supplier_note'] ?? ''),
+            'quote_number' => (string) ($line['supplier_quote_number'] ?? ''),
         ];
         $result = send_supplier_quote_selection_email($repo, $selected);
         !empty($result['ok']) ? $sent++ : $failed++;
@@ -4959,6 +4996,9 @@ function handle_supplier_quote_public(string $method, string $token): void
             ?>
             <section class="login-panel supplier-quote-public">
                 <div class="alert success">Bu teklif süreci kapatılmış.</div>
+                <?php if (!empty($request['quote_number'])): ?>
+                    <p class="muted compact">Teklif no: <?= h((string) $request['quote_number']) ?></p>
+                <?php endif; ?>
                 <p class="muted compact"><?= h(supplier_customer_label($request)) ?> için yeterli teklif alındığı için bu bağlantı artık teklif kabul etmiyor.</p>
             </section>
             <?php
@@ -4983,6 +5023,9 @@ function handle_supplier_quote_public(string $method, string $token): void
             ?>
             <section class="login-panel supplier-quote-public">
                 <div class="alert error">Bu teklif bağlantısının süresi dolmuş.</div>
+                <?php if (!empty($request['quote_number'])): ?>
+                    <p class="muted compact">Teklif no: <?= h((string) $request['quote_number']) ?></p>
+                <?php endif; ?>
                 <p class="muted compact">Talep: <?= h(supplier_customer_label($request)) ?></p>
             </section>
             <?php
@@ -4995,6 +5038,9 @@ function handle_supplier_quote_public(string $method, string $token): void
             ?>
             <section class="login-panel supplier-quote-public">
                 <div class="alert success">Teklifiniz alınmış. Teşekkür ederiz.</div>
+                <?php if (!empty($request['quote_number'])): ?>
+                    <p class="muted compact">Teklif no: <?= h((string) $request['quote_number']) ?></p>
+                <?php endif; ?>
                 <p class="muted compact"><?= h(supplier_customer_label($request)) ?> için teklif kaydınız panele işlendi.</p>
             </section>
             <?php
@@ -5039,6 +5085,9 @@ function handle_supplier_quote_public(string $method, string $token): void
                 ?>
                 <section class="login-panel supplier-quote-public">
                     <div class="alert success">Teklifiniz alınmıştır. Teşekkür ederiz.</div>
+                    <?php if (!empty($request['quote_number'])): ?>
+                        <p class="muted compact">Teklif no: <?= h((string) $request['quote_number']) ?></p>
+                    <?php endif; ?>
                     <p class="muted compact"><?= h(supplier_customer_label($request)) ?> için gönderdiğiniz teklif sistemde kayıt altına alındı.</p>
                 </section>
                 <?php
@@ -5066,6 +5115,9 @@ function handle_supplier_quote_public(string $method, string $token): void
             <?php endif; ?>
 
             <div class="supplier-quote-context">
+                <?php if (!empty($request['quote_number'])): ?>
+                    <div><span>Teklif no</span><strong><?= h((string) $request['quote_number']) ?></strong></div>
+                <?php endif; ?>
                 <div><span>Müşteri</span><strong><?= h(supplier_customer_label($request)) ?></strong></div>
                 <div><span>Tedarikçi</span><strong><?= h((string) (($request['supplier_display'] ?? '') ?: ($request['recipient_email'] ?? '-'))) ?></strong></div>
                 <div><span>Yenileme tarihi</span><strong><?= h(!empty($request['renewal_date']) ? date('d.m.Y', strtotime((string) $request['renewal_date'])) : '-') ?></strong></div>
@@ -5243,6 +5295,9 @@ function handle_customer_offer_public(string $method, string $token): void
             <section class="public-card payment-result-card success">
                 <p class="eyebrow">Teklif yanıtı</p>
                 <h1><?= $status === 'approved' ? 'Teklifiniz onaylandı.' : ($status === 'revision_requested' ? 'Bu teklif için revize istendi.' : 'Bu teklif reddedildi.') ?></h1>
+                <?php if (!empty($offer['offer_number'])): ?>
+                    <p class="muted compact">Teklif no: <?= h((string) $offer['offer_number']) ?></p>
+                <?php endif; ?>
                 <?php if ($status === 'approved' && !$paymentCompleted && $paymentUrl !== ''): ?>
                     <p>Ödeme adımı henüz tamamlanmamış görünüyor. Bağlantıyı tekrar açtığınızda buradan devam edebilirsiniz.</p>
                     <a class="button primary" href="<?= h($paymentUrl) ?>">Ödeme yöntemine geç</a>
@@ -5295,11 +5350,14 @@ function handle_customer_offer_public(string $method, string $token): void
                 ? PaymentLink::urlForRenewal((int) $offer['renewal_id'], 60, (string) ($offer['recipient_email'] ?? ''))
                 : '';
 
-            render_public_layout('Müşteri Teklifi', static function () use ($decision, $paymentUrl, $supplierMailSummary, $parasutInvoiceSummary): void {
+            render_public_layout('Müşteri Teklifi', static function () use ($decision, $paymentUrl, $supplierMailSummary, $parasutInvoiceSummary, $offer): void {
                 ?>
                 <section class="public-card payment-result-card success">
                     <p class="eyebrow">Teklif yanıtı</p>
                     <h1><?= $decision === 'approved' ? 'Teklif onaylandı.' : ($decision === 'revision_requested' ? 'Revize talebiniz alındı.' : 'Red yanıtınız alındı.') ?></h1>
+                    <?php if (!empty($offer['offer_number'])): ?>
+                        <p class="muted compact">Teklif no: <?= h((string) $offer['offer_number']) ?></p>
+                    <?php endif; ?>
                     <?php if ($decision === 'approved'): ?>
                         <p>Teşekkür ederiz. Seçilen tedarikçilere işlem bilgisi iletildi.</p>
                         <p class="muted compact">Tedarikçi mail durumu: <?= h((string) $supplierMailSummary['sent']) ?> gönderildi, <?= h((string) $supplierMailSummary['failed']) ?> başarısız.</p>
@@ -5339,6 +5397,9 @@ function handle_customer_offer_public(string $method, string $token): void
             <div class="login-heading customer-offer-hero">
                 <p class="customer-offer-kicker">MÜŞTERİ YENİLEME TEKLİFİ</p>
                 <h1>Teklifinizi inceleyiniz.</h1>
+                <?php if (!empty($offer['offer_number'])): ?>
+                    <p class="muted compact">Teklif no: <?= h((string) $offer['offer_number']) ?></p>
+                <?php endif; ?>
                 <p class="muted compact"><?= h((string) ($offer['company_name'] ?? '-')) ?> için hazırlanan yenileme teklifidir.</p>
             </div>
 
@@ -6000,7 +6061,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method): voi
 
         try {
             $offerId = $repo->createSalesOffer($formData);
-            flash('success', 'Yeni teklif taslak olarak oluşturuldu: #' . $offerId);
+            flash('success', 'Yeni teklif taslak olarak oluşturuldu: TK-' . date('Y') . '-' . str_pad((string) $offerId, 6, '0', STR_PAD_LEFT));
             redirect('/');
         } catch (Throwable $e) {
             $errors[] = $e->getMessage();
@@ -6381,7 +6442,7 @@ function render_sales_offer_lane(array $offers, bool $canManage): string
                     <span class="track-main">
                         <small>Teklif / Cari</small>
                         <strong><?= h((string) $offer['customer_name']) ?></strong>
-                        <em><?= h((string) $offer['title']) ?></em>
+                        <em><?= h(trim((string) (($offer['offer_number'] ?? '') !== '' ? ($offer['offer_number'] . ' · ' . $offer['title']) : $offer['title']))) ?></em>
                     </span>
                     <span class="track-days">
                         <small>Tutar</small>
@@ -6394,6 +6455,10 @@ function render_sales_offer_lane(array $offers, bool $canManage): string
                 </summary>
                 <div class="track-body">
                     <div class="track-meta-grid">
+                        <div>
+                            <span>Teklif no</span>
+                            <strong><?= h((string) (($offer['offer_number'] ?? '') ?: ('TK-' . date('Y', strtotime((string) $offer['created_at'])) . '-' . str_pad((string) (int) $offer['id'], 6, '0', STR_PAD_LEFT)))) ?></strong>
+                        </div>
                         <div>
                             <span>Şablon</span>
                             <strong><?= h((string) (($offer['template_name'] ?? '') ?: 'Boş teklif')) ?></strong>
@@ -12360,10 +12425,11 @@ function render_supplier_price_request_dialog(array $row): string
                             <?php foreach ($generatedLinks as $link): ?>
                                 <?php $linkUrl = (string) ($link['url'] ?? ''); ?>
                                 <?php if ($linkUrl === '') { continue; } ?>
+                                <?php $linkMeta = array_values(array_filter([(string) ($link['number'] ?? ''), (string) ($link['created_at'] ?? '')], static fn (string $value): bool => trim($value) !== '')); ?>
                                 <div class="supplier-link-card">
                                     <div>
                                         <strong><?= h((string) ($link['label'] ?? 'Tedarikçi')) ?></strong>
-                                        <span><?= h((string) ($link['created_at'] ?? '')) ?></span>
+                                        <span><?= h(implode(' · ', $linkMeta)) ?></span>
                                     </div>
                                     <input readonly value="<?= h($linkUrl) ?>" aria-label="Tedarikçi teklif linki">
                                     <div class="inline-actions">
@@ -12633,12 +12699,13 @@ function render_customer_offer_history(array $offers): string
                 $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
                 $status = (string) ($offer['status'] ?? 'sent');
                 $createdAt = !empty($offer['created_at']) ? date('d.m.Y H:i', strtotime((string) $offer['created_at'])) : '-';
+                $offerMeta = array_values(array_filter([(string) ($offer['offer_number'] ?? ''), (string) ($offer['recipient_email'] ?? '-'), $createdAt], static fn (string $value): bool => trim($value) !== ''));
                 ?>
                 <details class="customer-offer-history-card">
                     <summary>
                         <span>
                             <strong><?= h((string) (($offer['recipient_name'] ?? '') ?: ($offer['recipient_email'] ?? 'Müşteri'))) ?></strong>
-                            <em><?= h((string) ($offer['recipient_email'] ?? '-')) ?> · <?= h($createdAt) ?></em>
+                            <em><?= h(implode(' · ', $offerMeta)) ?></em>
                         </span>
                         <span class="badge <?= h(customer_offer_status_badge($status)) ?>"><?= h(customer_offer_status_label($status)) ?></span>
                         <b><?= h(money_format_local($offer['total'] ?? null, $currency)) ?></b>
@@ -12749,11 +12816,12 @@ function render_supplier_quote_request_manager(array $requests, string $returnTo
                 $requestId = (int) ($request['id'] ?? 0);
                 $status = (string) ($request['status'] ?? 'pending');
                 $createdAt = !empty($request['created_at']) ? date('d.m.Y H:i', strtotime((string) $request['created_at'])) : '-';
+                $requestMeta = array_values(array_filter([(string) ($request['quote_number'] ?? ''), (string) (($request['recipient_email'] ?? '') ?: ($request['recipient_phone'] ?? '-')), $createdAt], static fn (string $value): bool => trim($value) !== ''));
                 ?>
                 <div class="supplier-quote-request-row">
                     <div>
                         <strong><?= h((string) (($request['supplier_display'] ?? '') ?: ($request['recipient_email'] ?? 'Tedarikçi'))) ?></strong>
-                        <span><?= h((string) (($request['recipient_email'] ?? '') ?: ($request['recipient_phone'] ?? '-'))) ?> · <?= h($createdAt) ?></span>
+                        <span><?= h(implode(' · ', $requestMeta)) ?></span>
                     </div>
                     <span class="badge <?= h(supplier_quote_status_badge($status)) ?>"><?= h(supplier_quote_status_label($status)) ?></span>
                     <?php if ($requestId > 0): ?>
