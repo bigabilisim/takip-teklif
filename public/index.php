@@ -6649,13 +6649,25 @@ function flow_insights(array $overview): array
 function render_collections(RenewalRepository $repo): void
 {
     $filter = collection_filter_key((string) ($_GET['filter'] ?? 'all'));
-    $rows = $repo->collectionRows($filter);
+    $rows = $filter === 'paid-card' ? [] : $repo->collectionRows($filter);
     $allRows = $repo->collectionRows('all');
+    $manualPaymentRepo = new PaymentRequestRepository();
+    $paidCardRows = array_merge(
+        $repo->paidCardPaymentRows(120),
+        $manualPaymentRepo->paidCardPaymentRows(120)
+    );
+    usort($paidCardRows, static function (array $a, array $b): int {
+        $left = strtotime((string) (($a['paid_at'] ?? '') ?: ($a['updated_at'] ?? '') ?: ($a['created_at'] ?? ''))) ?: 0;
+        $right = strtotime((string) (($b['paid_at'] ?? '') ?: ($b['updated_at'] ?? '') ?: ($b['created_at'] ?? ''))) ?: 0;
+
+        return $right <=> $left;
+    });
     $stats = collection_stats($allRows);
+    $stats['paid_card'] = count($paidCardRows);
     $canSendMail = Auth::can('collections.manage');
     $returnTo = safe_return_path($_SERVER['REQUEST_URI'] ?? '/collections');
 
-    render_layout('Tahsilat', static function () use ($rows, $filter, $stats, $canSendMail, $returnTo): void {
+    render_layout('Tahsilat', static function () use ($rows, $paidCardRows, $filter, $stats, $canSendMail, $returnTo): void {
         ?>
         <div class="page-title">
             <div>
@@ -6668,6 +6680,7 @@ function render_collections(RenewalRepository $repo): void
             <?= stat_card('Bekleyen', $stats['total'], 'warning') ?>
             <?= stat_card('Ödenmemiş', $stats['unpaid'], 'danger') ?>
             <?= stat_card('Havale / EFT', $stats['bank'], '') ?>
+            <?= stat_card('Kart ödemeleri', $stats['paid_card'], 'done') ?>
         </section>
 
         <div class="collection-filter-tabs">
@@ -6679,8 +6692,10 @@ function render_collections(RenewalRepository $repo): void
         </div>
 
         <section class="collection-list-panel">
-            <?php if ($rows === []): ?>
-                <div class="empty">Bu filtrede tahsilat kaydı bulunmuyor.</div>
+            <?php if ($filter === 'paid-card'): ?>
+                <?= render_paid_card_collection_list($paidCardRows) ?>
+            <?php elseif ($rows === []): ?>
+                <div class="empty">Bu filtrede tahsilat bekleyen kayıt bulunmuyor.</div>
             <?php else: ?>
                 <div class="collection-card-list">
                     <?php foreach ($rows as $row): ?>
@@ -6738,6 +6753,76 @@ function render_collections(RenewalRepository $repo): void
         </section>
         <?php
     });
+}
+
+function render_paid_card_collection_list(array $rows): string
+{
+    if ($rows === []) {
+        return '<div class="empty">Henüz başarılı iyzico kart ödemesi bulunmuyor.</div>';
+    }
+
+    ob_start();
+    ?>
+    <div class="collection-card-list">
+        <?php foreach ($rows as $row): ?>
+            <?php
+            $sourceType = (string) ($row['source_type'] ?? 'renewal');
+            $isManual = $sourceType === 'manual';
+            $recordId = (int) ($isManual ? ($row['request_id'] ?? 0) : ($row['renewal_id'] ?? 0));
+            $recordUrl = $isManual
+                ? url('/payment-requests?created=' . $recordId)
+                : url('/renewals/' . $recordId . '/edit');
+            $recordLabel = $isManual
+                ? manual_payment_request_number(['id' => $recordId])
+                : 'Yenileme #' . $recordId;
+            $paidAtRaw = (string) (($row['paid_at'] ?? '') ?: ($row['updated_at'] ?? '') ?: ($row['created_at'] ?? ''));
+            $paidAt = $paidAtRaw !== '' ? date('d.m.Y H:i', strtotime($paidAtRaw)) : '-';
+            $company = trim((string) ($row['company_name'] ?? ''));
+            if ($company === '') {
+                $company = trim((string) (($row['customer_email'] ?? '') ?: ($row['customer_phone'] ?? '')));
+            }
+            $paymentId = trim((string) ($row['payment_id'] ?? ''));
+            $paymentStatus = trim((string) ($row['payment_status'] ?? ''));
+            ?>
+            <article class="collection-card paid-card">
+                <div class="collection-card-main">
+                    <div>
+                        <small><?= h($isManual ? 'Manuel ödeme' : 'Yenileme ödemesi') ?></small>
+                        <strong><?= h($company !== '' ? $company : '-') ?></strong>
+                        <span><?= h((string) (($row['title'] ?? '') ?: '-')) ?></span>
+                    </div>
+                    <div class="collection-card-meta">
+                        <span class="badge active">Tahsil edildi</span>
+                        <b><?= h(money_format_local($row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'))) ?></b>
+                    </div>
+                </div>
+                <div class="collection-card-grid">
+                    <div>
+                        <span>Kayıt</span>
+                        <strong><?= h($recordLabel) ?></strong>
+                    </div>
+                    <div>
+                        <span>Ödeme tarihi</span>
+                        <strong><?= h($paidAt) ?></strong>
+                    </div>
+                    <div>
+                        <span>iyzico ödeme no</span>
+                        <strong><?= h($paymentId !== '' ? $paymentId : '-') ?></strong>
+                    </div>
+                    <div>
+                        <span>Durum</span>
+                        <strong><?= h($paymentStatus !== '' ? $paymentStatus : 'SUCCESS') ?></strong>
+                    </div>
+                </div>
+                <div class="collection-card-actions">
+                    <a class="button small secondary" href="<?= h($recordUrl) ?>">Kaydı aç</a>
+                </div>
+            </article>
+        <?php endforeach; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
 }
 
 function render_payment_requests(): void
@@ -13251,6 +13336,7 @@ function collection_filter_options(): array
         'unpaid' => 'Ödenmemiş',
         'bank' => 'Havale / EFT',
         'choice' => 'Seçim bekleyen',
+        'paid-card' => 'Kart ödemeleri',
     ];
 }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.17] - 2026-05-08
+
+- Tahsilat ekranına başarılı iyzico kart ödemelerini gösteren “Kart ödemeleri” filtresi eklendi.
+- Yenileme ve manuel ödeme talebi üzerinden alınan iyzico tahsilatları ödeme no, tarih, tutar ve kaynak kaydıyla listelenir.
+
 ## [2.0.16] - 2026-05-08
 
 - Cari bilgi talebi mailleri artık Mail Logları ekranına başarılı veya başarısız durumuyla yazılır.

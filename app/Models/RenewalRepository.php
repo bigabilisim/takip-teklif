@@ -2399,6 +2399,56 @@ final class RenewalRepository
         return $stmt->fetchAll();
     }
 
+    public function paidCardPaymentRows(int $limit = 100): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT
+                'renewal' AS source_type,
+                rp.id AS payment_row_id,
+                rp.renewal_id,
+                NULL AS request_id,
+                rp.provider,
+                rp.amount,
+                rp.currency,
+                rp.status,
+                rp.payment_status,
+                rp.payment_id,
+                rp.error_message,
+                rp.paid_at,
+                rp.created_at,
+                rp.updated_at,
+                r.title AS renewal_title,
+                r.brand,
+                r.renewal_date,
+                COALESCE(ri_stats.items_summary, r.title) AS title,
+                c.company_name,
+                c.email AS customer_email,
+                c.phone AS customer_phone
+             FROM renewal_payments rp
+             INNER JOIN renewals r ON r.id = rp.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             LEFT JOIN (
+                SELECT
+                    renewal_id,
+                    CASE
+                        WHEN COUNT(*) > 1 THEN CONCAT(SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1), ' + ', COUNT(*) - 1, ' ürün')
+                        ELSE SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1)
+                    END AS items_summary
+                FROM renewal_items
+                GROUP BY renewal_id
+             ) ri_stats ON ri_stats.renewal_id = r.id
+             WHERE rp.provider = 'iyzico'
+               AND rp.status = 'paid'
+               AND COALESCE(rp.payment_id, '') <> ''
+             ORDER BY COALESCE(rp.paid_at, rp.updated_at, rp.created_at) DESC, rp.id DESC
+             LIMIT :limit"
+        );
+        $stmt->bindValue('limit', max(1, min(300, $limit)), PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
     public function providerPayments(int $renewalId, string $provider): array
     {
         $stmt = $this->db->prepare(

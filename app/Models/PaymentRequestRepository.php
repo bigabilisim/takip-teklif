@@ -61,6 +61,43 @@ final class PaymentRequestRepository
         return $stmt->fetchAll();
     }
 
+    public function paidCardPaymentRows(int $limit = 100): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT
+                'manual' AS source_type,
+                mpt.id AS payment_row_id,
+                NULL AS renewal_id,
+                mpr.id AS request_id,
+                mpt.provider,
+                mpt.amount,
+                mpt.currency,
+                mpt.status,
+                mpt.payment_status,
+                mpt.payment_id,
+                mpt.error_message,
+                mpt.paid_at,
+                mpt.created_at,
+                mpt.updated_at,
+                mpr.title,
+                mpr.description,
+                mpr.customer_name AS company_name,
+                mpr.customer_email,
+                mpr.customer_phone
+             FROM manual_payment_transactions mpt
+             INNER JOIN manual_payment_requests mpr ON mpr.id = mpt.request_id
+             WHERE mpt.provider = 'iyzico'
+               AND mpt.status = 'paid'
+               AND COALESCE(mpt.payment_id, '') <> ''
+             ORDER BY COALESCE(mpt.paid_at, mpt.updated_at, mpt.created_at) DESC, mpt.id DESC
+             LIMIT :limit"
+        );
+        $stmt->bindValue('limit', max(1, min(300, $limit)), PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
     public function find(int $id): ?array
     {
         $stmt = $this->db->prepare(

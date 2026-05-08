@@ -1651,6 +1651,11 @@ h3 {
     box-shadow: var(--shadow-soft);
 }
 
+.collection-card.paid-card {
+    border-color: rgba(20, 124, 114, 0.24);
+    background: linear-gradient(180deg, rgba(228, 247, 237, 0.72), rgba(255, 255, 255, 0.94));
+}
+
 .collection-card-main {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
