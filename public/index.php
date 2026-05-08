@@ -59,6 +59,11 @@ if (preg_match('#^/musteri-teklif/([a-f0-9]{64})$#', $path, $matches)) {
     exit;
 }
 
+if (preg_match('#^/teklif/(\d+)$#', $path, $matches)) {
+    handle_sales_offer_public((int) $matches[1]);
+    exit;
+}
+
 if (preg_match('#^/renewals/(\d+)/payment$#', $path, $matches)) {
     handle_public_renewal_payment($method, (int) $matches[1]);
     exit;
@@ -159,6 +164,21 @@ try {
     } elseif ($path === '/offers/create') {
         require_permission('renewals.manage');
         handle_sales_offer_create($repo, $method);
+    } elseif (preg_match('#^/offers/(\d+)/preview$#', $path, $matches) && $method === 'GET') {
+        require_permission('renewals.view');
+        handle_sales_offer_preview($repo, (int) $matches[1], false);
+    } elseif (preg_match('#^/offers/(\d+)/pdf$#', $path, $matches) && $method === 'GET') {
+        require_permission('renewals.view');
+        handle_sales_offer_preview($repo, (int) $matches[1], true);
+    } elseif (preg_match('#^/offers/(\d+)/whatsapp$#', $path, $matches) && $method === 'GET') {
+        require_permission('renewals.manage');
+        handle_sales_offer_whatsapp($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/offers/(\d+)/send-email$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_sales_offer_mail($repo, (int) $matches[1], 'view');
+    } elseif (preg_match('#^/offers/(\d+)/send-pdf$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_sales_offer_mail($repo, (int) $matches[1], 'pdf');
     } elseif (preg_match('#^/offers/(\d+)/edit$#', $path, $matches)) {
         require_permission('renewals.manage');
         handle_sales_offer_create($repo, $method, (int) $matches[1]);
@@ -6044,6 +6064,339 @@ function report_amounts_text(array $amounts): string
     ));
 }
 
+function handle_sales_offer_public(int $offerId): void
+{
+    $mode = sales_offer_public_mode($_GET['mode'] ?? 'view');
+    $expires = (string) ($_GET['expires'] ?? '');
+    $signature = (string) ($_GET['sig'] ?? '');
+    if (!sales_offer_public_signature_valid($offerId, $expires, $mode, $signature)) {
+        render_public_layout('Teklif', static function (): void {
+            echo '<section class="login-panel"><div class="alert error">Teklif bağlantısı geçersiz veya süresi dolmuş.</div></section>';
+        });
+        return;
+    }
+
+    $repo = new RenewalRepository();
+    $offer = $repo->findSalesOffer($offerId);
+    if (!$offer) {
+        render_public_layout('Teklif', static function (): void {
+            echo '<section class="login-panel"><div class="alert error">Teklif bulunamadı.</div></section>';
+        });
+        return;
+    }
+
+    render_sales_offer_document($offer, $mode === 'pdf', true);
+}
+
+function handle_sales_offer_preview(RenewalRepository $repo, int $offerId, bool $autoPrint): void
+{
+    $offer = $repo->findSalesOffer($offerId);
+    if (!$offer) {
+        flash('error', 'Teklif bulunamadı.');
+        redirect('/');
+    }
+
+    render_sales_offer_document($offer, $autoPrint, false);
+}
+
+function handle_sales_offer_whatsapp(RenewalRepository $repo, int $offerId): void
+{
+    $offer = $repo->findSalesOffer($offerId);
+    if (!$offer) {
+        flash('error', 'Teklif bulunamadı.');
+        redirect('/');
+    }
+
+    $phone = whatsapp_number_from_phone((string) ($offer['customer_phone'] ?? ''));
+    if ($phone === null) {
+        flash('error', 'WhatsApp göndermek için teklif üzerindeki müşteri telefon numarası eksik veya geçersiz.');
+        redirect('/');
+    }
+
+    $repo->markSalesOfferSent($offerId);
+    header('Location: ' . whatsapp_web_url($phone, sales_offer_whatsapp_message($offer, sales_offer_public_url($offerId))));
+    exit;
+}
+
+function handle_sales_offer_mail(RenewalRepository $repo, int $offerId, string $mode): void
+{
+    verify_csrf();
+    $mode = sales_offer_public_mode($mode);
+    $offer = $repo->findSalesOffer($offerId);
+    if (!$offer) {
+        flash('error', 'Teklif bulunamadı.');
+        redirect('/');
+    }
+
+    $email = trim((string) ($offer['customer_email'] ?? ''));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        flash('error', 'E-posta göndermek için teklif üzerinde geçerli müşteri e-posta adresi olmalı.');
+        redirect('/');
+    }
+
+    $url = sales_offer_public_url($offerId, $mode);
+    $offerNumber = sales_offer_number($offer);
+    $subject = '[' . $offerNumber . '] ' . ($mode === 'pdf' ? 'PDF teklif çıktınız' : 'Teklifiniz hazır') . ': ' . (string) ($offer['title'] ?? 'Teklif');
+    $body = sales_offer_mail_body($offer, $url, $mode);
+    $result = Mailer::sendWithResult($email, $subject, $body, true);
+    $ok = !empty($result['ok']);
+    $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+
+    $repo->logMail(
+        null,
+        $email,
+        $subject,
+        (string) ($result['body'] ?? $body),
+        $ok ? 'sent' : 'failed',
+        $error,
+        false
+    );
+
+    if ($ok) {
+        $repo->markSalesOfferSent($offerId);
+        flash('success', $mode === 'pdf' ? 'PDF teklif bağlantısı e-posta ile gönderildi.' : 'Teklif e-posta ile gönderildi.');
+    } else {
+        flash('error', 'Teklif e-postası gönderilemedi: ' . ($error ?: 'Alıcı sunucusu kabul etmedi.'));
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function sales_offer_public_url(int $offerId, string $mode = 'view', int $ttlDays = 14): string
+{
+    $mode = sales_offer_public_mode($mode);
+    $expires = time() + (max(1, $ttlDays) * 86400);
+
+    return url('/teklif/' . $offerId) . '?' . http_build_query([
+        'mode' => $mode,
+        'expires' => $expires,
+        'sig' => sales_offer_public_signature($offerId, $expires, $mode),
+    ]);
+}
+
+function sales_offer_public_mode(mixed $mode): string
+{
+    $mode = (string) $mode;
+
+    return in_array($mode, ['view', 'pdf'], true) ? $mode : 'view';
+}
+
+function sales_offer_public_signature_valid(int $offerId, string $expires, string $mode, string $signature): bool
+{
+    if (!ctype_digit($expires) || (int) $expires < time()) {
+        return false;
+    }
+
+    $expected = sales_offer_public_signature($offerId, (int) $expires, sales_offer_public_mode($mode));
+
+    return $signature !== '' && hash_equals($expected, $signature);
+}
+
+function sales_offer_public_signature(int $offerId, int $expires, string $mode): string
+{
+    return hash_hmac('sha256', $offerId . '|' . $expires . '|' . sales_offer_public_mode($mode), app_link_secret());
+}
+
+function app_link_secret(): string
+{
+    $path = ROOT_PATH . '/storage/payment_link_secret.key';
+    if (is_file($path)) {
+        $secret = trim((string) file_get_contents($path));
+        if ($secret !== '') {
+            return $secret;
+        }
+    }
+
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        mkdir($dir, 0775, true);
+    }
+
+    $secret = bin2hex(random_bytes(32));
+    file_put_contents($path, $secret, LOCK_EX);
+    @chmod($path, 0640);
+
+    return $secret;
+}
+
+function render_sales_offer_document(array $offer, bool $autoPrint = false, bool $publicLink = false): void
+{
+    render_public_layout('Teklif', static function () use ($offer, $autoPrint, $publicLink): void {
+        $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
+        ?>
+        <section class="login-panel customer-offer-public sales-offer-public">
+            <div class="summary-print-actions customer-offer-print-actions">
+                <button type="button" class="button secondary" onclick="window.print()">PDF olarak kaydet / yazdır</button>
+            </div>
+
+            <?= render_company_letterhead() ?>
+
+            <div class="login-heading customer-offer-hero">
+                <p class="customer-offer-kicker"><?= $publicLink ? 'MÜŞTERİ TEKLİFİ' : 'TEKLİF TASLAĞI' ?></p>
+                <h1>Teklifinizi inceleyiniz.</h1>
+                <p class="muted compact">Teklif no: <?= h(sales_offer_number($offer)) ?></p>
+                <p class="muted compact"><?= h((string) ($offer['customer_name'] ?? '-')) ?> için hazırlanan teklif çıktısıdır.</p>
+            </div>
+
+            <?php if (!empty($offer['notes'])): ?>
+                <div class="settings-note"><?= nl2br(h((string) $offer['notes']), false) ?></div>
+            <?php endif; ?>
+
+            <?= render_sales_offer_lines_public((array) ($offer['items'] ?? []), $currency) ?>
+
+            <div class="payment-choice-summary customer-offer-totals">
+                <div><span>Ara toplam</span><strong><?= h(money_format_local($offer['subtotal'] ?? 0, $currency)) ?></strong></div>
+                <div><span>KDV</span><strong><?= h(money_format_local($offer['vat_total'] ?? 0, $currency)) ?></strong></div>
+                <div><span>KDV dahil toplam</span><strong><?= h(money_format_local($offer['total'] ?? 0, $currency)) ?></strong></div>
+            </div>
+        </section>
+        <?php if ($autoPrint): ?>
+            <script>
+                window.addEventListener('load', function () {
+                    window.setTimeout(function () { window.print(); }, 300);
+                });
+            </script>
+        <?php endif; ?>
+        <?php
+    });
+}
+
+function render_sales_offer_lines_public(array $items, string $currency): string
+{
+    if ($items === []) {
+        return '<div class="empty">Teklif kalemi bulunamadı.</div>';
+    }
+
+    ob_start();
+    ?>
+    <div class="public-payment-items customer-offer-lines">
+        <h2>Teklif kalemleri</h2>
+        <?php foreach ($items as $item): ?>
+            <?php
+            $quantity = (float) ($item['quantity'] ?? 1);
+            $unitPrice = (float) ($item['unit_price'] ?? 0);
+            $subtotal = (float) ($item['line_subtotal'] ?? ($quantity * $unitPrice));
+            $vatRate = (float) ($item['vat_rate'] ?? 0);
+            $total = (float) ($item['line_total'] ?? ($subtotal + ($subtotal * $vatRate / 100)));
+            ?>
+            <div class="public-payment-item customer-offer-line">
+                <div>
+                    <strong><?= h((string) ($item['title'] ?? '-')) ?></strong>
+                    <?php if (!empty($item['brand'])): ?>
+                        <span><?= h((string) $item['brand']) ?></span>
+                    <?php endif; ?>
+                    <?php if (!empty($item['description'])): ?>
+                        <em><?= h((string) $item['description']) ?></em>
+                    <?php endif; ?>
+                    <span><?= h(number_format($quantity, 2, ',', '.')) ?> adet</span>
+                </div>
+                <div class="price-breakdown">
+                    <span>Birim fiyat: <b><?= h(money_format_local($unitPrice, $currency)) ?></b></span>
+                    <span>Toplam: <b><?= h(money_format_local($subtotal, $currency)) ?></b></span>
+                    <span>KDV'li fiyat: <b><?= h(money_format_local($total, $currency)) ?></b></span>
+                    <em>KDV %<?= h(number_format($vatRate, 2, ',', '.')) ?></em>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function sales_offer_number(array $offer): string
+{
+    $number = trim((string) ($offer['offer_number'] ?? ''));
+    if ($number !== '') {
+        return $number;
+    }
+
+    return 'TK-' . date('Y', strtotime((string) ($offer['created_at'] ?? 'now'))) . '-' . str_pad((string) (int) ($offer['id'] ?? 0), 6, '0', STR_PAD_LEFT);
+}
+
+function sales_offer_whatsapp_message(array $offer, string $url): string
+{
+    $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
+    $lines = [
+        'Merhaba,',
+        '',
+        sales_offer_number($offer) . ' numaralı teklifinizi incelemeniz için paylaşıyoruz.',
+        'Firma: ' . (string) ($offer['customer_name'] ?? '-'),
+        'Teklif: ' . (string) ($offer['title'] ?? '-'),
+        'KDV dahil toplam: ' . money_format_local($offer['total'] ?? 0, $currency),
+        '',
+        'Teklif / PDF çıktısı: ' . $url,
+    ];
+
+    return implode("\n", $lines);
+}
+
+function sales_offer_mail_body(array $offer, string $url, string $mode): string
+{
+    $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
+    $rows = [
+        'Teklif no' => sales_offer_number($offer),
+        'Firma' => (string) ($offer['customer_name'] ?? '-'),
+        'Teklif' => (string) ($offer['title'] ?? '-'),
+        'Ara toplam' => money_format_local($offer['subtotal'] ?? 0, $currency),
+        'KDV' => money_format_local($offer['vat_total'] ?? 0, $currency),
+        'KDV dahil toplam' => money_format_local($offer['total'] ?? 0, $currency),
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;width:34%;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h($value) . '</td>'
+            . '</tr>';
+    }
+
+    $lineRows = '';
+    foreach ((array) ($offer['items'] ?? []) as $item) {
+        $quantity = (float) ($item['quantity'] ?? 1);
+        $unitPrice = (float) ($item['unit_price'] ?? 0);
+        $subtotal = (float) ($item['line_subtotal'] ?? ($quantity * $unitPrice));
+        $total = (float) ($item['line_total'] ?? $subtotal);
+        $lineRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h((string) ($item['title'] ?? '-')) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;text-align:center;">' . h(number_format($quantity, 2, ',', '.')) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($unitPrice, $currency)) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($subtotal, $currency)) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#147c72;font-weight:700;text-align:right;">' . h(money_format_local($total, $currency)) . '</td>'
+            . '</tr>';
+    }
+
+    $lineTable = $lineRows === '' ? '' : '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;border-collapse:collapse;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr>'
+        . '<th align="left" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Ürün / hizmet</th>'
+        . '<th align="center" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Adet</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Birim fiyat</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Toplam</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">KDV dahil</th>'
+        . '</tr>'
+        . $lineRows
+        . '</table>';
+
+    $buttonLabel = $mode === 'pdf' ? 'PDF / teklif çıktısını aç' : 'Teklifi görüntüle';
+    $intro = $mode === 'pdf'
+        ? 'Teklif çıktınızı PDF olarak kaydedebilmeniz için bağlantıyı paylaşıyoruz.'
+        : 'Hazırlanan teklifinizi inceleyebilmeniz için bağlantıyı paylaşıyoruz.';
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d9e3df;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Müşteri teklifi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Teklifinizi inceleyebilirsiniz.</h1>'
+        . '<p style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . h($intro) . '</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
+        . $lineTable
+        . '<p style="margin:20px 0 0;"><a href="' . h($url) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">' . h($buttonLabel) . '</a></p>'
+        . '<p style="margin:14px 0 0;color:#607069;font-size:13px;line-height:1.5;">Bağlantı süreli olarak oluşturulmuştur. PDF almak için açılan sayfada “PDF olarak kaydet / yazdır” butonunu kullanabilirsiniz.</p>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
 function handle_sales_offer_create(RenewalRepository $repo, string $method, ?int $id = null): void
 {
     $templates = $repo->offerTemplates();
@@ -6526,6 +6879,19 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
                     <?php if ($offerId > 0 && ($canManage || $canDelete)): ?>
                         <div class="track-actions">
                             <?php if ($canManage): ?>
+                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/preview')) ?>">Taslak görüntüle</a>
+                                <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h(url('/offers/' . $offerId . '/whatsapp')) ?>">WhatsApp'tan gönder</a>
+                                <form method="post" action="<?= h(url('/offers/' . $offerId . '/send-email')) ?>">
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
+                                    <button type="submit" class="button small secondary">E-posta gönder</button>
+                                </form>
+                                <form method="post" action="<?= h(url('/offers/' . $offerId . '/send-pdf')) ?>">
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
+                                    <button type="submit" class="button small secondary">PDF gönder</button>
+                                </form>
+                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/pdf')) ?>">PDF olarak indir</a>
                                 <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
                             <?php endif; ?>
                             <?php if ($canDelete): ?>

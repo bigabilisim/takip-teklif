@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.21] - 2026-05-08
+
+- Dashboard teklif kartı detayına taslak görüntüleme, WhatsApp gönderimi, e-posta gönderimi, PDF bağlantısı gönderimi ve PDF çıktısı açma aksiyonları eklendi.
+- Satış teklifleri için süreli müşteri görüntüleme bağlantısı, print/PDF uyumlu teklif çıktısı ve mail log kaydı eklendi.
+
 ## [2.0.20] - 2026-05-08
 
 - Dashboard teklif kartları açıldığında alt bölümde `Düzenle` ve `Sil` aksiyonları eklendi; silme aksiyonu üst özet satırında gösterilmez.

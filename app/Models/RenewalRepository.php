@@ -1210,6 +1210,16 @@ final class RenewalRepository
         }
     }
 
+    public function markSalesOfferSent(int $id): void
+    {
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET status = CASE WHEN status = 'draft' THEN 'sent' ELSE status END,
+                 updated_at = NOW()
+             WHERE id = :id"
+        )->execute(['id' => $id]);
+    }
+
     public function findPaymentMethodByName(string $name): ?array
     {
         if (self::isRemovedPaymentMethodName($name)) {
@@ -4564,7 +4574,7 @@ final class RenewalRepository
         }
     }
 
-    public function logMail(int $renewalId, string $to, string $subject, string $body, string $status, ?string $error = null, bool $touchReminder = true): int
+    public function logMail(?int $renewalId, string $to, string $subject, string $body, string $status, ?string $error = null, bool $touchReminder = true): int
     {
         $stmt = $this->db->prepare(
             'INSERT INTO mail_logs (renewal_id, recipient_email, subject, body, status, error_message, sent_at)
@@ -4579,7 +4589,7 @@ final class RenewalRepository
             'error_message' => $error,
         ]);
 
-        if ($status === 'sent' && $touchReminder) {
+        if ($renewalId !== null && $renewalId > 0 && $status === 'sent' && $touchReminder) {
             $this->db->prepare('UPDATE renewals SET last_notified_at = NOW() WHERE id = :id')
                 ->execute(['id' => $renewalId]);
         }
