@@ -1,0 +1,44 @@
+name: Codex Sync
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/codex-sync.yml'
+      - '.codex-sync-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Download Codex sync package
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://takip.bigabilisim.com/codex-sync-v2.0.28-20260509.tar.gz" -o /tmp/codex-sync.tar.gz
+          tar -xzf /tmp/codex-sync.tar.gz -C "$GITHUB_WORKSPACE"
+      - name: Commit synced files
+        run: |
+          set -euo pipefail
+          git config user.name "codex-sync"
+          git config user.email "actions@github.com"
+          git add CHANGELOG.md VERSION \
+            app/Core/IyzicoClient.php app/Core/Mailer.php app/Core/MailTemplate.php app/Core/ParasutClient.php app/Core/helpers.php \
+            app/Models/CustomerInfoRequestRepository.php app/Models/PaymentRequestRepository.php app/Models/RenewalRepository.php app/Models/SettingsRepository.php \
+            bin/migrate.php \
+            database/schema.sql database/seed.sql \
+            public/assets/app.css public/assets/app.js public/index.php public/service-worker.js
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Sync takip teklif v2.0.28"
+            git push origin HEAD:main
+          fi
