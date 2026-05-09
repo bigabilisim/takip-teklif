@@ -230,6 +230,11 @@ function permission_catalog(): array
             'collections.view' => 'Tahsilat listesini goruntule',
             'collections.manage' => 'Tahsilat maili gonder',
         ],
+        'Görüşmeler ve Notlar' => [
+            'notes.view' => 'Görüşme ve notları görüntüle',
+            'notes.manage' => 'Görüşme notu ekle ve düzenle',
+            'notes.delete' => 'Görüşme notu sil',
+        ],
         'Musteriler' => [
             'customers.view' => 'Musterileri goruntule',
             'customers.details' => 'Musteri cari detaylarini goruntule',

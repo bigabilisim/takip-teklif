@@ -1,4 +1,4 @@
-const APP_VERSION = '2.0.28';
+const APP_VERSION = '2.0.52';
 const CACHE_NAME = `yenileme-pwa-v${APP_VERSION}`;
 const CORE_ASSETS = [
     '/offline.html',
@@ -74,7 +74,7 @@ self.addEventListener('push', (event) => {
             body: data.body,
             icon: '/assets/pwa-icon.svg',
             badge: '/assets/pwa-icon.svg',
-            tag: 'renewal-reminder',
+            tag: data.tag || ('takip-event-' + Date.now()),
             renotify: true,
             data: { url: data.url || '/renewals' }
         })

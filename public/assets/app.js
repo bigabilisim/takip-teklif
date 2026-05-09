@@ -337,15 +337,60 @@
 
     initSettingsBoard();
 
-    const contactRow = (index) => `
-        <div class="contact-entry" data-contact-row>
-            <label>Yetkili adı <input name="contacts[${index}][full_name]" data-contact-name></label>
-            <label>E-posta <input type="email" name="contacts[${index}][email]" data-contact-email></label>
-            <label>Telefon <input name="contacts[${index}][phone]" data-contact-phone></label>
-            <label class="checkline"><input type="checkbox" name="contacts[${index}][notify_enabled]" value="1" checked> Bilgilendirme gönder</label>
-            <button type="button" class="button small danger" data-remove-contact>Kaldır</button>
+    const escapeContactHtml = (value) => String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+
+    const contactRoleOptions = (contactEditor, selectedValue = '') => {
+        try {
+            const roles = JSON.parse(contactEditor?.dataset.contactRoleOptions || '[]');
+            const items = Array.isArray(roles) ? roles : [];
+            return [
+                '<option value="">Görev seçin</option>',
+                ...items
+                    .map((role) => String(role || '').trim())
+                    .filter(Boolean)
+                    .map((role) => {
+                        const selected = role === selectedValue ? ' selected' : '';
+                        return `<option value="${escapeContactHtml(role)}"${selected}>${escapeContactHtml(role)}</option>`;
+                    }),
+            ].join('');
+        } catch (error) {
+            return '<option value="">Görev seçin</option>';
+        }
+    };
+
+    const contactRow = (index, contactEditor, roleTitle = '') => `
+        <div class="contact-entry contact-card" data-contact-row>
+            <div class="contact-card-head">
+                <div>
+                    <span class="contact-card-eyebrow">Görev kartı</span>
+                    <strong class="contact-card-title" data-contact-card-title>${escapeContactHtml(roleTitle || 'Yeni görev kartı')}</strong>
+                </div>
+                <button type="button" class="button small danger ghost-danger" data-remove-contact>Sil</button>
+            </div>
+            <div class="contact-card-grid">
+                <label>Yetkili adı <input name="contacts[${index}][full_name]" data-contact-name></label>
+                <label>Görev tanımı <select name="contacts[${index}][role_title]" data-contact-role>${contactRoleOptions(contactEditor, roleTitle)}</select></label>
+                <label>E-posta <input type="email" name="contacts[${index}][email]" data-contact-email></label>
+                <label>Telefon <input name="contacts[${index}][phone]" data-contact-phone></label>
+                <label class="checkline contact-card-check"><input type="checkbox" name="contacts[${index}][notify_enabled]" value="1" checked> Bilgilendirme gönder</label>
+            </div>
         </div>
     `;
+
+    const updateContactCardTitle = (row) => {
+        const title = row?.querySelector('[data-contact-card-title]');
+        const role = row?.querySelector('[data-contact-role]');
+        if (!title || !role) {
+            return;
+        }
+
+        title.textContent = role.value || 'Yeni görev kartı';
+    };
 
     const addContactRow = (contactEditor) => {
         if (!contactEditor) {
@@ -359,7 +404,7 @@
 
         const index = Number(contactEditor.dataset.nextIndex || '0');
         contactEditor.dataset.nextIndex = String(index + 1);
-        list.insertAdjacentHTML('beforeend', contactRow(index));
+        list.insertAdjacentHTML('beforeend', contactRow(index, contactEditor));
 
         return list.lastElementChild;
     };
@@ -376,10 +421,14 @@
 
             const row = removeButton.closest('[data-contact-row]');
             row?.remove();
+        });
 
-            if (!contactEditor.querySelector('[data-contact-row]')) {
-                addContactRow(contactEditor);
+        contactEditor.addEventListener('change', (event) => {
+            if (!event.target.closest('[data-contact-role]')) {
+                return;
             }
+
+            updateContactCardTitle(event.target.closest('[data-contact-row]'));
         });
     });
 
@@ -428,6 +477,157 @@
 
         input?.addEventListener('input', syncCustomerFilter);
         syncCustomerFilter();
+    });
+
+    document.querySelectorAll('.customer-row-compact > .customer-summary .customer-detail-toggle').forEach((toggle) => {
+        toggle.addEventListener('click', (event) => {
+            const row = toggle.closest('details.customer-row-compact');
+            if (!row) {
+                return;
+            }
+
+            event.preventDefault();
+            row.open = !row.open;
+        });
+    });
+
+    const whatsappTargetName = 'takip_whatsapp_web';
+    let whatsappWindow = null;
+
+    const prepareReusableWhatsAppWindow = () => {
+        try {
+            if (!whatsappWindow || whatsappWindow.closed) {
+                whatsappWindow = window.open('', whatsappTargetName);
+            }
+            if (whatsappWindow) {
+                whatsappWindow.focus();
+            }
+        } catch (error) {
+            // WhatsApp cross-origin pencere referansını keserse hedef adıyla devam ederiz.
+        }
+
+        return whatsappWindow;
+    };
+
+    const openReusableWhatsAppWindow = (url, preparedWindow = null) => {
+        if (!url || url === '#') {
+            return false;
+        }
+
+        const targetWindow = preparedWindow || prepareReusableWhatsAppWindow();
+        try {
+            if (targetWindow && !targetWindow.closed) {
+                targetWindow.location.href = url;
+                targetWindow.focus();
+                whatsappWindow = targetWindow;
+                return true;
+            }
+        } catch (error) {
+            // Pencere referansı kesildiyse hedef adıyla yeniden deneriz.
+        }
+
+        whatsappWindow = window.open(url, whatsappTargetName);
+        return true;
+    };
+
+    const whatsappPayloadFromResponse = async (response) => {
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload?.ok || !payload.whatsapp_url) {
+            throw new Error(payload?.message || 'WhatsApp bağlantısı hazırlanamadı.');
+        }
+
+        return String(payload.whatsapp_url);
+    };
+
+    const resolveWhatsAppUrl = async (href) => {
+        const url = new URL(href, window.location.href);
+        if (url.hostname.includes('whatsapp.com')) {
+            return url.toString();
+        }
+
+        if (url.origin !== window.location.origin) {
+            return url.toString();
+        }
+
+        const response = await fetch(url.toString(), {
+            headers: {
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+        });
+
+        return whatsappPayloadFromResponse(response);
+    };
+
+    document.addEventListener('click', async (event) => {
+        const link = event.target.closest(`a[target="${whatsappTargetName}"], a[href*="web.whatsapp.com/send"]`);
+        if (!link || link.getAttribute('aria-disabled') === 'true' || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+            return;
+        }
+
+        const href = link.getAttribute('href') || '';
+        if (href === '' || href === '#') {
+            return;
+        }
+
+        event.preventDefault();
+        const previousBusy = link.getAttribute('aria-busy');
+        link.setAttribute('aria-busy', 'true');
+        const preparedWindow = prepareReusableWhatsAppWindow();
+
+        try {
+            const whatsappUrl = await resolveWhatsAppUrl(href);
+            openReusableWhatsAppWindow(whatsappUrl, preparedWindow);
+        } catch (error) {
+            alert(error.message || 'WhatsApp bağlantısı açılamadı.');
+        } finally {
+            if (previousBusy === null) {
+                link.removeAttribute('aria-busy');
+            } else {
+                link.setAttribute('aria-busy', previousBusy);
+            }
+        }
+    });
+
+    document.addEventListener('submit', async (event) => {
+        const form = event.target;
+        const submitter = event.submitter;
+        if (!(form instanceof HTMLFormElement) || !submitter || submitter.getAttribute('formtarget') !== whatsappTargetName) {
+            return;
+        }
+
+        event.preventDefault();
+        const previousBusy = submitter.getAttribute('aria-busy');
+        submitter.disabled = true;
+        submitter.setAttribute('aria-busy', 'true');
+        const preparedWindow = prepareReusableWhatsAppWindow();
+
+        try {
+            const data = new FormData(form);
+            if (submitter.name) {
+                data.set(submitter.name, submitter.value || '');
+            }
+
+            const response = await fetch(form.action || window.location.href, {
+                method: (form.method || 'POST').toUpperCase(),
+                body: data,
+                headers: {
+                    Accept: 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+            });
+            const whatsappUrl = await whatsappPayloadFromResponse(response);
+            openReusableWhatsAppWindow(whatsappUrl, preparedWindow);
+        } catch (error) {
+            alert(error.message || 'WhatsApp bağlantısı açılamadı.');
+        } finally {
+            submitter.disabled = false;
+            if (previousBusy === null) {
+                submitter.removeAttribute('aria-busy');
+            } else {
+                submitter.setAttribute('aria-busy', previousBusy);
+            }
+        }
     });
 
     const reminderEditor = document.querySelector('[data-reminder-editor]');
@@ -1189,6 +1389,28 @@
         const contactPanel = form.querySelector('[data-manual-contact-panel]');
         const contactList = form.querySelector('[data-manual-contact-list]');
         const contactCount = form.querySelector('[data-manual-contact-count]');
+        const closeResults = () => {
+            results.hidden = true;
+            results.innerHTML = '';
+        };
+
+        form.querySelectorAll('[data-payment-request-reminder]').forEach((card) => {
+            const repeatDaily = card.querySelector('[data-reminder-repeat-daily]');
+            const untilPaid = card.querySelector('[data-reminder-until-paid]');
+            if (!repeatDaily || !untilPaid) {
+                return;
+            }
+            untilPaid.addEventListener('change', () => {
+                if (untilPaid.checked) {
+                    repeatDaily.checked = true;
+                }
+            });
+            repeatDaily.addEventListener('change', () => {
+                if (!repeatDaily.checked) {
+                    untilPaid.checked = false;
+                }
+            });
+        });
 
         if (!input || !results || !customerId || !contactPanel || !contactList) {
             return;
@@ -1244,7 +1466,7 @@
             if (tax && !tax.value) {
                 tax.value = String(customer.tax || '');
             }
-            results.hidden = true;
+            closeResults();
             renderContacts(customer);
         };
 
@@ -1253,7 +1475,7 @@
             results.innerHTML = '';
 
             if (query === '') {
-                results.hidden = true;
+                closeResults();
                 return;
             }
 
@@ -1271,8 +1493,7 @@
                 .slice(0, 8);
 
             if (matches.length < 1) {
-                results.innerHTML = '<div class="manual-payment-customer-empty">Cari bulunamadı. Manuel yazmaya devam edebilirsiniz.</div>';
-                results.hidden = false;
+                closeResults();
                 return;
             }
 
@@ -1298,10 +1519,18 @@
         });
 
         input.addEventListener('focus', renderResults);
+        form.querySelectorAll('input, select, textarea, button').forEach((field) => {
+            if (field === input) {
+                return;
+            }
+            field.addEventListener('focus', closeResults);
+        });
 
         document.addEventListener('click', (event) => {
-            if (!form.contains(event.target)) {
-                results.hidden = true;
+            if (!form.contains(event.target) || !results.contains(event.target)) {
+                if (event.target !== input && !results.contains(event.target)) {
+                    closeResults();
+                }
             }
         });
     });

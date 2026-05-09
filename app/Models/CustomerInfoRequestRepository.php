@@ -99,6 +99,7 @@ final class CustomerInfoRequestRepository
                 'notes' => '',
                 'contacts' => [[
                     'full_name' => trim($fallbackContactName),
+                    'role_title' => '',
                     'email' => trim($fallbackEmail),
                     'phone' => '',
                     'notify_enabled' => 1,
@@ -110,6 +111,7 @@ final class CustomerInfoRequestRepository
         if ($contacts === []) {
             $contacts = [[
                 'full_name' => trim((string) (($customer['contact_name'] ?? '') ?: $fallbackContactName)),
+                'role_title' => '',
                 'email' => trim((string) (($customer['email'] ?? '') ?: $fallbackEmail)),
                 'phone' => \normalize_phone_number($customer['phone'] ?? ''),
                 'notify_enabled' => 1,
@@ -273,7 +275,7 @@ final class CustomerInfoRequestRepository
     private function customerContacts(int $customerId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT full_name, email, phone, notify_enabled
+            'SELECT full_name, role_title, email, phone, notify_enabled
              FROM customer_contacts
              WHERE customer_id = :customer_id
              ORDER BY notify_enabled DESC, full_name ASC, id ASC'
@@ -284,6 +286,7 @@ final class CustomerInfoRequestRepository
         foreach ($stmt->fetchAll() as $contact) {
             $contacts[] = [
                 'full_name' => trim((string) ($contact['full_name'] ?? '')),
+                'role_title' => trim((string) ($contact['role_title'] ?? '')),
                 'email' => trim((string) ($contact['email'] ?? '')),
                 'phone' => \normalize_phone_number($contact['phone'] ?? ''),
                 'notify_enabled' => !empty($contact['notify_enabled']) ? 1 : 0,
@@ -303,6 +306,7 @@ final class CustomerInfoRequestRepository
     private function upsertContact(int $customerId, array $data): void
     {
         $name = trim((string) ($data['full_name'] ?? $data['contact_name'] ?? ''));
+        $roleTitle = trim((string) ($data['role_title'] ?? ''));
         $email = trim((string) ($data['email'] ?? ''));
         $phone = \normalize_phone_number($data['phone'] ?? '');
         $notifyEnabled = !array_key_exists('notify_enabled', $data) || !empty($data['notify_enabled']) ? 1 : 0;
@@ -326,6 +330,7 @@ final class CustomerInfoRequestRepository
             $this->db->prepare(
                 'UPDATE customer_contacts
                  SET full_name = :full_name,
+                     role_title = :role_title,
                      email = :email,
                      phone = :phone,
                      notify_enabled = :notify_enabled,
@@ -334,6 +339,7 @@ final class CustomerInfoRequestRepository
             )->execute([
                 'id' => $existingId,
                 'full_name' => $name !== '' ? $name : ($email !== '' ? $email : 'Cari yetkilisi'),
+                'role_title' => $roleTitle !== '' ? $roleTitle : null,
                 'email' => $email !== '' ? $email : null,
                 'phone' => $phone !== '' ? $phone : null,
                 'notify_enabled' => $notifyEnabled,
@@ -342,11 +348,12 @@ final class CustomerInfoRequestRepository
         }
 
         $this->db->prepare(
-            'INSERT INTO customer_contacts (customer_id, full_name, email, phone, notify_enabled)
-             VALUES (:customer_id, :full_name, :email, :phone, :notify_enabled)'
+            'INSERT INTO customer_contacts (customer_id, full_name, role_title, email, phone, notify_enabled)
+             VALUES (:customer_id, :full_name, :role_title, :email, :phone, :notify_enabled)'
         )->execute([
             'customer_id' => $customerId,
             'full_name' => $name !== '' ? $name : ($email !== '' ? $email : 'Cari yetkilisi'),
+            'role_title' => $roleTitle !== '' ? $roleTitle : null,
             'email' => $email !== '' ? $email : null,
             'phone' => $phone !== '' ? $phone : null,
             'notify_enabled' => $notifyEnabled,
@@ -375,6 +382,7 @@ final class CustomerInfoRequestRepository
 
             $contacts[] = [
                 'full_name' => $name !== '' ? $name : ($email !== '' ? $email : $phone),
+                'role_title' => trim((string) ($row['role_title'] ?? '')),
                 'email' => $email,
                 'phone' => $phone,
                 'notify_enabled' => !empty($row['notify_enabled']) ? 1 : 0,
@@ -395,6 +403,7 @@ final class CustomerInfoRequestRepository
 
         return [[
             'full_name' => $name !== '' ? $name : ($email !== '' ? $email : $phone),
+            'role_title' => '',
             'email' => $email,
             'phone' => $phone,
             'notify_enabled' => 1,
@@ -430,6 +439,37 @@ final class CustomerInfoRequestRepository
 
         if (!$this->columnExists('customer_info_requests', 'recipient_name')) {
             $this->db->exec('ALTER TABLE customer_info_requests ADD COLUMN recipient_name VARCHAR(190) NULL AFTER recipient_email');
+        }
+        $this->ensureContactRoleSchema();
+    }
+
+    private function ensureContactRoleSchema(): void
+    {
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS contact_role_definitions (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(120) NOT NULL,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_contact_role_definitions_name (name),
+                INDEX idx_contact_role_definitions_active (is_active, sort_order, name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        if (!$this->columnExists('customer_contacts', 'role_title')) {
+            $this->db->exec('ALTER TABLE customer_contacts ADD COLUMN role_title VARCHAR(120) NULL AFTER full_name');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT IGNORE INTO contact_role_definitions (name, sort_order, is_active)
+             VALUES (:name, :sort_order, 1)'
+        );
+        foreach (['Satın alma', 'Muhasebe', 'Bilgi işlem', 'Yönetici', 'Patron'] as $index => $name) {
+            $stmt->execute([
+                'name' => $name,
+                'sort_order' => ($index + 1) * 10,
+            ]);
         }
     }
 

@@ -11,6 +11,14 @@ VALUES
     (1, 'Ayse Demir', 'ayse@example.com', '0212 000 00 00', 1),
     (2, 'Mehmet Kaya', 'mehmet@example.com', '0216 000 00 00', 1);
 
+INSERT INTO contact_role_definitions (name, sort_order, is_active)
+VALUES
+    ('Satın alma', 10, 1),
+    ('Muhasebe', 20, 1),
+    ('Bilgi işlem', 30, 1),
+    ('Yönetici', 40, 1),
+    ('Patron', 50, 1);
+
 INSERT INTO supplier_groups (name, is_active)
 VALUES
     ('Yazilim', 1),

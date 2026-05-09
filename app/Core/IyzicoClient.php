@@ -174,7 +174,7 @@ final class IyzicoClient
         [$name, $surname] = $this->splitName($contact !== '' ? $contact : $company);
         $email = trim((string) ($renewal['customer_email'] ?? ''));
         $phone = $this->phone((string) ($renewal['customer_phone'] ?? ''));
-        $identityNumber = $this->identityNumber((string) ($renewal['customer_tax_number'] ?? ''));
+        $identityNumber = $this->identityNumberFromContext($renewal);
 
         if ($this->mode() === 'live') {
             if ($email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
@@ -244,6 +244,42 @@ final class IyzicoClient
         $digits = preg_replace('/\D+/', '', $value) ?? '';
 
         return in_array(strlen($digits), [10, 11], true) ? $digits : '';
+    }
+
+    private function identityNumberFromContext(array $data): string
+    {
+        foreach (['customer_tax_number', 'tax_number', 'customer_vkn', 'identity_number'] as $key) {
+            $identityNumber = $this->identityNumber((string) ($data[$key] ?? ''));
+            if ($identityNumber !== '') {
+                return $identityNumber;
+            }
+        }
+
+        foreach (['customer_name', 'company_name', 'title', 'description', 'notes', 'customer_address'] as $key) {
+            $identityNumber = $this->identityNumberInText((string) ($data[$key] ?? ''));
+            if ($identityNumber !== '') {
+                return $identityNumber;
+            }
+        }
+
+        return '';
+    }
+
+    private function identityNumberInText(string $value): string
+    {
+        if ($value === '') {
+            return '';
+        }
+
+        preg_match_all('/(?<!\d)(\d[\d\s.\-\/]{8,22}\d)(?!\d)/u', $value, $matches);
+        foreach ($matches[1] ?? [] as $candidate) {
+            $identityNumber = $this->identityNumber((string) $candidate);
+            if ($identityNumber !== '') {
+                return $identityNumber;
+            }
+        }
+
+        return '';
     }
 
     private function phone(string $value): string

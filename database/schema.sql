@@ -114,6 +114,7 @@ CREATE TABLE customer_contacts (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     customer_id INT UNSIGNED NOT NULL,
     full_name VARCHAR(190) NOT NULL,
+    role_title VARCHAR(120) NULL,
     email VARCHAR(190) NULL,
     phone VARCHAR(60) NULL,
     notify_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -123,6 +124,17 @@ CREATE TABLE customer_contacts (
     INDEX idx_customer_contacts_customer (customer_id),
     INDEX idx_customer_contacts_notify (notify_enabled),
     INDEX idx_customer_contacts_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE contact_role_definitions (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(120) NOT NULL,
+    sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_contact_role_definitions_name (name),
+    INDEX idx_contact_role_definitions_active (is_active, sort_order, name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE supplier_groups (
@@ -164,6 +176,7 @@ CREATE TABLE supplier_contacts (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     supplier_id INT UNSIGNED NOT NULL,
     full_name VARCHAR(190) NOT NULL,
+    role_title VARCHAR(120) NULL,
     email VARCHAR(190) NULL,
     phone VARCHAR(60) NULL,
     notify_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -613,6 +626,10 @@ CREATE TABLE sales_offers (
     customer_phone VARCHAR(60) NULL,
     currency CHAR(3) NOT NULL DEFAULT 'TRY',
     status ENUM('draft', 'sent', 'approved', 'revision_requested', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+    operation_status VARCHAR(40) NOT NULL DEFAULT 'approved',
+    operation_note TEXT NULL,
+    operation_updated_at DATETIME NULL,
+    operation_completed_at DATETIME NULL,
     subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
     vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
     total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -626,6 +643,13 @@ CREATE TABLE sales_offers (
     parasut_invoice_status VARCHAR(30) NULL,
     parasut_invoice_error TEXT NULL,
     parasut_invoice_created_at DATETIME NULL,
+    approved_at DATETIME NULL,
+    approved_name VARCHAR(190) NULL,
+    approved_email VARCHAR(190) NULL,
+    approved_phone VARCHAR(60) NULL,
+    approved_delivery_id BIGINT UNSIGNED NULL,
+    approval_ip VARCHAR(45) NULL,
+    approval_user_agent VARCHAR(255) NULL,
     created_by INT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -639,6 +663,8 @@ CREATE TABLE sales_offers (
     INDEX idx_sales_offers_payment_request (payment_request_id),
     INDEX idx_sales_offers_balance_payment_request (balance_payment_request_id),
     INDEX idx_sales_offers_parasut_invoice (parasut_invoice_id),
+    INDEX idx_sales_offers_approved_at (approved_at),
+    INDEX idx_sales_offers_operation (operation_status, operation_updated_at),
     INDEX idx_sales_offers_customer (customer_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -662,6 +688,39 @@ CREATE TABLE sales_offer_items (
     CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
     INDEX idx_sales_offer_items_offer (offer_id, sort_order),
     INDEX idx_sales_offer_items_stock (stock_item_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE sales_offer_deliveries (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    offer_id INT UNSIGNED NOT NULL,
+    recipient_name VARCHAR(190) NULL,
+    recipient_email VARCHAR(190) NULL,
+    recipient_phone VARCHAR(60) NULL,
+    channel VARCHAR(30) NOT NULL DEFAULT 'mail',
+    mode VARCHAR(10) NOT NULL DEFAULT 'view',
+    token_hash CHAR(64) NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'queued',
+    error_message TEXT NULL,
+    sent_at DATETIME NULL,
+    first_viewed_at DATETIME NULL,
+    last_viewed_at DATETIME NULL,
+    view_count INT UNSIGNED NOT NULL DEFAULT 0,
+    approved_at DATETIME NULL,
+    approval_name VARCHAR(190) NULL,
+    approval_email VARCHAR(190) NULL,
+    approval_phone VARCHAR(60) NULL,
+    approval_ip VARCHAR(45) NULL,
+    approval_user_agent VARCHAR(255) NULL,
+    last_ip VARCHAR(45) NULL,
+    last_user_agent VARCHAR(255) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sales_offer_deliveries_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_sales_offer_deliveries_token (token_hash),
+    INDEX idx_sales_offer_deliveries_offer (offer_id, created_at),
+    INDEX idx_sales_offer_deliveries_status (offer_id, status),
+    INDEX idx_sales_offer_deliveries_viewed (offer_id, first_viewed_at),
+    INDEX idx_sales_offer_deliveries_approved (offer_id, approved_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE mail_logs (
@@ -705,6 +764,32 @@ CREATE TABLE customer_info_requests (
     INDEX idx_customer_info_requests_customer (customer_id),
     INDEX idx_customer_info_requests_submitted_customer (submitted_customer_id),
     INDEX idx_customer_info_requests_email (recipient_email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE interaction_notes (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    customer_id INT UNSIGNED NULL,
+    contact_name VARCHAR(190) NULL,
+    channel VARCHAR(40) NOT NULL DEFAULT 'meeting',
+    title VARCHAR(190) NOT NULL,
+    note TEXT NOT NULL,
+    quoted_amount DECIMAL(12,2) NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+    status VARCHAR(30) NOT NULL DEFAULT 'open',
+    follow_up_at DATETIME NULL,
+    completed_at DATETIME NULL,
+    created_by INT UNSIGNED NULL,
+    updated_by INT UNSIGNED NULL,
+    deleted_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_interaction_notes_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
+    CONSTRAINT fk_interaction_notes_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_interaction_notes_updated_by FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_interaction_notes_status_follow (status, follow_up_at),
+    INDEX idx_interaction_notes_customer (customer_id, created_at),
+    INDEX idx_interaction_notes_channel (channel, created_at),
+    INDEX idx_interaction_notes_deleted (deleted_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE push_subscriptions (

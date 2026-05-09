@@ -10,12 +10,21 @@ use PDO;
 final class RenewalRepository
 {
     private const STANDARD_REMINDER_DAYS = [30, 20, 15, 7];
+    private const SALES_OFFER_OPERATION_STATUSES = [
+        'approved' => 'Onaylandı',
+        'processing' => 'İşleme alındı',
+        'supplier_ordered' => 'Tedarikçiye sipariş geçildi',
+        'delivery_waiting' => 'Kurulum / teslim bekliyor',
+        'delivered' => 'Teslim edildi',
+        'completed' => 'Tamamlandı',
+    ];
 
     private PDO $db;
     private static bool $invoiceSchemaEnsured = false;
     private static bool $paymentSchemaEnsured = false;
     private static bool $renewalSchemaEnsured = false;
     private static bool $definitionSchemaEnsured = false;
+    private static bool $contactRoleSchemaEnsured = false;
     private static bool $paymentMethodSchemaEnsured = false;
     private static bool $itemSchemaEnsured = false;
     private static bool $decisionSchemaEnsured = false;
@@ -33,6 +42,7 @@ final class RenewalRepository
         $this->ensurePaymentSchema();
         $this->ensureRenewalSchema();
         $this->ensureDefinitionSchema();
+        $this->ensureContactRoleSchema();
         $this->ensurePaymentMethodSchema();
         $this->ensureItemSchema();
         $this->ensureDecisionSchema();
@@ -641,6 +651,66 @@ final class RenewalRepository
         ));
     }
 
+    public function contactRoles(bool $includeInactive = false): array
+    {
+        $sql = 'SELECT * FROM contact_role_definitions';
+        if (!$includeInactive) {
+            $sql .= ' WHERE is_active = 1';
+        }
+        $sql .= ' ORDER BY sort_order ASC, name ASC';
+
+        return $this->db->query($sql)->fetchAll();
+    }
+
+    public function createContactRole(array $data): int
+    {
+        $name = trim((string) ($data['role_name'] ?? $data['name'] ?? ''));
+        $sortOrder = max(0, (int) ($data['sort_order'] ?? 0));
+
+        if ($name === '') {
+            throw new \RuntimeException('Görev tanımı adı zorunlu.');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO contact_role_definitions (name, sort_order, is_active)
+             VALUES (:name, :sort_order, 1)
+             ON DUPLICATE KEY UPDATE sort_order = VALUES(sort_order), is_active = 1, updated_at = NOW()'
+        );
+        $stmt->execute([
+            'name' => $name,
+            'sort_order' => $sortOrder,
+        ]);
+
+        return (int) $this->db->lastInsertId();
+    }
+
+    public function updateContactRole(int $id, array $data): void
+    {
+        $name = trim((string) ($data['role_name'] ?? $data['name'] ?? ''));
+        $sortOrder = max(0, (int) ($data['sort_order'] ?? 0));
+
+        if ($name === '') {
+            throw new \RuntimeException('Görev tanımı adı zorunlu.');
+        }
+
+        $stmt = $this->db->prepare(
+            'UPDATE contact_role_definitions
+             SET name = :name, sort_order = :sort_order, is_active = 1, updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $id,
+            'name' => $name,
+            'sort_order' => $sortOrder,
+        ]);
+    }
+
+    public function deleteContactRole(int $id): void
+    {
+        $stmt = $this->db->prepare('UPDATE contact_role_definitions SET is_active = 0, updated_at = NOW() WHERE id = :id');
+        $stmt->execute(['id' => $id]);
+    }
+
     public function stockItems(string $query = '', int $limit = 300): array
     {
         $query = trim($query);
@@ -950,6 +1020,11 @@ final class RenewalRepository
         $stmt->execute(['id' => $id]);
     }
 
+    public static function salesOfferOperationStatuses(): array
+    {
+        return self::SALES_OFFER_OPERATION_STATUSES;
+    }
+
     public function dashboardSalesOffers(int $limit = 8): array
     {
         $stmt = $this->db->prepare(
@@ -963,7 +1038,13 @@ final class RenewalRepository
         $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
         $stmt->execute();
 
-        return $stmt->fetchAll();
+        $offers = $stmt->fetchAll();
+        foreach ($offers as &$offer) {
+            $offer['deliveries'] = $this->salesOfferDeliveries((int) ($offer['id'] ?? 0));
+        }
+        unset($offer);
+
+        return $offers;
     }
 
     public function findSalesOffer(int $id): ?array
@@ -983,12 +1064,14 @@ final class RenewalRepository
         }
 
         $offer['items'] = $this->salesOfferItems($id);
+        $offer['deliveries'] = $this->salesOfferDeliveries($id);
 
         return $offer;
     }
 
     public function salesReportYears(): array
     {
+        $this->ensureSalesReportSchemas();
         $sql = 'SELECT DISTINCT sale_year FROM (' . $this->salesReportUnionSql() . ') sales WHERE sale_year IS NOT NULL ORDER BY sale_year DESC';
         $years = array_map('intval', $this->db->query($sql)->fetchAll(PDO::FETCH_COLUMN));
 
@@ -997,6 +1080,7 @@ final class RenewalRepository
 
     public function salesReportItemOptions(int $limit = 200): array
     {
+        $this->ensureSalesReportSchemas();
         $limit = max(1, min($limit, 500));
         $stmt = $this->db->prepare(
             'SELECT item_title
@@ -1014,6 +1098,7 @@ final class RenewalRepository
 
     public function monthlySalesReport(int $year, string $query = ''): array
     {
+        $this->ensureSalesReportSchemas();
         $year = max(2000, min(2100, $year));
         $query = trim($query);
         $months = [];
@@ -1249,6 +1334,8 @@ final class RenewalRepository
     {
         $this->db->beginTransaction();
         try {
+            $this->db->prepare('DELETE FROM sales_offer_deliveries WHERE offer_id = :offer_id')
+                ->execute(['offer_id' => $id]);
             $this->db->prepare('DELETE FROM sales_offer_items WHERE offer_id = :offer_id')
                 ->execute(['offer_id' => $id]);
             $this->db->prepare('DELETE FROM sales_offers WHERE id = :id')
@@ -1258,6 +1345,37 @@ final class RenewalRepository
             $this->db->rollBack();
             throw $e;
         }
+    }
+
+    public function updateSalesOfferOperation(int $id, string $status, string $note = ''): array
+    {
+        $offer = $this->findSalesOffer($id);
+        if ($offer === null) {
+            throw new \RuntimeException('Teklif kaydı bulunamadı.');
+        }
+        if ((string) ($offer['status'] ?? '') !== 'approved') {
+            throw new \RuntimeException('Sadece onaylı teklifler operasyon akışına alınabilir.');
+        }
+
+        $status = self::normalizeSalesOfferOperationStatus($status);
+        $completedAtSql = $status === 'completed' ? 'NOW()' : 'NULL';
+
+        $stmt = $this->db->prepare(
+            "UPDATE sales_offers
+             SET operation_status = :operation_status,
+                 operation_note = :operation_note,
+                 operation_updated_at = NOW(),
+                 operation_completed_at = {$completedAtSql},
+                 updated_at = NOW()
+             WHERE id = :id"
+        );
+        $stmt->execute([
+            'id' => $id,
+            'operation_status' => $status,
+            'operation_note' => $this->nullableString($note),
+        ]);
+
+        return $this->findSalesOffer($id) ?? $offer;
     }
 
     public function markSalesOfferSent(int $id): void
@@ -1270,18 +1388,308 @@ final class RenewalRepository
         )->execute(['id' => $id]);
     }
 
-    public function markSalesOfferApproved(int $id, ?int $paymentRequestId = null): void
+    public function createSalesOfferDelivery(int $offerId, array $data): array
     {
+        $token = bin2hex(random_bytes(18));
+        $stmt = $this->db->prepare(
+            'INSERT INTO sales_offer_deliveries
+                (offer_id, recipient_name, recipient_email, recipient_phone, channel, mode, token_hash, status, created_at, updated_at)
+             VALUES
+                (:offer_id, :recipient_name, :recipient_email, :recipient_phone, :channel, :mode, :token_hash, "queued", NOW(), NOW())'
+        );
+        $stmt->execute([
+            'offer_id' => $offerId,
+            'recipient_name' => $this->nullableString($data['recipient_name'] ?? ''),
+            'recipient_email' => $this->nullableString($data['recipient_email'] ?? ''),
+            'recipient_phone' => $this->nullableString($data['recipient_phone'] ?? ''),
+            'channel' => $this->salesOfferDeliveryChannel($data['channel'] ?? 'mail'),
+            'mode' => $this->salesOfferDeliveryMode($data['mode'] ?? 'view'),
+            'token_hash' => hash('sha256', $token),
+        ]);
+
+        return [
+            'id' => (int) $this->db->lastInsertId(),
+            'token' => $token,
+        ];
+    }
+
+    public function markSalesOfferDeliverySent(int $id, bool $ok, ?string $error = null): void
+    {
+        $this->db->prepare(
+            'UPDATE sales_offer_deliveries
+             SET status = :status,
+                 error_message = :error_message,
+                 sent_at = CASE WHEN :ok = 1 THEN COALESCE(sent_at, NOW()) ELSE sent_at END,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'ok' => $ok ? 1 : 0,
+            'status' => $ok ? 'sent' : 'failed',
+            'error_message' => $this->nullableString($error ?? ''),
+        ]);
+    }
+
+    public function recordSalesOfferView(int $offerId, string $token, string $mode, string $ip, string $userAgent): ?array
+    {
+        $token = trim($token);
+        $delivery = null;
+        if ($token !== '') {
+            $stmt = $this->db->prepare(
+                'SELECT *
+                 FROM sales_offer_deliveries
+                 WHERE offer_id = :offer_id
+                   AND token_hash = :token_hash
+                 LIMIT 1'
+            );
+            $stmt->execute([
+                'offer_id' => $offerId,
+                'token_hash' => hash('sha256', $token),
+            ]);
+            $delivery = $stmt->fetch() ?: null;
+        }
+
+        if (!$delivery) {
+            $stmt = $this->db->prepare(
+                "SELECT *
+                 FROM sales_offer_deliveries
+                 WHERE offer_id = :offer_id
+                   AND token_hash IS NULL
+                   AND channel = 'public'
+                   AND mode = :mode
+                 ORDER BY id ASC
+                 LIMIT 1"
+            );
+            $stmt->execute([
+                'offer_id' => $offerId,
+                'mode' => $this->salesOfferDeliveryMode($mode),
+            ]);
+            $delivery = $stmt->fetch() ?: null;
+            if (!$delivery) {
+                $insert = $this->db->prepare(
+                    'INSERT INTO sales_offer_deliveries
+                        (offer_id, recipient_name, channel, mode, status, sent_at, first_viewed_at, last_viewed_at, view_count, last_ip, last_user_agent, created_at, updated_at)
+                     VALUES
+                        (:offer_id, "Genel bağlantı", "public", :mode, "opened", NOW(), NOW(), NOW(), 1, :last_ip, :last_user_agent, NOW(), NOW())'
+                );
+                $insert->execute([
+                    'offer_id' => $offerId,
+                    'mode' => $this->salesOfferDeliveryMode($mode),
+                    'last_ip' => $this->nullableString(substr($ip, 0, 45)),
+                    'last_user_agent' => $this->nullableString(substr($userAgent, 0, 255)),
+                ]);
+
+                $delivery = $this->salesOfferDeliveryById((int) $this->db->lastInsertId());
+                if ($delivery) {
+                    $delivery['first_view'] = 1;
+                }
+
+                return $delivery;
+            }
+        }
+
+        $firstView = empty($delivery['first_viewed_at']);
+        $this->db->prepare(
+            'UPDATE sales_offer_deliveries
+             SET status = "opened",
+                 first_viewed_at = COALESCE(first_viewed_at, NOW()),
+                 last_viewed_at = NOW(),
+                 view_count = view_count + 1,
+                 last_ip = :last_ip,
+                 last_user_agent = :last_user_agent,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => (int) $delivery['id'],
+            'last_ip' => $this->nullableString(substr($ip, 0, 45)),
+            'last_user_agent' => $this->nullableString(substr($userAgent, 0, 255)),
+        ]);
+
+        $updated = $this->salesOfferDeliveryById((int) $delivery['id']);
+        if ($updated) {
+            $updated['first_view'] = $firstView ? 1 : 0;
+        }
+
+        return $updated;
+    }
+
+    public function findSalesOfferDeliveryByToken(int $offerId, string $token): ?array
+    {
+        $token = trim($token);
+        if ($offerId <= 0 || $token === '') {
+            return null;
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM sales_offer_deliveries
+             WHERE offer_id = :offer_id
+               AND token_hash = :token_hash
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'offer_id' => $offerId,
+            'token_hash' => hash('sha256', $token),
+        ]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function markSalesOfferApproved(int $id, ?int $paymentRequestId = null, array $approval = []): void
+    {
+        $delivery = null;
+        $deliveryToken = trim((string) ($approval['delivery_token'] ?? ''));
+        if ($deliveryToken !== '') {
+            $delivery = $this->findSalesOfferDeliveryByToken($id, $deliveryToken);
+        }
+
+        $deliveryId = (int) ($delivery['id'] ?? 0);
+        $approvedName = $this->nullableString($approval['name'] ?? ($delivery['recipient_name'] ?? ''));
+        $approvedEmail = $this->nullableString(mb_strtolower(trim((string) ($approval['email'] ?? ($delivery['recipient_email'] ?? '')))));
+        $approvedPhone = $this->nullableString(\normalize_phone_number($approval['phone'] ?? ($delivery['recipient_phone'] ?? '')));
+        $approvalIp = $this->nullableString(substr((string) ($approval['ip'] ?? ''), 0, 45));
+        $approvalUserAgent = $this->nullableString(substr((string) ($approval['user_agent'] ?? ''), 0, 255));
+
         $this->db->prepare(
             'UPDATE sales_offers
              SET status = \'approved\',
+                 operation_status = COALESCE(NULLIF(operation_status, \'\'), \'approved\'),
+                 operation_updated_at = COALESCE(operation_updated_at, NOW()),
                  payment_request_id = COALESCE(:payment_request_id, payment_request_id),
+                 approved_at = COALESCE(approved_at, NOW()),
+                 approved_name = COALESCE(:approved_name, approved_name),
+                 approved_email = COALESCE(:approved_email, approved_email),
+                 approved_phone = COALESCE(:approved_phone, approved_phone),
+                 approved_delivery_id = COALESCE(:approved_delivery_id, approved_delivery_id),
+                 approval_ip = COALESCE(:approval_ip, approval_ip),
+                 approval_user_agent = COALESCE(:approval_user_agent, approval_user_agent),
                  updated_at = NOW()
              WHERE id = :id'
         )->execute([
             'id' => $id,
             'payment_request_id' => $paymentRequestId,
+            'approved_name' => $approvedName,
+            'approved_email' => $approvedEmail,
+            'approved_phone' => $approvedPhone,
+            'approved_delivery_id' => $deliveryId > 0 ? $deliveryId : null,
+            'approval_ip' => $approvalIp,
+            'approval_user_agent' => $approvalUserAgent,
         ]);
+
+        if ($deliveryId > 0) {
+            $this->db->prepare(
+                'UPDATE sales_offer_deliveries
+                 SET status = "opened",
+                     approved_at = COALESCE(approved_at, NOW()),
+                     approval_name = COALESCE(:approval_name, approval_name),
+                     approval_email = COALESCE(:approval_email, approval_email),
+                     approval_phone = COALESCE(:approval_phone, approval_phone),
+                     approval_ip = COALESCE(:approval_ip, approval_ip),
+                     approval_user_agent = COALESCE(:approval_user_agent, approval_user_agent),
+                     updated_at = NOW()
+                 WHERE id = :id'
+            )->execute([
+                'id' => $deliveryId,
+                'approval_name' => $approvedName,
+                'approval_email' => $approvedEmail,
+                'approval_phone' => $approvedPhone,
+                'approval_ip' => $approvalIp,
+                'approval_user_agent' => $approvalUserAgent,
+            ]);
+        }
+    }
+
+    public function markSalesOfferPaymentPending(int $id, int $paymentRequestId, array $approval = []): void
+    {
+        $delivery = null;
+        $deliveryToken = trim((string) ($approval['delivery_token'] ?? ''));
+        if ($deliveryToken !== '') {
+            $delivery = $this->findSalesOfferDeliveryByToken($id, $deliveryToken);
+        }
+
+        $deliveryId = (int) ($delivery['id'] ?? 0);
+        $approvedName = $this->nullableString($approval['name'] ?? ($delivery['recipient_name'] ?? ''));
+        $approvedEmail = $this->nullableString(mb_strtolower(trim((string) ($approval['email'] ?? ($delivery['recipient_email'] ?? '')))));
+        $approvedPhone = $this->nullableString(\normalize_phone_number($approval['phone'] ?? ($delivery['recipient_phone'] ?? '')));
+        $approvalIp = $this->nullableString(substr((string) ($approval['ip'] ?? ''), 0, 45));
+        $approvalUserAgent = $this->nullableString(substr((string) ($approval['user_agent'] ?? ''), 0, 255));
+
+        $this->db->prepare(
+            'UPDATE sales_offers
+             SET payment_request_id = COALESCE(:payment_request_id, payment_request_id),
+                 approved_name = COALESCE(:approved_name, approved_name),
+                 approved_email = COALESCE(:approved_email, approved_email),
+                 approved_phone = COALESCE(:approved_phone, approved_phone),
+                 approved_delivery_id = COALESCE(:approved_delivery_id, approved_delivery_id),
+                 approval_ip = COALESCE(:approval_ip, approval_ip),
+                 approval_user_agent = COALESCE(:approval_user_agent, approval_user_agent),
+                 updated_at = NOW()
+             WHERE id = :id
+               AND status <> \'approved\''
+        )->execute([
+            'id' => $id,
+            'payment_request_id' => $paymentRequestId,
+            'approved_name' => $approvedName,
+            'approved_email' => $approvedEmail,
+            'approved_phone' => $approvedPhone,
+            'approved_delivery_id' => $deliveryId > 0 ? $deliveryId : null,
+            'approval_ip' => $approvalIp,
+            'approval_user_agent' => $approvalUserAgent,
+        ]);
+
+        if ($deliveryId > 0) {
+            $this->db->prepare(
+                'UPDATE sales_offer_deliveries
+                 SET status = "opened",
+                     approved_at = COALESCE(approved_at, NOW()),
+                     approval_name = COALESCE(:approval_name, approval_name),
+                     approval_email = COALESCE(:approval_email, approval_email),
+                     approval_phone = COALESCE(:approval_phone, approval_phone),
+                     approval_ip = COALESCE(:approval_ip, approval_ip),
+                     approval_user_agent = COALESCE(:approval_user_agent, approval_user_agent),
+                     updated_at = NOW()
+                 WHERE id = :id'
+            )->execute([
+                'id' => $deliveryId,
+                'approval_name' => $approvedName,
+                'approval_email' => $approvedEmail,
+                'approval_phone' => $approvedPhone,
+                'approval_ip' => $approvalIp,
+                'approval_user_agent' => $approvalUserAgent,
+            ]);
+        }
+    }
+
+    public function markSalesOfferApprovedAfterPaymentRequest(int $paymentRequestId): ?array
+    {
+        if ($paymentRequestId < 1) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM sales_offers
+             WHERE payment_request_id = :payment_request_id
+             LIMIT 1'
+        );
+        $stmt->execute(['payment_request_id' => $paymentRequestId]);
+        $offer = $stmt->fetch();
+        if (!$offer) {
+            return null;
+        }
+
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET status = 'approved',
+                 operation_status = COALESCE(NULLIF(operation_status, ''), 'approved'),
+                 operation_updated_at = COALESCE(operation_updated_at, NOW()),
+                 approved_at = COALESCE(approved_at, NOW()),
+                 updated_at = NOW()
+             WHERE id = :id"
+        )->execute(['id' => (int) $offer['id']]);
+
+        return $this->findSalesOffer((int) $offer['id']);
     }
 
     public function markSalesOfferBalancePaymentRequest(int $id, int $paymentRequestId): void
@@ -1575,6 +1983,10 @@ final class RenewalRepository
 
     public function submitSupplierQuote(int $requestId, array $data, ?array $attachment = null, string $ipAddress = '', string $userAgent = ''): void
     {
+        $requestStmt = $this->db->prepare('SELECT renewal_id FROM supplier_quote_requests WHERE id = :id LIMIT 1');
+        $requestStmt->execute(['id' => $requestId]);
+        $renewalId = (int) $requestStmt->fetchColumn();
+
         $this->db->beginTransaction();
 
         try {
@@ -1608,9 +2020,13 @@ final class RenewalRepository
                         continue;
                     }
 
+                    $renewalItemId = (int) $itemId > 0
+                        ? (int) $itemId
+                        : $this->resolveSupplierQuoteRenewalItemId($renewalId, $itemTitle);
+
                     $insert->execute([
                         'request_id' => $requestId,
-                        'renewal_item_id' => (int) $itemId > 0 ? (int) $itemId : null,
+                        'renewal_item_id' => $renewalItemId > 0 ? $renewalItemId : null,
                         'item_title' => $itemTitle !== '' ? $itemTitle : 'Ürün / hizmet',
                         'currency' => self::normalizeCurrency($line['currency'] ?? ($data['currency'] ?? 'TRY')),
                         'price_cash' => $prices['price_cash'],
@@ -1780,6 +2196,7 @@ final class RenewalRepository
         );
         $lineStmt->execute(['renewal_id' => $renewalId]);
         $lines = $lineStmt->fetchAll();
+        $lines = $this->resolveSupplierQuoteLinesRenewalItems($renewalId, $lines);
 
         $attachmentStmt = $this->db->prepare(
             'SELECT sqa.*, sqr.supplier_id, COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
@@ -1881,7 +2298,10 @@ final class RenewalRepository
 
         $renewalItemId = (int) ($line['renewal_item_id'] ?? 0);
         if ($renewalItemId < 1) {
-            throw new \RuntimeException('Teklif satırı bir ürün kalemine bağlı değil.');
+            $renewalItemId = $this->resolveSupplierQuoteRenewalItemId((int) $line['renewal_id'], (string) ($line['item_title'] ?? ''));
+        }
+        if ($renewalItemId < 1) {
+            throw new \RuntimeException('Teklif satırı ürün kalemiyle eşleşmedi. Yenileme kalemini kontrol edip fiyatı tekrar kaydedin.');
         }
 
         $stmt = $this->db->prepare(
@@ -2168,6 +2588,48 @@ final class RenewalRepository
         $stmt->execute($params);
 
         return (int) $stmt->fetchColumn();
+    }
+
+    private function resolveSupplierQuoteLinesRenewalItems(int $renewalId, array $lines): array
+    {
+        foreach ($lines as &$line) {
+            if ((int) ($line['renewal_item_id'] ?? 0) > 0) {
+                continue;
+            }
+
+            $resolvedId = $this->resolveSupplierQuoteRenewalItemId($renewalId, (string) ($line['item_title'] ?? ''));
+            if ($resolvedId > 0) {
+                $line['renewal_item_id'] = $resolvedId;
+            }
+        }
+        unset($line);
+
+        return $lines;
+    }
+
+    private function resolveSupplierQuoteRenewalItemId(int $renewalId, string $itemTitle = ''): int
+    {
+        if ($renewalId < 1) {
+            return 0;
+        }
+
+        $items = $this->renewalItems($renewalId);
+        if (count($items) === 1) {
+            return (int) $items[0]['id'];
+        }
+
+        $needle = mb_strtolower(trim($itemTitle));
+        if ($needle === '') {
+            return 0;
+        }
+
+        foreach ($items as $item) {
+            if (mb_strtolower(trim((string) ($item['title'] ?? ''))) === $needle) {
+                return (int) $item['id'];
+            }
+        }
+
+        return 0;
     }
 
     public function createCustomerOffer(int $renewalId, array $recipient, array $data, int $createdBy = 0): array
@@ -2825,7 +3287,7 @@ final class RenewalRepository
     public function findIyzicoPaymentByToken(string $token): ?array
     {
         $stmt = $this->db->prepare(
-            'SELECT rp.*, r.title, r.brand, c.company_name
+            'SELECT rp.*, r.title, r.brand, c.company_name, c.email AS customer_email
              FROM renewal_payments rp
              INNER JOIN renewals r ON r.id = rp.renewal_id
              INNER JOIN customers c ON c.id = r.customer_id
@@ -2844,6 +3306,11 @@ final class RenewalRepository
 
     public function updateIyzicoPaymentResult(int $paymentId, array $request, array $response, string $status): void
     {
+        $currentStatus = (string) $this->db->query('SELECT status FROM renewal_payments WHERE id = ' . (int) $paymentId)->fetchColumn();
+        if ($currentStatus === 'paid' && $status !== 'paid') {
+            return;
+        }
+
         $stmt = $this->db->prepare(
             'UPDATE renewal_payments SET
                 status = :status,
@@ -3447,6 +3914,51 @@ final class RenewalRepository
 
         $this->seedRenewalDefinitionNotificationInfo();
         self::$definitionSchemaEnsured = true;
+    }
+
+    private function ensureContactRoleSchema(): void
+    {
+        if (self::$contactRoleSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS contact_role_definitions (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(120) NOT NULL,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_contact_role_definitions_name (name),
+                INDEX idx_contact_role_definitions_active (is_active, sort_order, name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        $this->ensureColumn('customer_contacts', 'role_title', 'VARCHAR(120) NULL AFTER full_name');
+        $this->ensureColumn('supplier_contacts', 'role_title', 'VARCHAR(120) NULL AFTER full_name');
+        $this->seedDefaultContactRoles();
+
+        self::$contactRoleSchemaEnsured = true;
+    }
+
+    private function seedDefaultContactRoles(): void
+    {
+        $stmt = $this->db->prepare(
+            'INSERT IGNORE INTO contact_role_definitions (name, sort_order, is_active)
+             VALUES (:name, :sort_order, 1)'
+        );
+
+        foreach (self::defaultContactRoles() as $index => $name) {
+            $stmt->execute([
+                'name' => $name,
+                'sort_order' => ($index + 1) * 10,
+            ]);
+        }
+    }
+
+    public static function defaultContactRoles(): array
+    {
+        return ['Satın alma', 'Muhasebe', 'Bilgi işlem', 'Yönetici', 'Patron'];
     }
 
     private function seedRenewalDefinitionNotificationInfo(): void
@@ -4070,6 +4582,10 @@ final class RenewalRepository
                 customer_phone VARCHAR(60) NULL,
                 currency CHAR(3) NOT NULL DEFAULT 'TRY',
                 status ENUM('draft', 'sent', 'approved', 'revision_requested', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+                operation_status VARCHAR(40) NOT NULL DEFAULT 'approved',
+                operation_note TEXT NULL,
+                operation_updated_at DATETIME NULL,
+                operation_completed_at DATETIME NULL,
                 subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
                 vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
                 total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -4083,6 +4599,13 @@ final class RenewalRepository
                 parasut_invoice_status VARCHAR(30) NULL,
                 parasut_invoice_error TEXT NULL,
                 parasut_invoice_created_at DATETIME NULL,
+                approved_at DATETIME NULL,
+                approved_name VARCHAR(190) NULL,
+                approved_email VARCHAR(190) NULL,
+                approved_phone VARCHAR(60) NULL,
+                approved_delivery_id BIGINT UNSIGNED NULL,
+                approval_ip VARCHAR(45) NULL,
+                approval_user_agent VARCHAR(255) NULL,
                 created_by INT UNSIGNED NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -4097,6 +4620,10 @@ final class RenewalRepository
         );
         $this->ensureColumn('sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
         $this->ensureColumn('sales_offers', 'customer_id', 'INT UNSIGNED NULL AFTER template_id');
+        $this->ensureColumn('sales_offers', 'operation_status', "VARCHAR(40) NOT NULL DEFAULT 'approved' AFTER status");
+        $this->ensureColumn('sales_offers', 'operation_note', 'TEXT NULL AFTER operation_status');
+        $this->ensureColumn('sales_offers', 'operation_updated_at', 'DATETIME NULL AFTER operation_note');
+        $this->ensureColumn('sales_offers', 'operation_completed_at', 'DATETIME NULL AFTER operation_updated_at');
         $this->ensureColumn('sales_offers', 'payment_request_enabled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER notes');
         $this->ensureColumn('sales_offers', 'payment_request_percent', 'DECIMAL(5,2) NOT NULL DEFAULT 20.00 AFTER payment_request_enabled');
         $this->ensureColumn('sales_offers', 'payment_request_id', 'INT UNSIGNED NULL AFTER payment_request_percent');
@@ -4106,12 +4633,21 @@ final class RenewalRepository
         $this->ensureColumn('sales_offers', 'parasut_invoice_status', 'VARCHAR(30) NULL AFTER parasut_invoice_no');
         $this->ensureColumn('sales_offers', 'parasut_invoice_error', 'TEXT NULL AFTER parasut_invoice_status');
         $this->ensureColumn('sales_offers', 'parasut_invoice_created_at', 'DATETIME NULL AFTER parasut_invoice_error');
+        $this->ensureColumn('sales_offers', 'approved_at', 'DATETIME NULL AFTER parasut_invoice_created_at');
+        $this->ensureColumn('sales_offers', 'approved_name', 'VARCHAR(190) NULL AFTER approved_at');
+        $this->ensureColumn('sales_offers', 'approved_email', 'VARCHAR(190) NULL AFTER approved_name');
+        $this->ensureColumn('sales_offers', 'approved_phone', 'VARCHAR(60) NULL AFTER approved_email');
+        $this->ensureColumn('sales_offers', 'approved_delivery_id', 'BIGINT UNSIGNED NULL AFTER approved_phone');
+        $this->ensureColumn('sales_offers', 'approval_ip', 'VARCHAR(45) NULL AFTER approved_delivery_id');
+        $this->ensureColumn('sales_offers', 'approval_user_agent', 'VARCHAR(255) NULL AFTER approval_ip');
         $this->backfillGeneratedOfferNumbers('sales_offers', 'offer_number', 'TK');
         $this->ensureIndex('sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
         $this->ensureIndex('sales_offers', 'idx_sales_offers_customer_id', 'INDEX idx_sales_offers_customer_id (customer_id)');
         $this->ensureIndex('sales_offers', 'idx_sales_offers_payment_request', 'INDEX idx_sales_offers_payment_request (payment_request_id)');
         $this->ensureIndex('sales_offers', 'idx_sales_offers_balance_payment_request', 'INDEX idx_sales_offers_balance_payment_request (balance_payment_request_id)');
         $this->ensureIndex('sales_offers', 'idx_sales_offers_parasut_invoice', 'INDEX idx_sales_offers_parasut_invoice (parasut_invoice_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_approved_at', 'INDEX idx_sales_offers_approved_at (approved_at)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_operation', 'INDEX idx_sales_offers_operation (operation_status, operation_updated_at)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS sales_offer_items (
@@ -4141,6 +4677,56 @@ final class RenewalRepository
         $this->ensureIndex('offer_template_items', 'idx_offer_template_items_stock', 'INDEX idx_offer_template_items_stock (stock_item_id)');
         $this->ensureColumn('sales_offer_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER offer_id');
         $this->ensureIndex('sales_offer_items', 'idx_sales_offer_items_stock', 'INDEX idx_sales_offer_items_stock (stock_item_id)');
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS sales_offer_deliveries (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_id INT UNSIGNED NOT NULL,
+                recipient_name VARCHAR(190) NULL,
+                recipient_email VARCHAR(190) NULL,
+                recipient_phone VARCHAR(60) NULL,
+                channel VARCHAR(30) NOT NULL DEFAULT 'mail',
+                mode VARCHAR(10) NOT NULL DEFAULT 'view',
+                token_hash CHAR(64) NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'queued',
+                error_message TEXT NULL,
+                sent_at DATETIME NULL,
+                first_viewed_at DATETIME NULL,
+                last_viewed_at DATETIME NULL,
+                view_count INT UNSIGNED NOT NULL DEFAULT 0,
+                approved_at DATETIME NULL,
+                approval_name VARCHAR(190) NULL,
+                approval_email VARCHAR(190) NULL,
+                approval_phone VARCHAR(60) NULL,
+                approval_ip VARCHAR(45) NULL,
+                approval_user_agent VARCHAR(255) NULL,
+                last_ip VARCHAR(45) NULL,
+                last_user_agent VARCHAR(255) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_sales_offer_deliveries_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+                UNIQUE KEY uq_sales_offer_deliveries_token (token_hash),
+                INDEX idx_sales_offer_deliveries_offer (offer_id, created_at),
+                INDEX idx_sales_offer_deliveries_status (offer_id, status),
+                INDEX idx_sales_offer_deliveries_viewed (offer_id, first_viewed_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        $this->ensureColumn('sales_offer_deliveries', 'recipient_phone', 'VARCHAR(60) NULL AFTER recipient_email');
+        $this->ensureColumn('sales_offer_deliveries', 'mode', "VARCHAR(10) NOT NULL DEFAULT 'view' AFTER channel");
+        $this->ensureColumn('sales_offer_deliveries', 'error_message', 'TEXT NULL AFTER status');
+        $this->ensureColumn('sales_offer_deliveries', 'approved_at', 'DATETIME NULL AFTER view_count');
+        $this->ensureColumn('sales_offer_deliveries', 'approval_name', 'VARCHAR(190) NULL AFTER approved_at');
+        $this->ensureColumn('sales_offer_deliveries', 'approval_email', 'VARCHAR(190) NULL AFTER approval_name');
+        $this->ensureColumn('sales_offer_deliveries', 'approval_phone', 'VARCHAR(60) NULL AFTER approval_email');
+        $this->ensureColumn('sales_offer_deliveries', 'approval_ip', 'VARCHAR(45) NULL AFTER approval_phone');
+        $this->ensureColumn('sales_offer_deliveries', 'approval_user_agent', 'VARCHAR(255) NULL AFTER approval_ip');
+        $this->ensureColumn('sales_offer_deliveries', 'last_ip', 'VARCHAR(45) NULL AFTER view_count');
+        $this->ensureColumn('sales_offer_deliveries', 'last_user_agent', 'VARCHAR(255) NULL AFTER last_ip');
+        $this->ensureIndex('sales_offer_deliveries', 'uq_sales_offer_deliveries_token', 'UNIQUE KEY uq_sales_offer_deliveries_token (token_hash)');
+        $this->ensureIndex('sales_offer_deliveries', 'idx_sales_offer_deliveries_offer', 'INDEX idx_sales_offer_deliveries_offer (offer_id, created_at)');
+        $this->ensureIndex('sales_offer_deliveries', 'idx_sales_offer_deliveries_status', 'INDEX idx_sales_offer_deliveries_status (offer_id, status)');
+        $this->ensureIndex('sales_offer_deliveries', 'idx_sales_offer_deliveries_viewed', 'INDEX idx_sales_offer_deliveries_viewed (offer_id, first_viewed_at)');
+        $this->ensureIndex('sales_offer_deliveries', 'idx_sales_offer_deliveries_approved', 'INDEX idx_sales_offer_deliveries_approved (offer_id, approved_at)');
 
         self::$salesOfferSchemaEnsured = true;
     }
@@ -4783,6 +5369,24 @@ final class RenewalRepository
         }
 
         $hash = hash('sha256', strtolower($token));
+        $alreadyRead = false;
+        $existing = $this->db->prepare(
+            'SELECT read_at
+             FROM renewal_notification_deliveries
+             WHERE renewal_id = :renewal_id
+               AND token_hash = :token_hash
+             LIMIT 1'
+        );
+        $existing->execute([
+            'renewal_id' => $renewalId,
+            'token_hash' => $hash,
+        ]);
+        $existingReadAt = $existing->fetchColumn();
+        if ($existingReadAt === false) {
+            return null;
+        }
+        $alreadyRead = trim((string) $existingReadAt) !== '';
+
         $stmt = $this->db->prepare(
             'UPDATE renewal_notification_deliveries
              SET read_at = COALESCE(read_at, NOW()),
@@ -4823,6 +5427,7 @@ final class RenewalRepository
         ]);
         $row = $select->fetch();
         if ($row) {
+            $row['already_read'] = $alreadyRead ? '1' : '0';
             $this->db->prepare(
                 'INSERT INTO renewal_notification_reads (renewal_id, read_on, read_at)
                  VALUES (:renewal_id, CURDATE(), NOW())
@@ -5320,6 +5925,13 @@ final class RenewalRepository
         return in_array($currency, ['TRY', 'USD', 'EUR'], true) ? $currency : 'TRY';
     }
 
+    private static function normalizeSalesOfferOperationStatus(mixed $status): string
+    {
+        $status = trim((string) $status);
+
+        return array_key_exists($status, self::SALES_OFFER_OPERATION_STATUSES) ? $status : 'approved';
+    }
+
     private function salesOfferPaymentPercent(mixed $value): float
     {
         $percent = $this->decimalValue($value, 20.0);
@@ -5369,14 +5981,15 @@ final class RenewalRepository
         }
 
         $stmt = $this->db->prepare(
-            'INSERT INTO customer_contacts (customer_id, full_name, email, phone, notify_enabled)
-             VALUES (:customer_id, :full_name, :email, :phone, :notify_enabled)'
+            'INSERT INTO customer_contacts (customer_id, full_name, role_title, email, phone, notify_enabled)
+             VALUES (:customer_id, :full_name, :role_title, :email, :phone, :notify_enabled)'
         );
 
         foreach ($contacts as $contact) {
             $stmt->execute([
                 'customer_id' => $customerId,
                 'full_name' => $contact['full_name'],
+                'role_title' => $this->nullableString($contact['role_title'] ?? ''),
                 'email' => $this->nullableString($contact['email']),
                 'phone' => $this->nullableString(\normalize_phone_number($contact['phone'])),
                 'notify_enabled' => $contact['notify_enabled'],
@@ -5500,7 +6113,72 @@ final class RenewalRepository
             FROM sales_offer_items soi
             INNER JOIN sales_offers so ON so.id = soi.offer_id
             WHERE so.status = 'approved'
+
+            UNION ALL
+
+            SELECT
+                CONCAT('renewal-payment:', rp.id) AS sale_key,
+                COALESCE(ri_stats.items_summary, r.title, 'Yenileme ödemesi') AS item_title,
+                1 AS quantity,
+                rp.amount AS line_total,
+                COALESCE(NULLIF(rp.currency, ''), r.currency, 'TRY') AS currency,
+                COALESCE(rp.paid_at, rp.updated_at, rp.created_at) AS sale_date,
+                YEAR(COALESCE(rp.paid_at, rp.updated_at, rp.created_at)) AS sale_year,
+                MONTH(COALESCE(rp.paid_at, rp.updated_at, rp.created_at)) AS sale_month,
+                c.company_name AS customer_name
+            FROM renewal_payments rp
+            INNER JOIN renewals r ON r.id = rp.renewal_id
+            INNER JOIN customers c ON c.id = r.customer_id
+            LEFT JOIN (
+                SELECT
+                    renewal_id,
+                    CASE
+                        WHEN COUNT(*) > 1 THEN CONCAT(SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1), ' + ', COUNT(*) - 1, ' ürün')
+                        ELSE SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1)
+                    END AS items_summary
+                FROM renewal_items
+                GROUP BY renewal_id
+            ) ri_stats ON ri_stats.renewal_id = r.id
+            WHERE rp.status = 'paid'
+              AND COALESCE(rp.payment_id, '') <> ''
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM customer_offer_requests cor_paid
+                  WHERE cor_paid.renewal_id = rp.renewal_id
+                    AND cor_paid.status = 'approved'
+              )
+
+            UNION ALL
+
+            SELECT
+                CONCAT('manual-payment:', mpt.id) AS sale_key,
+                COALESCE(NULLIF(mpr.title, ''), 'Manuel ödeme talebi') AS item_title,
+                1 AS quantity,
+                mpt.amount AS line_total,
+                COALESCE(NULLIF(mpt.currency, ''), mpr.currency, 'TRY') AS currency,
+                COALESCE(mpt.paid_at, mpt.updated_at, mpt.created_at) AS sale_date,
+                YEAR(COALESCE(mpt.paid_at, mpt.updated_at, mpt.created_at)) AS sale_year,
+                MONTH(COALESCE(mpt.paid_at, mpt.updated_at, mpt.created_at)) AS sale_month,
+                COALESCE(NULLIF(mpr.customer_name, ''), 'Manuel ödeme') AS customer_name
+            FROM manual_payment_transactions mpt
+            INNER JOIN manual_payment_requests mpr ON mpr.id = mpt.request_id
+            WHERE mpt.status = 'paid'
+              AND COALESCE(mpt.payment_id, '') <> ''
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM sales_offers so_paid
+                  WHERE so_paid.status = 'approved'
+                    AND (
+                        so_paid.payment_request_id = mpr.id
+                        OR so_paid.balance_payment_request_id = mpr.id
+                    )
+              )
         ";
+    }
+
+    private function ensureSalesReportSchemas(): void
+    {
+        new PaymentRequestRepository();
     }
 
     private function createSupplierContacts(int $supplierId, array $data): void
@@ -5511,14 +6189,15 @@ final class RenewalRepository
         }
 
         $stmt = $this->db->prepare(
-            'INSERT INTO supplier_contacts (supplier_id, full_name, email, phone, notify_enabled)
-             VALUES (:supplier_id, :full_name, :email, :phone, :notify_enabled)'
+            'INSERT INTO supplier_contacts (supplier_id, full_name, role_title, email, phone, notify_enabled)
+             VALUES (:supplier_id, :full_name, :role_title, :email, :phone, :notify_enabled)'
         );
 
         foreach ($contacts as $contact) {
             $stmt->execute([
                 'supplier_id' => $supplierId,
                 'full_name' => $contact['full_name'],
+                'role_title' => $this->nullableString($contact['role_title'] ?? ''),
                 'email' => $this->nullableString($contact['email']),
                 'phone' => $this->nullableString(\normalize_phone_number($contact['phone'])),
                 'notify_enabled' => $contact['notify_enabled'],
@@ -5608,6 +6287,7 @@ final class RenewalRepository
 
             $contacts[] = [
                 'full_name' => $name !== '' ? $name : ($email !== '' ? $email : $phone),
+                'role_title' => trim((string) ($row['role_title'] ?? '')),
                 'email' => $email,
                 'phone' => $phone,
                 'notify_enabled' => !empty($row['notify_enabled']) ? 1 : 0,
@@ -5738,6 +6418,46 @@ final class RenewalRepository
         $stmt->execute(['offer_id' => $offerId]);
 
         return $stmt->fetchAll();
+    }
+
+    private function salesOfferDeliveries(int $offerId): array
+    {
+        if ($offerId <= 0) {
+            return [];
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM sales_offer_deliveries
+             WHERE offer_id = :offer_id
+             ORDER BY created_at DESC, id DESC'
+        );
+        $stmt->execute(['offer_id' => $offerId]);
+
+        return $stmt->fetchAll();
+    }
+
+    private function salesOfferDeliveryById(int $id): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM sales_offer_deliveries WHERE id = :id LIMIT 1');
+        $stmt->execute(['id' => $id]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    private function salesOfferDeliveryChannel(mixed $channel): string
+    {
+        $channel = strtolower(trim((string) $channel));
+
+        return in_array($channel, ['mail', 'whatsapp', 'public'], true) ? $channel : 'mail';
+    }
+
+    private function salesOfferDeliveryMode(mixed $mode): string
+    {
+        $mode = strtolower(trim((string) $mode));
+
+        return in_array($mode, ['view', 'pdf'], true) ? $mode : 'view';
     }
 
     private function replaceOfferTemplateItems(int $templateId, array $items): void

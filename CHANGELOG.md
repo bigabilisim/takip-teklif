@@ -1,5 +1,109 @@
 # Changelog
 
+## [2.0.52] - 2026-05-09
+
+- Onaylanan satış teklifleri için operasyon takip alanları eklendi.
+- Dashboard teklif kartlarında fatura, ön ödeme, kalan bakiye ve operasyon durumu tek panelde izlenir hale getirildi.
+- Onay sonrası durumlar “İşleme alındı”, “Tedarikçiye sipariş geçildi”, “Kurulum / teslim bekliyor”, “Teslim edildi” ve “Tamamlandı” olarak yönetilebilir hale getirildi.
+
+## [2.0.51] - 2026-05-09
+
+- Ödeme Talep Et ekranındaki bekleyen manuel ödeme talepleri silinebilir hale getirildi.
+- Silinen ödeme talepleri iptal durumuna alınarak listeden kaldırılıyor; ödeme linki ve otomatik hatırlatma pasifleşiyor.
+- Ödenmiş ödeme talepleri tahsilat geçmişi korunması için silinmeye kapatıldı.
+
+## [2.0.50] - 2026-05-09
+
+- Müşteri/cari yetkili alanları görev kartı tasarımına taşındı.
+- Yeni cari ve cari bilgi formları ilk açılışta Satın alma, Muhasebe ve Yönetici kartlarını hazır getiriyor.
+- Yetkili kartları tek tek silinebilir hale getirildi; eklenen kartın görev başlığı seçim değiştikçe güncelleniyor.
+
+## [2.0.49] - 2026-05-09
+
+- Müşteri kredi kartı ödeme adımında hata aldığında yöneticiye web push ve e-posta bildirimi gönderilir hale getirildi.
+- Ödeme hata bildirimlerinde müşteri, tutar, kayıt, iyzico hata kodu ve panel bağlantısı gösteriliyor.
+
+## [2.0.48] - 2026-05-09
+
+- iyzico “üye işyeri kategori kodu” hatası müşteriye teknik metin yerine anlaşılır ödeme altyapısı bilgilendirmesi olarak gösterilir hale getirildi.
+
+## [2.0.47] - 2026-05-09
+
+- Kredi kartı ödeme yöntemi artık ödeme gerçekten başarılı olmadan yenileme kaydına işlenmiyor.
+- Ön ödeme şartlı teklifler ödeme tamamlanana kadar “Onaylandı” durumuna geçmiyor; dashboard’da “Ön ödeme bekliyor” olarak görünüyor.
+- Başarılı ödemeden sonra ilgili teklif otomatik onaylanıyor; başarılı ödeme kayıtlarının sonradan başarısız callback ile geri düşmesi engellendi.
+
+## [2.0.46] - 2026-05-09
+
+- Manuel ödeme taleplerinde iyzico için gerekli vergi no / TC kimlik no bilgisi cari karttan, cari ünvanından veya talep açıklamasından otomatik yakalanır hale getirildi.
+- Vergi no bulunamazsa ödeme sayfasında kırmızı hata yerine kullanıcıyı devam ettiren sade bilgi tamamlama formu gösterildi.
+
+## [2.0.45] - 2026-05-09
+
+- WhatsApp gönderimlerinde aynı WhatsApp Web sekmesini yeniden kullanacak istemci davranışı eklendi.
+- WhatsApp yönlendirme route’ları AJAX isteklerinde doğrudan WhatsApp URL’si döndürecek şekilde güncellendi.
+
+## [2.0.44] - 2026-05-09
+
+- Müşteri ve tedarikçi yetkililerine görev tanımı alanı eklendi.
+- Tanımlamalar bölümüne yönetilebilir “Görev tanımları” kartı eklendi.
+- Varsayılan görev tanımları Satın alma, Muhasebe, Bilgi işlem, Yönetici ve Patron olarak eklendi.
+
+## [2.0.43] - 2026-05-09
+
+- Cari bilgi formundaki “Vergi levhasını analiz et” butonu kırmızı ve daha görünür hale getirildi.
+
+## [2.0.42] - 2026-05-09
+
+- Satış tekliflerinde okuyan alıcı ile onaylayan kişi bilgisi ayrıştırıldı.
+- Teklif onay formuna onaylayan kişi adı ve e-posta alanı eklendi; dashboard teklif kartında onaylayan kişi gösterilir hale getirildi.
+- Okunma/görüntüleme kartlarında onay veren alıcı ayrıca “Onayladı” olarak işaretlenir hale getirildi.
+
+## [2.0.41] - 2026-05-09
+
+- Müşteri cari listesindeki kartlar daha rahat nefes alacak şekilde düzenlendi.
+- Uzun cari ünvanlarının kesilmesi engellendi; “Göster” aksiyonu kartı doğal sayfa akışı içinde aşağı doğru açacak hale getirildi.
+- Müşteri listesinde iç içe scroll davranışı kaldırıldı.
+
+## [2.0.40] - 2026-05-09
+
+- Satış teklifleri için kişi bazlı mail/WhatsApp okundu ve görüntülendi takibi eklendi.
+- Teklif kartlarında “Okunma ve görüntüleme” alanı ile alıcı bazında gönderildi, okunmadı, okundu ve kaç kez görüntülendi bilgisi gösterildi.
+- Teklif açılınca push bildirimi alıcı bilgisiyle birlikte gönderilecek şekilde güncellendi.
+
+## [2.0.34] - 2026-05-09
+
+- Satış raporuna onaylı tekliflerin yanında bağımsız tahsil edilmiş manuel ödeme talepleri de dahil edildi.
+- Onaylı teklif ya da onaylı müşteri teklifi ile zaten sayılan ödemeler için çift sayım engellendi.
+- Satış raporu açıklama metni “onaylı / tahsil edilmiş işlem” mantığına göre güncellendi.
+
+## [2.0.33] - 2026-05-09
+
+- Dashboard kartları daha kompakt, düzenli ve güven veren bilgi hiyerarşisiyle yeniden sıkılaştırıldı.
+- Takip ve teklif kolonlarında küçük açıklama satırları, daha sakin renkler, daha küçük rozetler ve daha okunur detay alanları eklendi.
+- Tedarikçi fiyat karşılaştırma alanları dashboard içinde daha dar ve düzenli görünecek şekilde ayarlandı.
+
+## [2.0.32] - 2026-05-09
+
+- Tedarikçi teklif formundan ürün kalemi ID’si boş gelen tek ürünlü yenilemeler otomatik ilgili kaleme eşlenecek şekilde düzeltildi.
+- Mevcut boş kalem ID’li tedarikçi fiyatları fiyat karşılaştırma bölümünde görünür ve seçilebilir hale getirildi.
+
+## [2.0.31] - 2026-05-09
+
+- Tedarikçi fiyatı gelmiş ama henüz satır/vade seçilmemiş yenilemelerde “Müşteriye teklif gönder” aksiyonunun kaybolması engellendi.
+- Seçili fiyat yoksa teklif penceresinde kullanıcıya önce uygun tedarikçi fiyatını onaylaması gerektiği gösterildi.
+
+## [2.0.30] - 2026-05-09
+
+- Stok / teklif kalemleri ekranında manuel kalem ekleme alanı sayfa içinde görünür hale getirildi.
+- Manuel kalem formu JS/popup bağımlılığı olmadan çalışacak ve mobilde tek sütuna düşecek şekilde düzenlendi.
+
+## [2.0.29] - 2026-05-09
+
+- İç web push bildirimleri Bilal kullanıcısının cihazlarıyla birlikte panelde bildirim izni açık tüm aktif cihazlara da ulaşacak şekilde güçlendirildi.
+- Ödeme talebi, başarılı ödeme, yenileme “Okudum”, müşteri/satış teklif okuma ve yanıt, tedarikçi teklif formu açma/gönderme olaylarına anlık push bildirimi eklendi.
+- PWA bildirim etiketleri benzersizleştirildi; farklı olay bildirimlerinin birbirini ezmesi engellendi.
+
 ## [2.0.28] - 2026-05-09
 
 - Dashboard teklif kartlarında ayrı WhatsApp, e-posta ve PDF gönderim aksiyonları tek “Müşteriye gönder” penceresinde toplandı.

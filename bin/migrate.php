@@ -48,6 +48,7 @@ ensure_table($pdo, 'customer_contacts', "
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         customer_id INT UNSIGNED NOT NULL,
         full_name VARCHAR(190) NOT NULL,
+        role_title VARCHAR(120) NULL,
         email VARCHAR(190) NULL,
         phone VARCHAR(60) NULL,
         notify_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -59,6 +60,20 @@ ensure_table($pdo, 'customer_contacts', "
         INDEX idx_customer_contacts_email (email)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'customer_contacts', 'role_title', 'VARCHAR(120) NULL AFTER full_name');
+ensure_table($pdo, 'contact_role_definitions', "
+    CREATE TABLE contact_role_definitions (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_contact_role_definitions_name (name),
+        INDEX idx_contact_role_definitions_active (is_active, sort_order, name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+seed_default_contact_roles($pdo);
 seed_existing_customer_contacts($pdo);
 ensure_table($pdo, 'supplier_groups', "
     CREATE TABLE supplier_groups (
@@ -105,6 +120,7 @@ ensure_table($pdo, 'supplier_contacts', "
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         supplier_id INT UNSIGNED NOT NULL,
         full_name VARCHAR(190) NOT NULL,
+        role_title VARCHAR(120) NULL,
         email VARCHAR(190) NULL,
         phone VARCHAR(60) NULL,
         notify_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -116,6 +132,7 @@ ensure_table($pdo, 'supplier_contacts', "
         INDEX idx_supplier_contacts_email (email)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'supplier_contacts', 'role_title', 'VARCHAR(120) NULL AFTER full_name');
 ensure_column($pdo, 'renewals', 'supplier_id', 'INT UNSIGNED NULL AFTER customer_id');
 ensure_column($pdo, 'renewals', 'supplier_group_id', 'INT UNSIGNED NULL AFTER supplier_id');
 ensure_column($pdo, 'renewals', 'definition_id', 'INT UNSIGNED NULL AFTER supplier_group_id');
@@ -292,6 +309,12 @@ ensure_table($pdo, 'manual_payment_requests', "
         recipients_json MEDIUMTEXT NULL,
         amount DECIMAL(12,2) NOT NULL DEFAULT 0,
         currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+        payment_due_date DATE NULL,
+        reminder_time TIME NULL,
+        reminder_start_days_before INT UNSIGNED NOT NULL DEFAULT 3,
+        reminder_repeat_daily TINYINT(1) NOT NULL DEFAULT 0,
+        reminder_until_paid TINYINT(1) NOT NULL DEFAULT 0,
+        last_reminder_sent_at DATETIME NULL,
         status ENUM('pending','paid','cancelled') NOT NULL DEFAULT 'pending',
         paid_at DATETIME NULL,
         created_by INT UNSIGNED NULL,
@@ -299,13 +322,23 @@ ensure_table($pdo, 'manual_payment_requests', "
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_manual_payment_requests_token (public_token),
         INDEX idx_manual_payment_requests_customer (customer_id),
+        INDEX idx_manual_payment_requests_reminders (status, reminder_time, last_reminder_sent_at),
+        INDEX idx_manual_payment_requests_due_reminders (status, payment_due_date, reminder_time, last_reminder_sent_at),
         INDEX idx_manual_payment_requests_status (status, created_at),
         INDEX idx_manual_payment_requests_created_by (created_by)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
 ensure_column($pdo, 'manual_payment_requests', 'customer_id', 'INT UNSIGNED NULL AFTER public_token');
 ensure_column($pdo, 'manual_payment_requests', 'recipients_json', 'MEDIUMTEXT NULL AFTER customer_tax_number');
+ensure_column($pdo, 'manual_payment_requests', 'payment_due_date', 'DATE NULL AFTER currency');
+ensure_column($pdo, 'manual_payment_requests', 'reminder_time', 'TIME NULL AFTER payment_due_date');
+ensure_column($pdo, 'manual_payment_requests', 'reminder_start_days_before', 'INT UNSIGNED NOT NULL DEFAULT 3 AFTER reminder_time');
+ensure_column($pdo, 'manual_payment_requests', 'reminder_repeat_daily', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER reminder_start_days_before');
+ensure_column($pdo, 'manual_payment_requests', 'reminder_until_paid', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER reminder_repeat_daily');
+ensure_column($pdo, 'manual_payment_requests', 'last_reminder_sent_at', 'DATETIME NULL AFTER reminder_until_paid');
 ensure_index($pdo, 'manual_payment_requests', 'idx_manual_payment_requests_customer', 'INDEX idx_manual_payment_requests_customer (customer_id)');
+ensure_index($pdo, 'manual_payment_requests', 'idx_manual_payment_requests_reminders', 'INDEX idx_manual_payment_requests_reminders (status, reminder_time, last_reminder_sent_at)');
+ensure_index($pdo, 'manual_payment_requests', 'idx_manual_payment_requests_due_reminders', 'INDEX idx_manual_payment_requests_due_reminders (status, payment_due_date, reminder_time, last_reminder_sent_at)');
 ensure_table($pdo, 'manual_payment_transactions', "
     CREATE TABLE manual_payment_transactions (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -441,7 +474,15 @@ ensure_table($pdo, 'sales_offers', "
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
 ensure_column($pdo, 'sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
+ensure_column($pdo, 'sales_offers', 'approved_at', 'DATETIME NULL AFTER updated_at');
+ensure_column($pdo, 'sales_offers', 'approved_name', 'VARCHAR(190) NULL AFTER approved_at');
+ensure_column($pdo, 'sales_offers', 'approved_email', 'VARCHAR(190) NULL AFTER approved_name');
+ensure_column($pdo, 'sales_offers', 'approved_phone', 'VARCHAR(60) NULL AFTER approved_email');
+ensure_column($pdo, 'sales_offers', 'approved_delivery_id', 'BIGINT UNSIGNED NULL AFTER approved_phone');
+ensure_column($pdo, 'sales_offers', 'approval_ip', 'VARCHAR(45) NULL AFTER approved_delivery_id');
+ensure_column($pdo, 'sales_offers', 'approval_user_agent', 'VARCHAR(255) NULL AFTER approval_ip');
 ensure_index($pdo, 'sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
+ensure_index($pdo, 'sales_offers', 'idx_sales_offers_approved_at', 'INDEX idx_sales_offers_approved_at (approved_at)');
 ensure_table($pdo, 'sales_offer_items', "
     CREATE TABLE sales_offer_items (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -467,6 +508,56 @@ ensure_table($pdo, 'sales_offer_items', "
 ");
 ensure_column($pdo, 'sales_offer_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER offer_id');
 ensure_index($pdo, 'sales_offer_items', 'idx_sales_offer_items_stock', 'INDEX idx_sales_offer_items_stock (stock_item_id)');
+ensure_table($pdo, 'sales_offer_deliveries', "
+    CREATE TABLE sales_offer_deliveries (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        offer_id INT UNSIGNED NOT NULL,
+        recipient_name VARCHAR(190) NULL,
+        recipient_email VARCHAR(190) NULL,
+        recipient_phone VARCHAR(60) NULL,
+        channel VARCHAR(30) NOT NULL DEFAULT 'mail',
+        mode VARCHAR(10) NOT NULL DEFAULT 'view',
+        token_hash CHAR(64) NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'queued',
+        error_message TEXT NULL,
+        sent_at DATETIME NULL,
+        first_viewed_at DATETIME NULL,
+        last_viewed_at DATETIME NULL,
+        view_count INT UNSIGNED NOT NULL DEFAULT 0,
+        approved_at DATETIME NULL,
+        approval_name VARCHAR(190) NULL,
+        approval_email VARCHAR(190) NULL,
+        approval_phone VARCHAR(60) NULL,
+        approval_ip VARCHAR(45) NULL,
+        approval_user_agent VARCHAR(255) NULL,
+        last_ip VARCHAR(45) NULL,
+        last_user_agent VARCHAR(255) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_sales_offer_deliveries_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_sales_offer_deliveries_token (token_hash),
+        INDEX idx_sales_offer_deliveries_offer (offer_id, created_at),
+        INDEX idx_sales_offer_deliveries_status (offer_id, status),
+        INDEX idx_sales_offer_deliveries_viewed (offer_id, first_viewed_at),
+        INDEX idx_sales_offer_deliveries_approved (offer_id, approved_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_column($pdo, 'sales_offer_deliveries', 'recipient_phone', 'VARCHAR(60) NULL AFTER recipient_email');
+ensure_column($pdo, 'sales_offer_deliveries', 'mode', "VARCHAR(10) NOT NULL DEFAULT 'view' AFTER channel");
+ensure_column($pdo, 'sales_offer_deliveries', 'error_message', 'TEXT NULL AFTER status');
+ensure_column($pdo, 'sales_offer_deliveries', 'approved_at', 'DATETIME NULL AFTER view_count');
+ensure_column($pdo, 'sales_offer_deliveries', 'approval_name', 'VARCHAR(190) NULL AFTER approved_at');
+ensure_column($pdo, 'sales_offer_deliveries', 'approval_email', 'VARCHAR(190) NULL AFTER approval_name');
+ensure_column($pdo, 'sales_offer_deliveries', 'approval_phone', 'VARCHAR(60) NULL AFTER approval_email');
+ensure_column($pdo, 'sales_offer_deliveries', 'approval_ip', 'VARCHAR(45) NULL AFTER approval_phone');
+ensure_column($pdo, 'sales_offer_deliveries', 'approval_user_agent', 'VARCHAR(255) NULL AFTER approval_ip');
+ensure_column($pdo, 'sales_offer_deliveries', 'last_ip', 'VARCHAR(45) NULL AFTER view_count');
+ensure_column($pdo, 'sales_offer_deliveries', 'last_user_agent', 'VARCHAR(255) NULL AFTER last_ip');
+ensure_index($pdo, 'sales_offer_deliveries', 'uq_sales_offer_deliveries_token', 'UNIQUE KEY uq_sales_offer_deliveries_token (token_hash)');
+ensure_index($pdo, 'sales_offer_deliveries', 'idx_sales_offer_deliveries_offer', 'INDEX idx_sales_offer_deliveries_offer (offer_id, created_at)');
+ensure_index($pdo, 'sales_offer_deliveries', 'idx_sales_offer_deliveries_status', 'INDEX idx_sales_offer_deliveries_status (offer_id, status)');
+ensure_index($pdo, 'sales_offer_deliveries', 'idx_sales_offer_deliveries_viewed', 'INDEX idx_sales_offer_deliveries_viewed (offer_id, first_viewed_at)');
+ensure_index($pdo, 'sales_offer_deliveries', 'idx_sales_offer_deliveries_approved', 'INDEX idx_sales_offer_deliveries_approved (offer_id, approved_at)');
 ensure_table($pdo, 'renewal_decisions', "
     CREATE TABLE renewal_decisions (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -587,6 +678,33 @@ ensure_table($pdo, 'customer_info_requests', "
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
 ensure_column($pdo, 'customer_info_requests', 'recipient_name', 'VARCHAR(190) NULL AFTER recipient_email');
+ensure_table($pdo, 'interaction_notes', "
+    CREATE TABLE interaction_notes (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        customer_id INT UNSIGNED NULL,
+        contact_name VARCHAR(190) NULL,
+        channel VARCHAR(40) NOT NULL DEFAULT 'meeting',
+        title VARCHAR(190) NOT NULL,
+        note TEXT NOT NULL,
+        quoted_amount DECIMAL(12,2) NULL,
+        currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+        status VARCHAR(30) NOT NULL DEFAULT 'open',
+        follow_up_at DATETIME NULL,
+        completed_at DATETIME NULL,
+        created_by INT UNSIGNED NULL,
+        updated_by INT UNSIGNED NULL,
+        deleted_at DATETIME NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_interaction_notes_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
+        CONSTRAINT fk_interaction_notes_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_interaction_notes_updated_by FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
+        INDEX idx_interaction_notes_status_follow (status, follow_up_at),
+        INDEX idx_interaction_notes_customer (customer_id, created_at),
+        INDEX idx_interaction_notes_channel (channel, created_at),
+        INDEX idx_interaction_notes_deleted (deleted_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
 ensure_table($pdo, 'push_subscriptions', "
     CREATE TABLE push_subscriptions (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -736,6 +854,22 @@ function seed_default_supplier_groups(PDO $pdo): void
 
     foreach ($rows as $name) {
         $stmt->execute(['name' => $name]);
+    }
+}
+
+function seed_default_contact_roles(PDO $pdo): void
+{
+    $stmt = $pdo->prepare(
+        'INSERT INTO contact_role_definitions (name, sort_order, is_active)
+         VALUES (:name, :sort_order, 1)
+         ON DUPLICATE KEY UPDATE is_active = 1, updated_at = NOW()'
+    );
+
+    foreach (App\Models\RenewalRepository::defaultContactRoles() as $index => $name) {
+        $stmt->execute([
+            'name' => $name,
+            'sort_order' => ($index + 1) * 10,
+        ]);
     }
 }
 

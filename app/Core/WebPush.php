@@ -98,6 +98,23 @@ final class WebPush
         return self::sendRows($stmt->fetchAll(), $payload);
     }
 
+    public static function sendToAllExceptUser(int $userId, array $payload = []): array
+    {
+        if ($userId < 1) {
+            return self::sendToAll($payload);
+        }
+
+        $stmt = Database::connection()->prepare(
+            'SELECT * FROM push_subscriptions
+             WHERE is_active = 1
+               AND (user_id IS NULL OR user_id <> :user_id)
+             ORDER BY id ASC'
+        );
+        $stmt->execute(['user_id' => $userId]);
+
+        return self::sendRows($stmt->fetchAll(), $payload);
+    }
+
     private static function sendRows(array $rows, array $payload): array
     {
         $sent = 0;
