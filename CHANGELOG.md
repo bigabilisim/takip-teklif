@@ -1,5 +1,244 @@
 # Changelog
 
+## [2.0.28] - 2026-05-09
+
+- Dashboard teklif kartlarında ayrı WhatsApp, e-posta ve PDF gönderim aksiyonları tek “Müşteriye gönder” penceresinde toplandı.
+- Teklif gönderiminde cari yetkilileri seçilebilir hale getirildi; manuel e-posta alıcısı ve teklif/PDF bağlantısı seçimi eklendi.
+- Teklif WhatsApp gönderiminde seçili yetkili telefonuyla teklif veya PDF bağlantısı gönderme akışı eklendi.
+
+## [2.0.27] - 2026-05-09
+
+- Giriş güvenliği e-posta bazlı kilitleme ile güçlendirildi.
+- Hatalı girişten sonra güvenlik doğrulaması eklendi; Cloudflare Turnstile anahtarı yoksa yerleşik matematik doğrulaması kullanılır.
+- Şüpheli girişler, IP/e-posta kilitleri ve doğrulama hataları için güvenlik logları ekranı eklendi.
+- Kritik giriş güvenliği olaylarında yöneticiye mail ve web push bildirimi gönderimi eklendi.
+- Ayarlar bölümüne güvenlik kartı ve Turnstile anahtar alanları eklendi.
+
+## [2.0.26] - 2026-05-08
+
+- Dashboard teklif kartlarına onaylı teklif için “Faturayı Paraşüt’te oluştur” aksiyonu eklendi.
+- Satış tekliflerinde Paraşüt fatura ID/no/durum bilgileri ve müşteri cari eşleşmesi saklanmaya başlandı.
+
+## [2.0.25] - 2026-05-08
+
+- Satış tekliflerinde ön ödeme tahsil edildikten sonra kalan bakiye için ayrı ödeme talebi oluşturma ve müşteriye mail gönderme eklendi.
+- Dashboard teklif kartlarında ön ödeme ve kalan bakiye durumu görünür hale getirildi.
+
+## [2.0.24] - 2026-05-08
+
+- Teklif antetindeki iletişim satırı `satis@bigabilisim.com - www.antalyabigabilisim.com` olarak güncellendi.
+- Teklif antetindeki e-posta ve web adresi tıklanabilir hale getirildi.
+
+## [2.0.23] - 2026-05-08
+
+- Satış tekliflerine “Teklif onaylanınca ön ödeme talep et” seçeneği ve varsayılan %20 oran alanı eklendi.
+- Müşteri teklif bağlantısında onay sonrası ön ödeme talebi oluşturulup kredi kartı ödeme akışına yönlendirme eklendi.
+
+## [2.0.22] - 2026-05-08
+
+- Stok / teklif kalemleri Paraşüt senkronuna hız limiti için otomatik bekleme ve tekrar deneme eklendi.
+- Stok / teklif kalemleri ekranına manuel kalem ekleme penceresi eklendi.
+
+## [2.0.21] - 2026-05-08
+
+- Dashboard teklif kartı detayına taslak görüntüleme, WhatsApp gönderimi, e-posta gönderimi, PDF bağlantısı gönderimi ve PDF çıktısı açma aksiyonları eklendi.
+- Satış teklifleri için süreli müşteri görüntüleme bağlantısı, print/PDF uyumlu teklif çıktısı ve mail log kaydı eklendi.
+
+## [2.0.20] - 2026-05-08
+
+- Dashboard teklif kartları açıldığında alt bölümde `Düzenle` ve `Sil` aksiyonları eklendi; silme aksiyonu üst özet satırında gösterilmez.
+- Satış teklifleri için mevcut form düzenleme modunda da kullanılabilir hale getirildi.
+
+## [2.0.19] - 2026-05-08
+
+- Tedarikçi fiyat talepleri, müşteri yenileme teklifleri ve satış teklifleri için ayrı teklif numarası serileri eklendi (`TT`, `YT`, `TK`).
+- Teklif numaraları mail konusu, mail içeriği, müşteri/tedarikçi formları, teklif geçmişi, dashboard ve Paraşüt fatura notlarında görünür hale getirildi.
+- Mevcut teklif kayıtları oluşturulma yılı ve kayıt ID’sine göre geriye dönük numaralandırılır.
+
+## [2.0.18] - 2026-05-08
+
+- Başarılı iyzico yenileme ödemesi sonrasında ilgili müşteri teklifi otomatik onaylanır, Paraşüt faturası oluşturulur ve yenileme kaydı yeni periyoda ilerletilir.
+- Paraşüt cari ID boşsa, fatura oluşturma sırasında müşteri unvanı/VKN ile güvenli eşleşme yapılır ve cari ID müşteri kartına yazılır.
+
+## [2.0.17] - 2026-05-08
+
+- Tahsilat ekranına başarılı iyzico kart ödemelerini gösteren “Kart ödemeleri” filtresi eklendi.
+- Yenileme ve manuel ödeme talebi üzerinden alınan iyzico tahsilatları ödeme no, tarih, tutar ve kaynak kaydıyla listelenir.
+
+## [2.0.16] - 2026-05-08
+
+- Cari bilgi talebi mailleri artık Mail Logları ekranına başarılı veya başarısız durumuyla yazılır.
+- Mail gönderim sonucu, log ekranında gerçekten gönderime hazırlanan mail gövdesiyle takip edilebilir.
+
+## [2.0.15] - 2026-05-08
+
+- Manuel ödeme linkinde canlı iyzico için müşteri e-postası eksikse kullanıcıdan e-posta alınıp kaydedildikten sonra kredi kartı ödeme akışı otomatik yeniden başlatılır.
+- Ödeme Talep Et ekranında açılmış manuel ödeme case'leri için açılır düzenleme formu eklendi.
+
+## [2.0.14] - 2026-05-08
+
+- Yeni teklif kalemleri iki satırlı özel düzene alındı; stok kataloğu uyarısı `i` rozetli bilgi kutusu olarak gösterilir.
+
+## [2.0.13] - 2026-05-08
+
+- Yeni teklif ekranında cari seçilince öneri kutusunun kapanması ve seçilen carinin e-posta/telefon bilgilerinin otomatik forma yazılması sağlamlaştırıldı.
+
+## [2.0.12] - 2026-05-08
+
+- Paraşüt faturası oluşturulurken fatura notuna başarılı ödeme yöntemi, ödeme ID, sistem ödeme kayıt no, ödeme numarası, tarih ve tutar bilgileri otomatik eklenir.
+- Onaylı müşteri tekliflerinden oluşturulan Paraşüt faturaları artık en son başarılı ödeme kaydıyla ilişkilendirilmiş açıklama taşır.
+- Kart ödemesi fatura oluştuktan sonra tamamlanırsa mevcut Paraşüt faturasının notu ödeme bilgileriyle otomatik güncellenir.
+
+## [2.0.11] - 2026-05-08
+
+- Yeni teklif oluşturma ekranındaki firma alanı mevcut carileri canlı arama ile listeleyecek hale getirildi.
+- Cari seçildiğinde teklif formundaki e-posta ve telefon alanları kayıtlı müşteri/yetkili bilgileriyle otomatik doldurulur.
+
+## [2.0.10] - 2026-05-08
+
+- Raporlar menüsüne ürün/hizmet bazında yıllık-aylık satış analizi eklendi.
+- Onaylanan müşteri tekliflerinden ürün adı filtresiyle satış sayısı, satılan adet ve KDV dahil tutarlar izlenebilir hale getirildi.
+
+## [2.0.9] - 2026-05-08
+
+- Paraşüt ürün/hizmet kataloğu yerel stok kalemi tablosuna senkronlanabilir hale getirildi.
+- Yeni teklif ve teklif şablonu kalemleri yerel stok kataloğundan seçilerek fiyat, para birimi ve KDV bilgisini otomatik doldurur.
+
+## [2.0.8] - 2026-05-08
+
+- Dashboard sağ tarafı yeni teklif modülü olarak düzenlendi; yeni teklif butonu ve son teklif taslakları eklendi.
+- Ayarlar bölümüne teklif şablonları eklendi; boş teklif veya hazır şablondan teklif taslağı oluşturma akışı hazırlandı.
+
+## [2.0.7] - 2026-05-08
+
+- Ürün/hizmet tanımlarının tamamı için kategori bazlı bilgilendirme açıklamaları eklendi.
+- Boş açıklamaya sahip mevcut tanımlar, panel açılışında doğal ama riskleri anlatan metinlerle otomatik tamamlanacak hale getirildi.
+
+## [2.0.6] - 2026-05-08
+
+- Onaylı müşteri teklifleri için Paraşüt faturası otomatik oluşmazsa dashboard aksiyonlarına manuel gönderim tuşu eklendi.
+- Müşteri teklif geçmişindeki Paraşüt fatura aksiyonu “Manuel Paraşüt'e gönder” olarak netleştirildi.
+
+## [2.0.5] - 2026-05-08
+
+- Tüm yenileme kartları için bilgilendirme günleri 30, 20, 15 ve 7 gün olarak standart hale getirildi.
+- Bilgilendirme gönderim mantığı 30/20/15 günlerde tekil, 7 gün ve altında günlük tekrar olacak şekilde düzenlendi.
+
+## [2.0.4] - 2026-05-08
+
+- Yenileme bilgilendirme maillerinden kredi kartı ödeme linki ve butonu kaldırıldı.
+- Mail şablon tasarımındaki kredi kartı ödeme alanları bilgilendirme şablonu kullanılabilir alanlarından çıkarıldı.
+
+## [2.0.3] - 2026-05-08
+
+- Alan adı ve hosting yenilemeleri için daha doğal, satış baskısı oluşturmayan ancak servis kesintisi riskini anlatan bilgilendirme metni eklendi.
+- Alan adı, hosting ve e-posta hosting tanımlarındaki varsayılan bilgilendirme metni aynı içerikle güncellenecek şekilde hazırlandı.
+
+## [2.0.2] - 2026-05-08
+
+- Müşteri kartlarına eksik yetkili/cari bilgilerini 48 saat geçerli tek kullanımlık linkle mail veya WhatsApp üzerinden isteme akışı eklendi.
+- Cari bilgi formu mevcut müşteri ve yetkili bilgileriyle açılarak müşterinin eksik bilgilendirme kişilerini tamamlaması kolaylaştırıldı.
+
+## [2.0.1] - 2026-05-08
+
+- Müşteri teklif onayından sonra Paraşüt satış faturası otomatik oluşturma akışı eklendi.
+- Onaylı müşteri teklif geçmişinde Paraşüt fatura no, aktarım durumu, hata detayı ve manuel tekrar oluşturma aksiyonu gösterilir hale geldi.
+
+## [2.0.0] - 2026-05-08
+
+- Hızlı Takip ve Teklif Platformu ana sürümü V2 olarak başlatıldı.
+- PWA cache sürümü V2’ye yükseltilerek canlı kullanıcıların yeni arayüz ve ödeme akışı dosyalarını alması sağlandı.
+
+## [1.0.72] - 2026-05-07
+
+- Sabit “30 gün cari hesap” ödeme yöntemi ödeme tanımlarından, yenileme formundan, tahsilat filtrelerinden ve akış şemasından kaldırıldı.
+- Müşteri ödeme şeklini kendi seçsin açık olan ödeme bağlantılarında “Diğer” seçeneği eklendi; müşteri kendi ödeme şartını yazıp kaydedebilir hale geldi.
+
+## [1.0.71] - 2026-05-07
+
+- Manuel fiyat seçimi tedarikçi teklifleri olan kartlarda da “Manuel fiyat” etiketiyle gösterilecek şekilde düzeltildi.
+
+## [1.0.70] - 2026-05-07
+
+- Takipteki ürün ve hizmet kartlarına “Manuel fiyat ver” aksiyonu eklendi.
+- Tedarikçi teklifi gelmeden ürün kalemlerine manuel satış fiyatı girilip müşteri teklif ekranına aktarılabilir hale getirildi.
+- Manuel fiyatla hazırlanan kayıtlar mevcut müşteri teklif gönderme akışına bağlandı.
+
+## [1.0.69] - 2026-05-07
+
+- Başarılı iyzico ödemelerinde Bilal Bozduman kullanıcısına web push ve mail bildirimi gönderimi eklendi.
+- Manuel Ödeme Talep Et kaydı oluştuğunda Bilal Bozduman kullanıcısına web push bildirimi gönderimi eklendi.
+- Ödeme bildirimleri tekrar eden iyzico callbacklerinde yalnızca ilk başarılı geçişte gönderilecek şekilde sınırlandı.
+
+## [1.0.68] - 2026-05-07
+
+- iyzico kredi kartı linklerinde USD/EUR seçildiğinde tutar TCMB satış kuruyla TL’ye çevrilip TRY POS üzerinden ödeme linki oluşturulacak şekilde düzeltildi.
+- Kredi kartı tahsilatı formuna iyzico’nun TL POS davranışını ve yaklaşık TL karşılığını açıklayan bilgilendirme eklendi.
+- Kart ödeme kayıtlarında iyzico’ya gönderilen TL tutar saklanırken ham istek kaydına orijinal döviz tutarı ve kur bilgisi eklendi.
+
+## [1.0.67] - 2026-05-07
+
+- WhatsApp gönderim bağlantıları `wa.me` yerine doğrudan WhatsApp Web gönderim ekranına yönlendirilecek şekilde değiştirildi.
+- WhatsApp butonları aynı isimli `takip_whatsapp_web` sekmesini/penceresini kullanır hale getirildi; sekme yoksa açar, varsa aynı sekmede devam eder.
+
+## [1.0.66] - 2026-05-07
+
+- Mail log detayındaki içerik alanı ham HTML yerine render edilmiş mail önizlemesi olarak gösterilecek şekilde değiştirildi.
+- Önizlemede kayıtlı uygulama logosu `cid:app_logo` yerine paneldeki logo adresiyle gösterilir hale getirildi.
+
+## [1.0.65] - 2026-05-07
+
+- Loglar ekranı “Mail logları” olarak yeniden adlandırıldı ve Ayarlar bölümünün altına taşındı.
+- Eski `/logs` adresi yeni `/settings/mail-logs` adresine yönlendirilecek şekilde korundu.
+- Mail gönderim kayıtlarına Detay açılımı eklendi; alıcı, konu, durum, tarih ve gönderilen mail içeriği güvenli içerik görünümüyle incelenebilir hale getirildi.
+
+## [1.0.64] - 2026-05-07
+
+- Manuel ödeme talebi formuna kayıtlı cariden canlı unvan arama ve seçme eklendi.
+- Cari seçilince e-posta, telefon, vergi no alanları otomatik doldurulur hale getirildi.
+- Seçilen carinin yetkilileri kutucuklar halinde gösterilip ödeme linki için istenen yetkilileri seçme ve oluşturulan talepten yetkili bazlı WhatsApp/mail gönderme eklendi.
+
+## [1.0.63] - 2026-05-07
+
+- Ödeme Talep Et sayfası yenileme/tahsilat kaydından bağımsız manuel ödeme case akışına çevrildi.
+- Manuel ödeme talepleri için tutar, para birimi, müşteri iletişimi, açıklama, ödeme linki, WhatsApp ve mail gönderim aksiyonları eklendi.
+- Manuel ödeme taleplerine özel ödeme ve gönderim log tabloları eklendi; iyzico dönüşleri manuel talepleri ödendi durumuna alacak şekilde genişletildi.
+
+## [1.0.62] - 2026-05-07
+
+- Sol menüye “Ödeme Talep Et” sayfası eklendi.
+- Açık tahsilat kayıtları için ödeme talebi oluşturma, WhatsApp ile gönderme, mail atma ve direkt ödeme linki açma aksiyonları eklendi.
+- Ödeme talebi mail gönderimleri mail loglarına işlenir hale getirildi.
+
+## [1.0.61] - 2026-05-07
+
+- Akış Şemaları sol menüden kaldırılıp Ayarlar bölümünün içine taşındı.
+- Yeni akış adresi `/settings/flows` oldu; eski `/flows` bağlantısı yeni adrese yönlendirilir.
+- Ayarlar üst aksiyonlarına Akış Şemaları butonu eklendi.
+
+## [1.0.60] - 2026-05-07
+
+- Ayarlar ekranındaki kategori kartları satır hizasına sabitlendi; kartlar artık kolonlarda boşluk bırakarak dağılmıyor.
+- Kategori düzeninde sürükleme kontrolü gizlendi; ayar kartları daha temiz tek aksiyonlu satır yapısına alındı.
+
+## [1.0.59] - 2026-05-07
+
+- Ayarlar ekranı üç kategoriye ayrıldı: İletişim ve marka, Entegrasyon ve ödeme, Sistem.
+- Ayar kartları daha kompakt tek satır yapıya alındı; durum rozeti ve Ayarla aksiyonu aynı satırda kalacak şekilde düzenlendi.
+- Sıralama kontrolü görsel olarak küçültüldü ve mobilde kategori kolonları tek kolona düşecek şekilde responsive hale getirildi.
+
+## [1.0.58] - 2026-05-07
+
+- Kredi kartı ödemesinde yalnızca doğrulanmış iyzico ödeme numarası olan başarılı kayıtlar tahsil edilmiş sayılacak şekilde kontrol sıkılaştırıldı.
+- Eski bir başarılı kart ödemesinin yeni ödeme linkini “tamamlandı” göstermemesi için ödeme seçimi tarihinden sonraki tahsilat kontrolü eklendi.
+- iyzico dönüşünde tutar ve ödeme numarası doğrulaması güçlendirildi; ödeme tamamlanmadıysa müşteri tekrar ödeme adımına yönlenir.
+
+## [1.0.57] - 2026-05-07
+
+- PayTR kredi kartı entegrasyonu ve PayTR ayar kartı sistemden kaldırıldı.
+- Kredi kartı ödeme akışı tekrar yalnızca iyzico Checkout Form üzerinden çalışacak şekilde sadeleştirildi.
+- Yenileme düzenleme ekranındaki kredi kartı tahsilatı bilgilendirmeleri iyzico odaklı hale getirildi.
+
 ## [1.0.56] - 2026-05-07
 
 - Sol menüye “Akış Şemaları” bölümü eklendi.

@@ -66,6 +66,38 @@ final class IyzicoClient
         ];
     }
 
+    public function initializeManualPayment(array $paymentRequest, float $amount, string $currency, string $conversationId): array
+    {
+        $amountText = $this->money($amount);
+        $title = trim((string) ($paymentRequest['title'] ?? 'Manuel ödeme talebi'));
+        $payload = [
+            'locale' => 'tr',
+            'conversationId' => $conversationId,
+            'price' => $amountText,
+            'paidPrice' => $amountText,
+            'currency' => $this->currency($currency),
+            'basketId' => 'manual-payment-' . (int) $paymentRequest['id'],
+            'paymentGroup' => 'PRODUCT',
+            'callbackUrl' => \url('/payments/iyzico/callback'),
+            'enabledInstallments' => $this->enabledInstallments(),
+            'buyer' => $this->buyer($paymentRequest),
+            'billingAddress' => $this->billingAddress($paymentRequest),
+            'basketItems' => [[
+                'id' => 'manual-payment-' . (int) $paymentRequest['id'],
+                'name' => mb_substr($title !== '' ? $title : 'Manuel ödeme talebi', 0, 255),
+                'category1' => 'Manuel Tahsilat',
+                'category2' => 'Ödeme Talebi',
+                'itemType' => 'VIRTUAL',
+                'price' => $amountText,
+            ]],
+        ];
+
+        return [
+            'request' => $payload,
+            'response' => $this->request(self::INITIALIZE_PATH, $payload),
+        ];
+    }
+
     public function retrieveCheckout(string $token, string $conversationId): array
     {
         $payload = [
@@ -137,8 +169,8 @@ final class IyzicoClient
 
     private function buyer(array $renewal): array
     {
-        $company = trim((string) ($renewal['company_name'] ?? 'Musteri'));
-        $contact = trim((string) ($renewal['contact_name'] ?? ''));
+        $company = trim((string) (($renewal['company_name'] ?? '') ?: ($renewal['customer_name'] ?? 'Musteri')));
+        $contact = trim((string) (($renewal['contact_name'] ?? '') ?: ($renewal['customer_name'] ?? '')));
         [$name, $surname] = $this->splitName($contact !== '' ? $contact : $company);
         $email = trim((string) ($renewal['customer_email'] ?? ''));
         $phone = $this->phone((string) ($renewal['customer_phone'] ?? ''));
@@ -155,7 +187,7 @@ final class IyzicoClient
         }
 
         return [
-            'id' => 'customer-' . (int) $renewal['customer_id'],
+            'id' => !empty($renewal['customer_id']) ? 'customer-' . (int) $renewal['customer_id'] : 'manual-' . (int) ($renewal['id'] ?? 0),
             'name' => $name,
             'surname' => $surname,
             'gsmNumber' => $phone !== '' ? $phone : '+905350000000',
@@ -171,7 +203,7 @@ final class IyzicoClient
 
     private function billingAddress(array $renewal): array
     {
-        $company = trim((string) ($renewal['company_name'] ?? 'Musteri'));
+        $company = trim((string) (($renewal['company_name'] ?? '') ?: ($renewal['customer_name'] ?? 'Musteri')));
 
         return [
             'contactName' => $company !== '' ? $company : 'Musteri',
@@ -189,7 +221,7 @@ final class IyzicoClient
             return $address;
         }
 
-        return trim((string) ($renewal['company_name'] ?? 'Adres girilmedi')) ?: 'Adres girilmedi';
+        return trim((string) (($renewal['company_name'] ?? '') ?: ($renewal['customer_name'] ?? 'Adres girilmedi'))) ?: 'Adres girilmedi';
     }
 
     private function splitName(string $name): array

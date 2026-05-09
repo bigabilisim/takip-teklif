@@ -37,6 +37,7 @@ VALUES
     ('Microsoft 365 Lisansi', 'product', 1),
     ('Google Workspace Lisansi', 'product', 1),
     ('E-posta Hosting', 'product', 1),
+    ('Alan Adi ve Hosting Yenileme', 'product', 1),
     ('Alan Adi Yenileme', 'product', 1),
     ('Web Hosting', 'product', 1),
     ('SSL Sertifikasi', 'product', 1),
@@ -66,8 +67,8 @@ VALUES
     ('KVKK Danismanlik Hizmeti', 'service', 1);
 
 UPDATE renewal_definitions
-SET notification_info = 'Alan adının süresi bittikten sonraki 20 gün içinde alan adı normal ücretle yenilenebilir. Bu süre içinde, alan adına bağlı web sitesi, e-mailler ve benzer bütün servisler duracaktır. 20 günü aştığı taktirde ise alan adı kurtarma periyoduna girer ve normal ücretle yenilenemez, böyle bir durumda yenilemek isterseniz destek bildirimi açarak güncel kurtarma ücretini sorabilirsiniz. Süre bitiminden 20 gün geçtikten sonra alan adınızı kurtarabileceğiniz ve sahipliğini sağlayabileceğiniz konusunda garanti verememekteyiz. Firmalar arası farklılıklar göstermektedir.'
-WHERE name = 'Alan Adi Yenileme' AND kind = 'product';
+SET notification_info = 'Alan adı ve hosting yenilemeleri genellikle sessiz ilerleyen, ancak süresi kaçırıldığında etkisi hızlı hissedilen süreçlerdir. Süre dolduğunda web sitesi, e-posta hesapları, DNS yönlendirmeleri ve bağlı servislerde erişim kesintileri yaşanabilir. Alan adı tarafında ilk günlerde yenileme çoğu zaman yapılabilse de, bekleme veya kurtarma dönemine girildiğinde ek ücret, kesinti süresi ve alan adının kaybedilmesi riski oluşabilir. Hosting tarafında ise dosya, yedek ve e-posta erişimi etkilenebileceği için yenileme tercihinin süre dolmadan netleşmesi önerilir.'
+WHERE name IN ('Alan Adi ve Hosting Yenileme', 'Alan Adi Yenileme', 'Web Hosting', 'E-posta Hosting') AND kind = 'product';
 
 INSERT INTO renewal_periods (name, interval_count, interval_unit, is_active)
 VALUES

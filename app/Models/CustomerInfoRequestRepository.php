@@ -17,20 +17,23 @@ final class CustomerInfoRequestRepository
         $this->ensureSchema();
     }
 
-    public function create(string $email, ?int $customerId = null, ?int $createdBy = null, string $recipientName = ''): array
+    public function create(string $email, ?int $customerId = null, ?int $createdBy = null, string $recipientName = '', int $expiresHours = 48): array
     {
         $token = bin2hex(random_bytes(32));
+        $expiresHours = max(1, min(168, $expiresHours));
+        $expiresAt = date('Y-m-d H:i:s', time() + ($expiresHours * 3600));
         $stmt = $this->db->prepare(
             'INSERT INTO customer_info_requests
                 (customer_id, token_hash, recipient_email, recipient_name, status, expires_at, created_by)
              VALUES
-                (:customer_id, :token_hash, :recipient_email, :recipient_name, "pending", DATE_ADD(NOW(), INTERVAL 14 DAY), :created_by)'
+                (:customer_id, :token_hash, :recipient_email, :recipient_name, "pending", :expires_at, :created_by)'
         );
         $stmt->execute([
             'customer_id' => $customerId ?: null,
             'token_hash' => hash('sha256', $token),
             'recipient_email' => $email,
             'recipient_name' => trim($recipientName),
+            'expires_at' => $expiresAt,
             'created_by' => $createdBy ?: null,
         ]);
 
@@ -77,6 +80,57 @@ final class CustomerInfoRequestRepository
         $stmt->execute();
 
         return $stmt->fetchAll();
+    }
+
+    public function customerFormDefaults(int $customerId, string $fallbackEmail = '', string $fallbackContactName = ''): array
+    {
+        $customer = $customerId > 0 ? $this->customer($customerId) : [];
+        if ($customer === []) {
+            return [
+                'company_name' => '',
+                'contact_name' => trim($fallbackContactName),
+                'email' => trim($fallbackEmail),
+                'phone' => '',
+                'tax_office' => '',
+                'tax_number' => '',
+                'city' => '',
+                'district' => '',
+                'address' => '',
+                'notes' => '',
+                'contacts' => [[
+                    'full_name' => trim($fallbackContactName),
+                    'email' => trim($fallbackEmail),
+                    'phone' => '',
+                    'notify_enabled' => 1,
+                ]],
+            ];
+        }
+
+        $contacts = $this->customerContacts($customerId);
+        if ($contacts === []) {
+            $contacts = [[
+                'full_name' => trim((string) (($customer['contact_name'] ?? '') ?: $fallbackContactName)),
+                'email' => trim((string) (($customer['email'] ?? '') ?: $fallbackEmail)),
+                'phone' => \normalize_phone_number($customer['phone'] ?? ''),
+                'notify_enabled' => 1,
+            ]];
+        }
+
+        $primaryContact = $contacts[0] ?? [];
+
+        return [
+            'company_name' => trim((string) ($customer['company_name'] ?? '')),
+            'contact_name' => trim((string) (($customer['contact_name'] ?? '') ?: ($primaryContact['full_name'] ?? $fallbackContactName))),
+            'email' => trim((string) (($customer['email'] ?? '') ?: ($primaryContact['email'] ?? $fallbackEmail))),
+            'phone' => \normalize_phone_number($customer['phone'] ?? ($primaryContact['phone'] ?? '')),
+            'tax_office' => trim((string) ($customer['tax_office'] ?? '')),
+            'tax_number' => trim((string) ($customer['tax_number'] ?? '')),
+            'city' => trim((string) ($customer['city'] ?? '')),
+            'district' => trim((string) ($customer['district'] ?? '')),
+            'address' => trim((string) ($customer['address'] ?? '')),
+            'notes' => trim((string) ($customer['notes'] ?? '')),
+            'contacts' => $contacts,
+        ];
     }
 
     public function complete(array $request, array $data, ?string $uploadPath, array $extracted): int
@@ -214,6 +268,29 @@ final class CustomerInfoRequestRepository
         $stmt->execute(['id' => $id]);
 
         return $stmt->fetch() ?: [];
+    }
+
+    private function customerContacts(int $customerId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT full_name, email, phone, notify_enabled
+             FROM customer_contacts
+             WHERE customer_id = :customer_id
+             ORDER BY notify_enabled DESC, full_name ASC, id ASC'
+        );
+        $stmt->execute(['customer_id' => $customerId]);
+
+        $contacts = [];
+        foreach ($stmt->fetchAll() as $contact) {
+            $contacts[] = [
+                'full_name' => trim((string) ($contact['full_name'] ?? '')),
+                'email' => trim((string) ($contact['email'] ?? '')),
+                'phone' => \normalize_phone_number($contact['phone'] ?? ''),
+                'notify_enabled' => !empty($contact['notify_enabled']) ? 1 : 0,
+            ];
+        }
+
+        return $contacts;
     }
 
     private function upsertContacts(int $customerId, array $contacts): void

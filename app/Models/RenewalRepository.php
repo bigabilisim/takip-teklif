@@ -9,6 +9,8 @@ use PDO;
 
 final class RenewalRepository
 {
+    private const STANDARD_REMINDER_DAYS = [30, 20, 15, 7];
+
     private PDO $db;
     private static bool $invoiceSchemaEnsured = false;
     private static bool $paymentSchemaEnsured = false;
@@ -20,6 +22,8 @@ final class RenewalRepository
     private static bool $notificationDeliverySchemaEnsured = false;
     private static bool $supplierQuoteSchemaEnsured = false;
     private static bool $customerOfferSchemaEnsured = false;
+    private static bool $stockItemSchemaEnsured = false;
+    private static bool $salesOfferSchemaEnsured = false;
     private static bool $phoneNormalizationEnsured = false;
 
     public function __construct()
@@ -35,6 +39,8 @@ final class RenewalRepository
         $this->ensureNotificationDeliverySchema();
         $this->ensureSupplierQuoteSchema();
         $this->ensureCustomerOfferSchema();
+        $this->ensureStockItemSchema();
+        $this->ensureSalesOfferSchema();
         $this->ensurePhoneNormalization();
     }
 
@@ -70,7 +76,6 @@ final class RenewalRepository
             'awaiting' => count($collectionRows),
             'choice' => 0,
             'bank' => 0,
-            'term30' => 0,
         ];
 
         foreach ($collectionRows as $row) {
@@ -80,9 +85,6 @@ final class RenewalRepository
             }
             if (str_contains($method, 'havale') || str_contains($method, 'eft')) {
                 $collection['bank']++;
-            }
-            if (str_contains($method, '30')) {
-                $collection['term30']++;
             }
         }
 
@@ -184,9 +186,8 @@ final class RenewalRepository
                 'awaiting' => $collection['awaiting'],
                 'choice' => $collection['choice'],
                 'bank' => $collection['bank'],
-                'term30' => $collection['term30'],
                 'receipts' => $this->countValue('SELECT COUNT(*) FROM renewal_payment_receipts'),
-                'paid_card' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'paid'"),
+                'paid_card' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'paid' AND COALESCE(payment_id, '') <> ''"),
                 'card_pending' => $this->countValue("SELECT COUNT(*) FROM renewal_payments WHERE status = 'pending'"),
             ],
         ];
@@ -248,6 +249,7 @@ final class RenewalRepository
                 FROM renewal_payments rp_paid_filter
                 WHERE rp_paid_filter.renewal_id = r.id
                   AND rp_paid_filter.status = 'paid'
+                  AND COALESCE(rp_paid_filter.payment_id, '') <> ''
             )",
             "NOT EXISTS (
                 SELECT 1
@@ -270,8 +272,6 @@ final class RenewalRepository
 
         if ($filter === 'bank') {
             $where[] = "({$method} LIKE '%havale%' OR {$method} LIKE '%eft%')";
-        } elseif ($filter === 'term30') {
-            $where[] = "{$method} LIKE '%30%'";
         } elseif ($filter === 'choice') {
             $where[] = "(r.payment_customer_choice = 1 OR COALESCE(r.payment_method, '') = '')";
         }
@@ -282,8 +282,7 @@ final class RenewalRepository
                 CASE
                     WHEN r.payment_customer_choice = 1 OR COALESCE(r.payment_method, \'\') = \'\' THEN 0
                     WHEN ' . $method . ' LIKE \'%havale%\' OR ' . $method . ' LIKE \'%eft%\' THEN 1
-                    WHEN ' . $method . ' LIKE \'%30%\' THEN 2
-                    ELSE 3
+                    ELSE 2
                 END ASC,
                 r.payment_selected_at ASC,
                 r.renewal_date ASC,
@@ -304,7 +303,8 @@ final class RenewalRepository
                       SELECT 1
                       FROM renewal_reminder_rules rrr
                       WHERE rrr.renewal_id = r.id
-                        AND DATEDIFF(r.renewal_date, CURDATE()) <= rrr.days_before
+                        AND rrr.days_before > 7
+                        AND DATEDIFF(r.renewal_date, CURDATE()) = rrr.days_before
                   )
                   OR (
                       NOT EXISTS (
@@ -312,7 +312,7 @@ final class RenewalRepository
                           FROM renewal_reminder_rules rrf
                           WHERE rrf.renewal_id = r.id
                       )
-                      AND r.renewal_date <= DATE_ADD(CURDATE(), INTERVAL r.reminder_days DAY)
+                      AND DATEDIFF(r.renewal_date, CURDATE()) = r.reminder_days
                   )
               )
               AND (r.last_notified_at IS NULL OR DATE(r.last_notified_at) < CURDATE())
@@ -635,11 +635,706 @@ final class RenewalRepository
         }
         $sql .= ' ORDER BY sort_order ASC, name ASC';
 
-        return $this->db->query($sql)->fetchAll();
+        return array_values(array_filter(
+            $this->db->query($sql)->fetchAll(),
+            static fn (array $method): bool => !self::isRemovedPaymentMethodName((string) ($method['name'] ?? ''))
+        ));
+    }
+
+    public function stockItems(string $query = '', int $limit = 300): array
+    {
+        $query = trim($query);
+        $limit = max(1, min($limit, 1000));
+        if ($query === '') {
+            $stmt = $this->db->prepare(
+                'SELECT *
+                 FROM stock_items
+                 WHERE is_active = 1
+                 ORDER BY name ASC, code ASC
+                 LIMIT :limit'
+            );
+            $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+
+            return $stmt->fetchAll();
+        }
+
+        $needle = '%' . $query . '%';
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM stock_items
+             WHERE is_active = 1
+               AND (
+                   name LIKE :needle
+                   OR code LIKE :needle
+                   OR barcode LIKE :needle
+                   OR brand LIKE :needle
+               )
+             ORDER BY
+                CASE
+                    WHEN name LIKE :starts THEN 0
+                    WHEN code LIKE :starts THEN 1
+                    ELSE 2
+                END,
+                name ASC
+             LIMIT :limit'
+        );
+        $stmt->bindValue('needle', $needle);
+        $stmt->bindValue('starts', $query . '%');
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    public function stockItemStats(): array
+    {
+        $row = $this->db->query(
+            "SELECT
+                COUNT(*) AS total,
+                SUM(is_active = 1) AS active,
+                SUM(source = 'parasut') AS parasut_total,
+                MAX(last_synced_at) AS last_synced_at
+             FROM stock_items"
+        )->fetch() ?: [];
+
+        return [
+            'total' => (int) ($row['total'] ?? 0),
+            'active' => (int) ($row['active'] ?? 0),
+            'parasut_total' => (int) ($row['parasut_total'] ?? 0),
+            'last_synced_at' => (string) ($row['last_synced_at'] ?? ''),
+        ];
+    }
+
+    public function createStockItem(array $data): int
+    {
+        $name = trim((string) ($data['name'] ?? ''));
+        if ($name === '') {
+            throw new \RuntimeException('Stok / teklif kalemi adı zorunlu.');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO stock_items
+                (parasut_product_id, name, code, barcode, brand, unit, currency, list_price, buying_price, vat_rate,
+                 inventory_tracking, stock_count, is_active, is_archived, source, raw_payload, last_synced_at)
+             VALUES
+                (NULL, :name, :code, :barcode, :brand, :unit, :currency, :list_price, :buying_price, :vat_rate,
+                 :inventory_tracking, :stock_count, 1, 0, :source, NULL, NULL)'
+        );
+        $stmt->execute([
+            'name' => $name,
+            'code' => $this->nullableString($data['code'] ?? ''),
+            'barcode' => $this->nullableString($data['barcode'] ?? ''),
+            'brand' => $this->nullableString($data['brand'] ?? ''),
+            'unit' => $this->nullableString($data['unit'] ?? 'Adet') ?? 'Adet',
+            'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
+            'list_price' => max(0.0, $this->decimalValue($data['list_price'] ?? 0, 0.0)),
+            'buying_price' => $this->nullableDecimalValue($data['buying_price'] ?? null),
+            'vat_rate' => max(0.0, min(100.0, $this->decimalValue($data['vat_rate'] ?? 20, 20.0))),
+            'inventory_tracking' => !empty($data['inventory_tracking']) ? 1 : 0,
+            'stock_count' => $this->nullableDecimalValue($data['stock_count'] ?? null),
+            'source' => 'manual',
+        ]);
+
+        return (int) $this->db->lastInsertId();
+    }
+
+    public function syncStockItemsFromParasut(array $products): array
+    {
+        $created = 0;
+        $updated = 0;
+        $seenIds = [];
+
+        $existsStmt = $this->db->prepare(
+            "SELECT id FROM stock_items WHERE source = 'parasut' AND parasut_product_id = :parasut_product_id LIMIT 1"
+        );
+        $upsertStmt = $this->db->prepare(
+            'INSERT INTO stock_items
+                (parasut_product_id, name, code, barcode, brand, unit, currency, list_price, buying_price, vat_rate,
+                 inventory_tracking, stock_count, is_active, is_archived, source, raw_payload, last_synced_at)
+             VALUES
+                (:parasut_product_id, :name, :code, :barcode, :brand, :unit, :currency, :list_price, :buying_price, :vat_rate,
+                 :inventory_tracking, :stock_count, :is_active, :is_archived, :source, :raw_payload, NOW())
+             ON DUPLICATE KEY UPDATE
+                name = VALUES(name),
+                code = VALUES(code),
+                barcode = VALUES(barcode),
+                brand = VALUES(brand),
+                unit = VALUES(unit),
+                currency = VALUES(currency),
+                list_price = VALUES(list_price),
+                buying_price = VALUES(buying_price),
+                vat_rate = VALUES(vat_rate),
+                inventory_tracking = VALUES(inventory_tracking),
+                stock_count = VALUES(stock_count),
+                is_active = VALUES(is_active),
+                is_archived = VALUES(is_archived),
+                raw_payload = VALUES(raw_payload),
+                last_synced_at = NOW(),
+                updated_at = NOW()'
+        );
+
+        $this->db->beginTransaction();
+        try {
+            foreach ($products as $product) {
+                if (!is_array($product)) {
+                    continue;
+                }
+
+                $parasutProductId = trim((string) ($product['id'] ?? ''));
+                $name = trim((string) ($product['name'] ?? ''));
+                if ($parasutProductId === '' || $name === '') {
+                    continue;
+                }
+
+                $seenIds[] = $parasutProductId;
+                $existsStmt->execute(['parasut_product_id' => $parasutProductId]);
+                $exists = (bool) $existsStmt->fetchColumn();
+                $isArchived = !empty($product['is_archived']) ? 1 : 0;
+
+                $upsertStmt->execute([
+                    'parasut_product_id' => $parasutProductId,
+                    'name' => $name,
+                    'code' => $this->nullableString($product['code'] ?? ''),
+                    'barcode' => $this->nullableString($product['barcode'] ?? ''),
+                    'brand' => $this->nullableString($product['brand'] ?? ''),
+                    'unit' => $this->nullableString($product['unit'] ?? 'Adet'),
+                    'currency' => self::normalizeCurrency($product['currency'] ?? 'TRY'),
+                    'list_price' => max(0.0, (float) ($product['list_price'] ?? 0)),
+                    'buying_price' => array_key_exists('buying_price', $product) && $product['buying_price'] !== null ? max(0.0, (float) $product['buying_price']) : null,
+                    'vat_rate' => max(0.0, min(100.0, (float) ($product['vat_rate'] ?? 20))),
+                    'inventory_tracking' => !empty($product['inventory_tracking']) ? 1 : 0,
+                    'stock_count' => array_key_exists('stock_count', $product) && $product['stock_count'] !== null ? (float) $product['stock_count'] : null,
+                    'is_active' => $isArchived ? 0 : 1,
+                    'is_archived' => $isArchived,
+                    'source' => 'parasut',
+                    'raw_payload' => json_encode($product['raw'] ?? $product, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                ]);
+
+                if ($exists) {
+                    $updated++;
+                } else {
+                    $created++;
+                }
+            }
+
+            $inactive = 0;
+            if ($seenIds !== []) {
+                $uniqueSeenIds = array_values(array_unique($seenIds));
+                $placeholders = implode(',', array_fill(0, count($uniqueSeenIds), '?'));
+                $stmt = $this->db->prepare(
+                    "UPDATE stock_items
+                     SET is_active = 0, updated_at = NOW()
+                     WHERE source = 'parasut'
+                       AND parasut_product_id IS NOT NULL
+                       AND parasut_product_id NOT IN ({$placeholders})"
+                );
+                $stmt->execute($uniqueSeenIds);
+                $inactive = $stmt->rowCount();
+            }
+
+            $this->db->commit();
+
+            return [
+                'created' => $created,
+                'updated' => $updated,
+                'inactive' => $inactive,
+                'total' => $created + $updated,
+            ];
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function offerTemplates(bool $includeInactive = false): array
+    {
+        $sql = 'SELECT * FROM offer_templates';
+        if (!$includeInactive) {
+            $sql .= ' WHERE is_active = 1';
+        }
+        $sql .= ' ORDER BY is_active DESC, name ASC';
+
+        return $this->attachOfferTemplateItems($this->db->query($sql)->fetchAll());
+    }
+
+    public function findOfferTemplate(int $id): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM offer_templates WHERE id = :id AND is_active = 1 LIMIT 1');
+        $stmt->execute(['id' => $id]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+
+        return $this->attachOfferTemplateItems([$row])[0];
+    }
+
+    public function createOfferTemplate(array $data): int
+    {
+        $name = trim((string) ($data['template_name'] ?? $data['name'] ?? ''));
+        if ($name === '') {
+            throw new \RuntimeException('Teklif şablonu adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Şablon için en az bir kalem girin.');
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'INSERT INTO offer_templates
+                    (name, description, currency, is_active, created_by)
+                 VALUES
+                    (:name, :description, :currency, 1, :created_by)'
+            );
+            $stmt->execute([
+                'name' => $name,
+                'description' => $this->nullableString($data['description'] ?? ''),
+                'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
+                'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
+            ]);
+            $id = (int) $this->db->lastInsertId();
+            $this->replaceOfferTemplateItems($id, $items);
+            $this->db->commit();
+
+            return $id;
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function updateOfferTemplate(int $id, array $data): void
+    {
+        $name = trim((string) ($data['template_name'] ?? $data['name'] ?? ''));
+        if ($name === '') {
+            throw new \RuntimeException('Teklif şablonu adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Şablon için en az bir kalem girin.');
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE offer_templates
+                 SET name = :name,
+                     description = :description,
+                     currency = :currency,
+                     is_active = 1,
+                     updated_at = NOW()
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                'id' => $id,
+                'name' => $name,
+                'description' => $this->nullableString($data['description'] ?? ''),
+                'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
+            ]);
+            $this->replaceOfferTemplateItems($id, $items);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function deleteOfferTemplate(int $id): void
+    {
+        $stmt = $this->db->prepare('UPDATE offer_templates SET is_active = 0, updated_at = NOW() WHERE id = :id');
+        $stmt->execute(['id' => $id]);
+    }
+
+    public function dashboardSalesOffers(int $limit = 8): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT so.*,
+                    ot.name AS template_name
+             FROM sales_offers so
+             LEFT JOIN offer_templates ot ON ot.id = so.template_id
+             ORDER BY so.updated_at DESC, so.created_at DESC, so.id DESC
+             LIMIT :limit'
+        );
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    public function findSalesOffer(int $id): ?array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT so.*,
+                    ot.name AS template_name
+             FROM sales_offers so
+             LEFT JOIN offer_templates ot ON ot.id = so.template_id
+             WHERE so.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute(['id' => $id]);
+        $offer = $stmt->fetch();
+        if (!$offer) {
+            return null;
+        }
+
+        $offer['items'] = $this->salesOfferItems($id);
+
+        return $offer;
+    }
+
+    public function salesReportYears(): array
+    {
+        $sql = 'SELECT DISTINCT sale_year FROM (' . $this->salesReportUnionSql() . ') sales WHERE sale_year IS NOT NULL ORDER BY sale_year DESC';
+        $years = array_map('intval', $this->db->query($sql)->fetchAll(PDO::FETCH_COLUMN));
+
+        return $years !== [] ? $years : [(int) date('Y')];
+    }
+
+    public function salesReportItemOptions(int $limit = 200): array
+    {
+        $limit = max(1, min($limit, 500));
+        $stmt = $this->db->prepare(
+            'SELECT item_title
+             FROM (' . $this->salesReportUnionSql() . ') sales
+             WHERE item_title <> \'\'
+             GROUP BY item_title
+             ORDER BY item_title ASC
+             LIMIT :limit'
+        );
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    public function monthlySalesReport(int $year, string $query = ''): array
+    {
+        $year = max(2000, min(2100, $year));
+        $query = trim($query);
+        $months = [];
+        for ($month = 1; $month <= 12; $month++) {
+            $months[$month] = [
+                'month' => $month,
+                'sale_count' => 0,
+                'line_count' => 0,
+                'quantity' => 0.0,
+                'amounts' => [],
+            ];
+        }
+
+        $where = 'sale_year = :year';
+        $params = ['year' => $year];
+        if ($query !== '') {
+            $where .= ' AND item_title LIKE :query';
+            $params['query'] = '%' . $query . '%';
+        }
+
+        $base = $this->salesReportUnionSql();
+        $countStmt = $this->db->prepare(
+            "SELECT
+                sale_month,
+                COUNT(*) AS line_count,
+                COUNT(DISTINCT sale_key) AS sale_count,
+                SUM(quantity) AS quantity
+             FROM ({$base}) sales
+             WHERE {$where}
+             GROUP BY sale_month
+             ORDER BY sale_month ASC"
+        );
+        $countStmt->execute($params);
+        foreach ($countStmt->fetchAll() as $row) {
+            $month = (int) ($row['sale_month'] ?? 0);
+            if (!isset($months[$month])) {
+                continue;
+            }
+            $months[$month]['sale_count'] = (int) ($row['sale_count'] ?? 0);
+            $months[$month]['line_count'] = (int) ($row['line_count'] ?? 0);
+            $months[$month]['quantity'] = (float) ($row['quantity'] ?? 0);
+        }
+
+        $amountStmt = $this->db->prepare(
+            "SELECT
+                sale_month,
+                currency,
+                SUM(line_total) AS total
+             FROM ({$base}) sales
+             WHERE {$where}
+             GROUP BY sale_month, currency
+             ORDER BY sale_month ASC, currency ASC"
+        );
+        $amountStmt->execute($params);
+        foreach ($amountStmt->fetchAll() as $row) {
+            $month = (int) ($row['sale_month'] ?? 0);
+            if (!isset($months[$month])) {
+                continue;
+            }
+            $currency = (string) (($row['currency'] ?? '') ?: 'TRY');
+            $months[$month]['amounts'][$currency] = (float) ($row['total'] ?? 0);
+        }
+
+        $itemStmt = $this->db->prepare(
+            "SELECT
+                item_title,
+                COUNT(DISTINCT sale_key) AS sale_count,
+                COUNT(*) AS line_count,
+                SUM(quantity) AS quantity
+             FROM ({$base}) sales
+             WHERE {$where}
+             GROUP BY item_title
+             ORDER BY quantity DESC, sale_count DESC, item_title ASC
+             LIMIT 12"
+        );
+        $itemStmt->execute($params);
+        $items = $itemStmt->fetchAll();
+
+        $totals = [
+            'sale_count' => 0,
+            'line_count' => 0,
+            'quantity' => 0.0,
+            'amounts' => [],
+        ];
+        foreach ($months as $month) {
+            $totals['sale_count'] += (int) $month['sale_count'];
+            $totals['line_count'] += (int) $month['line_count'];
+            $totals['quantity'] += (float) $month['quantity'];
+            foreach ($month['amounts'] as $currency => $amount) {
+                $totals['amounts'][$currency] = ($totals['amounts'][$currency] ?? 0.0) + (float) $amount;
+            }
+        }
+
+        return [
+            'year' => $year,
+            'query' => $query,
+            'months' => array_values($months),
+            'totals' => $totals,
+            'items' => $items,
+        ];
+    }
+
+    public function createSalesOffer(array $data): int
+    {
+        $title = trim((string) ($data['offer_title'] ?? $data['title'] ?? ''));
+        $customerName = trim((string) ($data['customer_name'] ?? ''));
+        if ($title === '') {
+            throw new \RuntimeException('Teklif başlığı zorunlu.');
+        }
+        if ($customerName === '') {
+            throw new \RuntimeException('Teklif için firma / müşteri adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Teklif için en az bir kalem girin.');
+        }
+
+        $customerId = $this->resolveSalesOfferCustomerId($data);
+        $currency = self::normalizeCurrency($data['currency'] ?? 'TRY');
+        $totals = $this->salesOfferTotals($items);
+        $paymentRequestEnabled = !empty($data['payment_request_enabled']) ? 1 : 0;
+        $paymentRequestPercent = $this->salesOfferPaymentPercent($data['payment_request_percent'] ?? 20);
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'INSERT INTO sales_offers
+                    (template_id, customer_id, title, customer_name, customer_email, customer_phone, currency, status, subtotal, vat_total, total, notes,
+                     payment_request_enabled, payment_request_percent, created_by)
+                 VALUES
+                    (:template_id, :customer_id, :title, :customer_name, :customer_email, :customer_phone, :currency, :status, :subtotal, :vat_total, :total, :notes,
+                     :payment_request_enabled, :payment_request_percent, :created_by)'
+            );
+            $stmt->execute([
+                'template_id' => empty($data['template_id']) ? null : (int) $data['template_id'],
+                'customer_id' => $customerId,
+                'title' => $title,
+                'customer_name' => $customerName,
+                'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
+                'customer_phone' => $this->nullableString(\normalize_phone_number($data['customer_phone'] ?? '')),
+                'currency' => $currency,
+                'status' => 'draft',
+                'subtotal' => $totals['subtotal'],
+                'vat_total' => $totals['vat_total'],
+                'total' => $totals['total'],
+                'notes' => $this->nullableString($data['notes'] ?? ''),
+                'payment_request_enabled' => $paymentRequestEnabled,
+                'payment_request_percent' => $paymentRequestPercent,
+                'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
+            ]);
+            $id = (int) $this->db->lastInsertId();
+            $this->assignGeneratedOfferNumber('sales_offers', 'offer_number', 'TK', $id);
+            $this->replaceSalesOfferItems($id, $items, $currency);
+            $this->db->commit();
+
+            return $id;
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function updateSalesOffer(int $id, array $data): void
+    {
+        if ($this->findSalesOffer($id) === null) {
+            throw new \RuntimeException('Teklif kaydı bulunamadı.');
+        }
+
+        $title = trim((string) ($data['offer_title'] ?? $data['title'] ?? ''));
+        $customerName = trim((string) ($data['customer_name'] ?? ''));
+        if ($title === '') {
+            throw new \RuntimeException('Teklif başlığı zorunlu.');
+        }
+        if ($customerName === '') {
+            throw new \RuntimeException('Teklif için firma / müşteri adı zorunlu.');
+        }
+
+        $items = $this->submittedSalesOfferItems($data);
+        if ($items === []) {
+            throw new \RuntimeException('Teklif için en az bir kalem girin.');
+        }
+
+        $customerId = $this->resolveSalesOfferCustomerId($data);
+        $currency = self::normalizeCurrency($data['currency'] ?? 'TRY');
+        $totals = $this->salesOfferTotals($items);
+        $paymentRequestEnabled = !empty($data['payment_request_enabled']) ? 1 : 0;
+        $paymentRequestPercent = $this->salesOfferPaymentPercent($data['payment_request_percent'] ?? 20);
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE sales_offers
+                 SET template_id = :template_id,
+                     customer_id = :customer_id,
+                     title = :title,
+                     customer_name = :customer_name,
+                     customer_email = :customer_email,
+                     customer_phone = :customer_phone,
+                     currency = :currency,
+                     subtotal = :subtotal,
+                     vat_total = :vat_total,
+                     total = :total,
+                     notes = :notes,
+                     payment_request_enabled = :payment_request_enabled,
+                     payment_request_percent = :payment_request_percent,
+                     updated_at = NOW()
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                'id' => $id,
+                'template_id' => empty($data['template_id']) ? null : (int) $data['template_id'],
+                'customer_id' => $customerId,
+                'title' => $title,
+                'customer_name' => $customerName,
+                'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
+                'customer_phone' => $this->nullableString(\normalize_phone_number($data['customer_phone'] ?? '')),
+                'currency' => $currency,
+                'subtotal' => $totals['subtotal'],
+                'vat_total' => $totals['vat_total'],
+                'total' => $totals['total'],
+                'notes' => $this->nullableString($data['notes'] ?? ''),
+                'payment_request_enabled' => $paymentRequestEnabled,
+                'payment_request_percent' => $paymentRequestPercent,
+            ]);
+            $this->replaceSalesOfferItems($id, $items, $currency);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function deleteSalesOffer(int $id): void
+    {
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare('DELETE FROM sales_offer_items WHERE offer_id = :offer_id')
+                ->execute(['offer_id' => $id]);
+            $this->db->prepare('DELETE FROM sales_offers WHERE id = :id')
+                ->execute(['id' => $id]);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    public function markSalesOfferSent(int $id): void
+    {
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET status = CASE WHEN status = 'draft' THEN 'sent' ELSE status END,
+                 updated_at = NOW()
+            WHERE id = :id"
+        )->execute(['id' => $id]);
+    }
+
+    public function markSalesOfferApproved(int $id, ?int $paymentRequestId = null): void
+    {
+        $this->db->prepare(
+            'UPDATE sales_offers
+             SET status = \'approved\',
+                 payment_request_id = COALESCE(:payment_request_id, payment_request_id),
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'payment_request_id' => $paymentRequestId,
+        ]);
+    }
+
+    public function markSalesOfferBalancePaymentRequest(int $id, int $paymentRequestId): void
+    {
+        $this->db->prepare(
+            'UPDATE sales_offers
+             SET balance_payment_request_id = :payment_request_id,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'payment_request_id' => $paymentRequestId,
+        ]);
+    }
+
+    public function markSalesOfferParasutInvoice(int $id, array $invoice): void
+    {
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET parasut_invoice_id = :invoice_id,
+                 parasut_invoice_no = :invoice_no,
+                 parasut_invoice_status = 'created',
+                 parasut_invoice_error = NULL,
+                 parasut_invoice_created_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = :id"
+        )->execute([
+            'id' => $id,
+            'invoice_id' => trim((string) ($invoice['id'] ?? '')),
+            'invoice_no' => $this->nullableString($invoice['invoice_no'] ?? ''),
+        ]);
+    }
+
+    public function markSalesOfferParasutInvoiceError(int $id, string $error): void
+    {
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET parasut_invoice_status = 'failed',
+                 parasut_invoice_error = :error,
+                 updated_at = NOW()
+             WHERE id = :id"
+        )->execute([
+            'id' => $id,
+            'error' => mb_substr(trim($error), 0, 2000),
+        ]);
     }
 
     public function findPaymentMethodByName(string $name): ?array
     {
+        if (self::isRemovedPaymentMethodName($name)) {
+            return null;
+        }
+
         $stmt = $this->db->prepare('SELECT * FROM payment_methods WHERE name = :name AND is_active = 1 LIMIT 1');
         $stmt->execute(['name' => trim($name)]);
         $row = $stmt->fetch();
@@ -700,8 +1395,12 @@ final class RenewalRepository
             'message_body' => trim($message),
         ]);
 
+        $id = (int) $this->db->lastInsertId();
+        $quoteNumber = $this->assignGeneratedOfferNumber('supplier_quote_requests', 'quote_number', 'TT', $id);
+
         return [
-            'id' => (int) $this->db->lastInsertId(),
+            'id' => $id,
+            'quote_number' => $quoteNumber,
             'token' => $token,
             'url' => \url('/tedarikci-teklif/' . $token),
             'unsubscribe_url' => \url('/tedarikci-listeden-cik/' . $token),
@@ -1021,7 +1720,7 @@ final class RenewalRepository
 
         $stmt = $this->db->prepare(
             "SELECT sqr.*,
-                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    COALESCE(sqr.supplier_name, s.company_name, 'Tedarikçi') AS supplier_display,
                     r.title,
                     r.renewal_date,
                     r.supplier_share_customer_info,
@@ -1159,6 +1858,7 @@ final class RenewalRepository
         $stmt = $this->db->prepare(
             'SELECT sqln.*,
                     sqr.renewal_id,
+                    sqr.quote_number,
                     sqr.recipient_email,
                     sqr.contact_name,
                     COALESCE(sqr.supplier_name, s.company_name) AS supplier_display
@@ -1221,10 +1921,73 @@ final class RenewalRepository
             'vat_included' => (int) ($line['vat_included'] ?? 0),
             'delivery_note' => (string) ($line['delivery_note'] ?? ''),
             'note' => (string) ($line['note'] ?? ''),
+            'quote_number' => (string) ($line['quote_number'] ?? ''),
             'supplier_display' => (string) ($line['supplier_display'] ?? ''),
             'contact_name' => (string) ($line['contact_name'] ?? ''),
             'recipient_email' => (string) ($line['recipient_email'] ?? ''),
         ];
+    }
+
+    public function selectManualCustomerPrices(int $renewalId, mixed $rows, int $userId, string $currency = 'TRY'): array
+    {
+        if (!is_array($rows)) {
+            throw new \RuntimeException('Manuel fiyat satırı bulunamadı.');
+        }
+
+        $items = [];
+        foreach ($this->renewalItems($renewalId) as $item) {
+            $items[(int) $item['id']] = $item;
+        }
+        if ($items === []) {
+            throw new \RuntimeException('Fiyat girilecek ürün / hizmet kalemi bulunamadı.');
+        }
+
+        $currency = self::normalizeCurrency($currency);
+        $stmt = $this->db->prepare(
+            'INSERT INTO supplier_quote_selections
+                (renewal_id, renewal_item_id, quote_line_id, selected_term, selected_price, currency, selected_by, selected_at)
+             VALUES
+                (:renewal_id, :renewal_item_id, NULL, \'manual\', :selected_price, :currency, :selected_by, NOW())
+             ON DUPLICATE KEY UPDATE
+                quote_line_id = NULL,
+                selected_term = VALUES(selected_term),
+                selected_price = VALUES(selected_price),
+                currency = VALUES(currency),
+                selected_by = VALUES(selected_by),
+                selected_at = NOW()'
+        );
+
+        $saved = 0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $itemId = (int) ($row['renewal_item_id'] ?? 0);
+            if ($itemId < 1 || !isset($items[$itemId])) {
+                continue;
+            }
+
+            $price = $this->nullableDecimalValue($row['unit_price'] ?? null);
+            if ($price === null || $price <= 0) {
+                continue;
+            }
+
+            $stmt->execute([
+                'renewal_id' => $renewalId,
+                'renewal_item_id' => $itemId,
+                'selected_price' => round($price, 2),
+                'currency' => $currency,
+                'selected_by' => $userId > 0 ? $userId : null,
+            ]);
+            $saved++;
+        }
+
+        if ($saved < 1) {
+            throw new \RuntimeException('En az bir kalem için geçerli manuel fiyat yazın.');
+        }
+
+        return ['count' => $saved, 'currency' => $currency];
     }
 
     public function selectedSupplierQuotesForRenewal(int $renewalId): array
@@ -1242,10 +2005,10 @@ final class RenewalRepository
                     ri.quantity,
                     ri.vat_rate,
                     sqln.custom_term,
-                    sqln.vat_included,
+                    COALESCE(sqln.vat_included, 1) AS vat_included,
                     sqln.delivery_note,
                     sqln.note,
-                    COALESCE(sqr.supplier_name, s.company_name) AS supplier_display,
+                    COALESCE(sqr.supplier_name, s.company_name, CASE WHEN sqs.quote_line_id IS NULL THEN \'Manuel fiyat\' ELSE NULL END) AS supplier_display,
                     sqr.recipient_email,
                     sqr.contact_name
              FROM supplier_quote_selections sqs
@@ -1450,6 +2213,7 @@ final class RenewalRepository
                 'created_by' => $createdBy > 0 ? $createdBy : null,
             ]);
             $offerId = (int) $this->db->lastInsertId();
+            $offerNumber = $this->assignGeneratedOfferNumber('customer_offer_requests', 'offer_number', 'YT', $offerId);
 
             $insertLine = $this->db->prepare(
                 'INSERT INTO customer_offer_lines
@@ -1467,6 +2231,7 @@ final class RenewalRepository
 
             return [
                 'id' => $offerId,
+                'offer_number' => $offerNumber,
                 'token' => $token,
                 'url' => \url('/musteri-teklif/' . $token),
                 'renewal_id' => $renewalId,
@@ -1500,12 +2265,19 @@ final class RenewalRepository
                     r.brand,
                     r.kind,
                     r.license_key,
+                    r.payment_method AS renewal_payment_method,
                     r.renewal_date,
                     r.start_date,
                     c.company_name,
                     c.contact_name,
                     c.email AS customer_email,
-                    c.phone AS customer_phone
+                    c.phone AS customer_phone,
+                    c.tax_office AS customer_tax_office,
+                    c.tax_number AS customer_tax_number,
+                    c.city AS customer_city,
+                    c.district AS customer_district,
+                    c.address AS customer_address,
+                    c.parasut_contact_id
              FROM customer_offer_requests cor
              INNER JOIN renewals r ON r.id = cor.renewal_id
              INNER JOIN customers c ON c.id = r.customer_id
@@ -1518,13 +2290,50 @@ final class RenewalRepository
         return $row ?: null;
     }
 
+    public function findCustomerOfferById(int $offerId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT cor.*,
+                    r.customer_id,
+                    r.title,
+                    r.brand,
+                    r.kind,
+                    r.license_key,
+                    r.payment_method AS renewal_payment_method,
+                    r.renewal_date,
+                    r.start_date,
+                    c.company_name,
+                    c.contact_name,
+                    c.email AS customer_email,
+                    c.phone AS customer_phone,
+                    c.tax_office AS customer_tax_office,
+                    c.tax_number AS customer_tax_number,
+                    c.city AS customer_city,
+                    c.district AS customer_district,
+                    c.address AS customer_address,
+                    c.parasut_contact_id
+             FROM customer_offer_requests cor
+             INNER JOIN renewals r ON r.id = cor.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             WHERE cor.id = :id
+             LIMIT 1"
+        );
+        $stmt->execute(['id' => $offerId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
     public function customerOfferLines(int $offerId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT *
-             FROM customer_offer_lines
-             WHERE offer_id = :offer_id
-             ORDER BY sort_order ASC, id ASC'
+            'SELECT col.*,
+                    sqr.quote_number AS supplier_quote_number
+             FROM customer_offer_lines col
+             LEFT JOIN supplier_quote_lines sqln ON sqln.id = col.supplier_quote_line_id
+             LEFT JOIN supplier_quote_requests sqr ON sqr.id = sqln.request_id
+             WHERE col.offer_id = :offer_id
+             ORDER BY col.sort_order ASC, col.id ASC'
         );
         $stmt->execute(['offer_id' => $offerId]);
 
@@ -1566,6 +2375,146 @@ final class RenewalRepository
         unset($offer);
 
         return $offers;
+    }
+
+    public function latestApprovedCustomerOfferWaitingParasut(int $renewalId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT id,
+                    renewal_id,
+                    recipient_name,
+                    recipient_email,
+                    total,
+                    currency,
+                    parasut_invoice_status,
+                    parasut_invoice_error,
+                    responded_at,
+                    created_at
+             FROM customer_offer_requests
+             WHERE renewal_id = :renewal_id
+               AND status = 'approved'
+               AND COALESCE(parasut_invoice_id, '') = ''
+             ORDER BY responded_at DESC, created_at DESC, id DESC
+             LIMIT 1"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function latestCustomerOfferForPayment(int $renewalId, string $email = ''): ?array
+    {
+        $email = trim(mb_strtolower($email));
+        $stmt = $this->db->prepare(
+            "SELECT id,
+                    renewal_id,
+                    status,
+                    recipient_email,
+                    recipient_name,
+                    total,
+                    currency,
+                    created_at
+             FROM customer_offer_requests
+             WHERE renewal_id = :renewal_id
+               AND status IN ('sent', 'opened', 'approved')
+             ORDER BY
+               CASE
+                   WHEN :email_check <> '' AND LOWER(recipient_email) = :email_match THEN 0
+                   ELSE 1
+               END ASC,
+               CASE status
+                   WHEN 'approved' THEN 0
+                   WHEN 'opened' THEN 1
+                   ELSE 2
+               END ASC,
+               created_at DESC,
+               id DESC
+             LIMIT 1"
+        );
+        $stmt->execute([
+            'renewal_id' => $renewalId,
+            'email_check' => $email,
+            'email_match' => $email,
+        ]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function markCustomerOfferApprovedByPayment(int $offerId, string $note = ''): void
+    {
+        $note = trim($note) !== '' ? trim($note) : 'Kredi kartı ödemesi tamamlandığı için sistem tarafından onaylandı.';
+        $stmt = $this->db->prepare(
+            "UPDATE customer_offer_requests
+             SET status = 'approved',
+                 responded_at = COALESCE(responded_at, NOW()),
+                 response_note = :response_note,
+                 response_ip = COALESCE(response_ip, 'system'),
+                 response_user_agent = COALESCE(response_user_agent, 'iyzico-payment'),
+                 updated_at = NOW()
+             WHERE id = :id
+               AND status IN ('sent', 'opened', 'approved')"
+        );
+        $stmt->execute([
+            'id' => $offerId,
+            'response_note' => mb_substr($note, 0, 2000),
+        ]);
+    }
+
+    public function latestApprovedCustomerOfferWithParasutInvoice(int $renewalId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT cor.*,
+                    r.customer_id,
+                    r.title,
+                    r.brand,
+                    r.kind,
+                    r.license_key,
+                    r.payment_method AS renewal_payment_method,
+                    r.renewal_date,
+                    r.start_date,
+                    c.company_name,
+                    c.contact_name,
+                    c.email AS customer_email,
+                    c.phone AS customer_phone,
+                    c.tax_office AS customer_tax_office,
+                    c.tax_number AS customer_tax_number,
+                    c.city AS customer_city,
+                    c.district AS customer_district,
+                    c.address AS customer_address,
+                    c.parasut_contact_id
+             FROM customer_offer_requests cor
+             INNER JOIN renewals r ON r.id = cor.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             WHERE cor.renewal_id = :renewal_id
+               AND cor.status = 'approved'
+               AND COALESCE(cor.parasut_invoice_id, '') <> ''
+             ORDER BY cor.responded_at DESC, cor.created_at DESC, cor.id DESC
+             LIMIT 1"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
+    public function setCustomerParasutContactId(int $customerId, string $contactId): void
+    {
+        $contactId = trim($contactId);
+        if ($customerId < 1 || $contactId === '') {
+            return;
+        }
+
+        $this->db->prepare(
+            'UPDATE customers
+             SET parasut_contact_id = :parasut_contact_id,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $customerId,
+            'parasut_contact_id' => $contactId,
+        ]);
     }
 
     public function deleteCustomerOffer(int $offerId): ?array
@@ -1647,6 +2596,40 @@ final class RenewalRepository
         }
     }
 
+    public function markCustomerOfferParasutInvoice(int $offerId, array $invoice): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE customer_offer_requests
+             SET parasut_invoice_id = :invoice_id,
+                 parasut_invoice_no = :invoice_no,
+                 parasut_invoice_status = 'created',
+                 parasut_invoice_error = NULL,
+                 parasut_invoice_created_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = :id"
+        );
+        $stmt->execute([
+            'id' => $offerId,
+            'invoice_id' => trim((string) ($invoice['id'] ?? '')),
+            'invoice_no' => $this->nullableString($invoice['invoice_no'] ?? ''),
+        ]);
+    }
+
+    public function markCustomerOfferParasutInvoiceError(int $offerId, string $error): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE customer_offer_requests
+             SET parasut_invoice_status = 'failed',
+                 parasut_invoice_error = :error,
+                 updated_at = NOW()
+             WHERE id = :id"
+        );
+        $stmt->execute([
+            'id' => $offerId,
+            'error' => mb_substr(trim($error), 0, 2000),
+        ]);
+    }
+
     public function applyCustomerOfferToRenewal(int $renewalId, int $offerId): void
     {
         $lines = $this->customerOfferLines($offerId);
@@ -1706,21 +2689,66 @@ final class RenewalRepository
         return $this->providerPayments($renewalId, 'iyzico');
     }
 
-    public function paytrPayments(int $renewalId): array
-    {
-        return $this->providerPayments($renewalId, 'paytr');
-    }
-
     public function cardPayments(int $renewalId): array
     {
         $stmt = $this->db->prepare(
             'SELECT *
              FROM renewal_payments
              WHERE renewal_id = :renewal_id
-               AND provider IN (\'iyzico\', \'paytr\')
+               AND provider = \'iyzico\'
              ORDER BY created_at DESC, id DESC'
         );
         $stmt->execute(['renewal_id' => $renewalId]);
+
+        return $stmt->fetchAll();
+    }
+
+    public function paidCardPaymentRows(int $limit = 100): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT
+                'renewal' AS source_type,
+                rp.id AS payment_row_id,
+                rp.renewal_id,
+                NULL AS request_id,
+                rp.provider,
+                rp.amount,
+                rp.currency,
+                rp.status,
+                rp.payment_status,
+                rp.payment_id,
+                rp.error_message,
+                rp.paid_at,
+                rp.created_at,
+                rp.updated_at,
+                r.title AS renewal_title,
+                r.brand,
+                r.renewal_date,
+                COALESCE(ri_stats.items_summary, r.title) AS title,
+                c.company_name,
+                c.email AS customer_email,
+                c.phone AS customer_phone
+             FROM renewal_payments rp
+             INNER JOIN renewals r ON r.id = rp.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             LEFT JOIN (
+                SELECT
+                    renewal_id,
+                    CASE
+                        WHEN COUNT(*) > 1 THEN CONCAT(SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1), ' + ', COUNT(*) - 1, ' ürün')
+                        ELSE SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1)
+                    END AS items_summary
+                FROM renewal_items
+                GROUP BY renewal_id
+             ) ri_stats ON ri_stats.renewal_id = r.id
+             WHERE rp.provider = 'iyzico'
+               AND rp.status = 'paid'
+               AND COALESCE(rp.payment_id, '') <> ''
+             ORDER BY COALESCE(rp.paid_at, rp.updated_at, rp.created_at) DESC, rp.id DESC
+             LIMIT :limit"
+        );
+        $stmt->bindValue('limit', max(1, min(300, $limit)), PDO::PARAM_INT);
+        $stmt->execute();
 
         return $stmt->fetchAll();
     }
@@ -1742,16 +2770,26 @@ final class RenewalRepository
         return $stmt->fetchAll();
     }
 
+    public function latestPaidPayment(int $renewalId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT *
+             FROM renewal_payments
+             WHERE renewal_id = :renewal_id
+               AND status = 'paid'
+               AND COALESCE(payment_id, '') <> ''
+             ORDER BY COALESCE(paid_at, updated_at, created_at) DESC, id DESC
+             LIMIT 1"
+        );
+        $stmt->execute(['renewal_id' => $renewalId]);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
     public function createIyzicoPayment(array $data): int
     {
         $data['provider'] = 'iyzico';
-
-        return $this->createCardPayment($data);
-    }
-
-    public function createPaytrPayment(array $data): int
-    {
-        $data['provider'] = 'paytr';
 
         return $this->createCardPayment($data);
     }
@@ -1804,40 +2842,6 @@ final class RenewalRepository
         return $row ?: null;
     }
 
-    public function findPaytrPaymentByToken(string $token): ?array
-    {
-        return $this->findPaymentByProviderField('paytr', 'token', $token);
-    }
-
-    public function findPaytrPaymentByMerchantOid(string $merchantOid): ?array
-    {
-        return $this->findPaymentByProviderField('paytr', 'conversation_id', $merchantOid);
-    }
-
-    private function findPaymentByProviderField(string $provider, string $field, string $value): ?array
-    {
-        if (!in_array($field, ['token', 'conversation_id'], true)) {
-            throw new \InvalidArgumentException('Gecersiz odeme arama alani.');
-        }
-
-        $stmt = $this->db->prepare(
-            'SELECT rp.*, r.title, r.brand, c.company_name
-             FROM renewal_payments rp
-             INNER JOIN renewals r ON r.id = rp.renewal_id
-             INNER JOIN customers c ON c.id = r.customer_id
-             WHERE rp.provider = :provider
-               AND rp.' . $field . ' = :value
-             LIMIT 1'
-        );
-        $stmt->execute([
-            'provider' => $provider,
-            'value' => $value,
-        ]);
-        $row = $stmt->fetch();
-
-        return $row ?: null;
-    }
-
     public function updateIyzicoPaymentResult(int $paymentId, array $request, array $response, string $status): void
     {
         $stmt = $this->db->prepare(
@@ -1859,32 +2863,6 @@ final class RenewalRepository
             'payment_status' => $this->nullableString($response['paymentStatus'] ?? ''),
             'provider_payment_id' => $this->nullableString($response['paymentId'] ?? ''),
             'error_message' => $this->nullableString($response['errorMessage'] ?? ''),
-            'raw_request' => $this->jsonOrNull($request),
-            'raw_response' => $this->jsonOrNull($response),
-        ]);
-    }
-
-    public function updatePaytrPaymentResult(int $paymentId, array $request, array $response, string $status): void
-    {
-        $stmt = $this->db->prepare(
-            'UPDATE renewal_payments SET
-                status = :status,
-                payment_status = :payment_status,
-                payment_id = :provider_payment_id,
-                error_message = :error_message,
-                raw_request = :raw_request,
-                raw_response = :raw_response,
-                paid_at = CASE WHEN :paid_status = \'paid\' AND paid_at IS NULL THEN NOW() ELSE paid_at END,
-                updated_at = NOW()
-             WHERE id = :id'
-        );
-        $stmt->execute([
-            'id' => $paymentId,
-            'status' => $status,
-            'paid_status' => $status,
-            'payment_status' => $this->nullableString($response['status'] ?? ''),
-            'provider_payment_id' => $this->nullableString($response['merchant_oid'] ?? ''),
-            'error_message' => $this->nullableString($response['failed_reason_msg'] ?? $response['reason'] ?? ''),
             'raw_request' => $this->jsonOrNull($request),
             'raw_response' => $this->jsonOrNull($response),
         ]);
@@ -2157,6 +3135,9 @@ final class RenewalRepository
         if ($name === '') {
             throw new \RuntimeException('Odeme yontemi adi zorunlu.');
         }
+        if (self::isRemovedPaymentMethodName($name)) {
+            throw new \RuntimeException('Bu ödeme yöntemi kaldırıldı. Özel ödeme şartı için müşteri seçiminde Diğer alanını kullanın.');
+        }
 
         $stmt = $this->db->prepare(
             'INSERT INTO payment_methods (name, description, sort_order, is_active)
@@ -2180,6 +3161,9 @@ final class RenewalRepository
 
         if ($name === '') {
             throw new \RuntimeException('Odeme yontemi adi zorunlu.');
+        }
+        if (self::isRemovedPaymentMethodName($name)) {
+            throw new \RuntimeException('Bu ödeme yöntemi kaldırıldı. Özel ödeme şartı için müşteri seçiminde Diğer alanını kullanın.');
         }
 
         $stmt = $this->db->prepare(
@@ -2461,7 +3445,189 @@ final class RenewalRepository
             $this->db->exec('ALTER TABLE renewal_definitions ADD notification_info TEXT NULL AFTER kind');
         }
 
+        $this->seedRenewalDefinitionNotificationInfo();
         self::$definitionSchemaEnsured = true;
+    }
+
+    private function seedRenewalDefinitionNotificationInfo(): void
+    {
+        try {
+            $this->db->exec(
+                "CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key VARCHAR(120) PRIMARY KEY,
+                    setting_value MEDIUMTEXT NULL,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+
+            $key = 'maintenance.definition_notification_info_catalog_v1';
+            $stmt = $this->db->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :setting_key LIMIT 1');
+            $stmt->execute(['setting_key' => $key]);
+            if ((string) $stmt->fetchColumn() === '1') {
+                return;
+            }
+
+            $insertStmt = $this->db->prepare(
+                'INSERT INTO renewal_definitions (name, kind, notification_info, is_active)
+                 VALUES (:name, :kind, :notification_info, 1)
+                 ON DUPLICATE KEY UPDATE
+                    notification_info = CASE
+                        WHEN notification_info IS NULL OR notification_info = "" THEN VALUES(notification_info)
+                        ELSE notification_info
+                    END,
+                    is_active = 1,
+                    updated_at = NOW()'
+            );
+            foreach (self::defaultRenewalDefinitionRows() as [$name, $kind]) {
+                $insertStmt->execute([
+                    'name' => $name,
+                    'kind' => $kind,
+                    'notification_info' => self::definitionNotificationInfo($name, $kind),
+                ]);
+            }
+
+            $updateStmt = $this->db->prepare(
+                'UPDATE renewal_definitions
+                 SET notification_info = :notification_info,
+                     updated_at = NOW()
+                 WHERE id = :id
+                   AND (notification_info IS NULL OR notification_info = "")'
+            );
+            $rows = $this->db->query('SELECT id, name, kind, notification_info FROM renewal_definitions')->fetchAll();
+            foreach ($rows as $row) {
+                $info = trim((string) ($row['notification_info'] ?? ''));
+                if ($info !== '') {
+                    continue;
+                }
+
+                $updateStmt->execute([
+                    'id' => (int) $row['id'],
+                    'notification_info' => self::definitionNotificationInfo((string) $row['name'], (string) $row['kind']),
+                ]);
+            }
+
+            $doneStmt = $this->db->prepare(
+                'INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                 VALUES (:setting_key, "1", NOW())
+                 ON DUPLICATE KEY UPDATE setting_value = "1", updated_at = NOW()'
+            );
+            $doneStmt->execute(['setting_key' => $key]);
+        } catch (\Throwable) {
+            // Default content must not block the panel if a host limits maintenance writes.
+        }
+    }
+
+    private static function defaultRenewalDefinitionRows(): array
+    {
+        return [
+            ['Microsoft 365 Lisansi', 'product'],
+            ['Google Workspace Lisansi', 'product'],
+            ['E-posta Hosting', 'product'],
+            ['Alan Adi ve Hosting Yenileme', 'product'],
+            ['Alan Adi Yenileme', 'product'],
+            ['Web Hosting', 'product'],
+            ['SSL Sertifikasi', 'product'],
+            ['Antivirus / EDR Lisansi', 'product'],
+            ['Firewall UTM Lisansi', 'product'],
+            ['VPN Lisansi', 'product'],
+            ['Yedekleme Yazilimi Lisansi', 'product'],
+            ['Sunucu Lisansi', 'product'],
+            ['Windows Server CAL', 'product'],
+            ['SQL Server Lisansi', 'product'],
+            ['ERP Lisansi', 'product'],
+            ['CRM Lisansi', 'product'],
+            ['Bulut Sunucu', 'product'],
+            ['IP Santral Lisansi', 'product'],
+            ['Kamera Kayit Yazilimi Lisansi', 'product'],
+            ['Bakim ve Destek Sozlesmesi', 'service'],
+            ['Helpdesk Destek Hizmeti', 'service'],
+            ['Sunucu Bakim Hizmeti', 'service'],
+            ['Network Bakim Hizmeti', 'service'],
+            ['Web Site Bakim Hizmeti', 'service'],
+            ['Yedekleme Hizmeti', 'service'],
+            ['Felaket Kurtarma Hizmeti', 'service'],
+            ['Siber Guvenlik Izleme Hizmeti', 'service'],
+            ['E-posta Guvenligi Hizmeti', 'service'],
+            ['Penetrasyon Testi', 'service'],
+            ['KVKK Danismanlik Hizmeti', 'service'],
+        ];
+    }
+
+    private static function definitionNotificationInfo(string $name, string $kind): string
+    {
+        $normalized = self::normalizedDefinitionName($name);
+
+        if (str_contains($normalized, 'alan adi') || str_contains($normalized, 'hosting')) {
+            return self::domainHostingNotificationInfo();
+        }
+
+        if (str_contains($normalized, 'ssl')) {
+            return 'SSL sertifikası yenilenmediğinde web sitesi teknik olarak yayında olsa bile tarayıcılar ziyaretçilere güvenlik uyarısı gösterebilir. Bu uyarılar kullanıcı güvenini düşürür, formlar ve ödeme adımları daha az tercih edilir hale gelir ve bazı entegrasyonlar güvenli bağlantı kabul etmediği için çalışmayabilir. Sertifika süresi dolmadan yenileme yapılması, kesintisiz ve güven veren bir erişim için önemlidir.';
+        }
+
+        if (str_contains($normalized, 'microsoft 365') || str_contains($normalized, 'google workspace')) {
+            return 'Bulut çalışma lisanslarında yenileme gecikirse e-posta, takvim, dosya paylaşımı ve kullanıcı oturumları etkilenebilir. İlk aşamada uyarılar görünse bile süre uzadığında hesap erişimleri, kota ve yönetim işlemleri kısıtlanabilir. İş akışlarının ve ekip içi iletişimin kesintiye uğramaması için lisans durumunun süre dolmadan netleştirilmesi önerilir.';
+        }
+
+        if (str_contains($normalized, 'antivirus') || str_contains($normalized, 'edr')) {
+            return 'Antivirüs ve EDR lisansları yalnızca kurulu yazılımı değil; güncel tehdit imzalarını, merkezi yönetimi, olay kayıtlarını ve müdahale kabiliyetini de kapsar. Süre dolduğunda cihazlar çalışmaya devam ediyor gibi görünse bile yeni tehditlere karşı görünürlük ve koruma seviyesi düşebilir. Güvenlik zincirinde boşluk oluşmaması için yenileme kararının gecikmeden verilmesi önemlidir.';
+        }
+
+        if (str_contains($normalized, 'firewall') || str_contains($normalized, 'utm') || str_contains($normalized, 'vpn')) {
+            return 'Firewall, UTM ve VPN lisanslarında süre dolumu internet erişimini her zaman anında kesmeyebilir; ancak web filtreleme, saldırı önleme, VPN erişimi, güvenlik güncellemeleri ve raporlama gibi kritik katmanlar etkilenebilir. Bu durum dış tehditlere karşı savunmayı zayıflatır ve uzaktan erişim sürekliliğini riske atabilir. Yenilemenin süre bitmeden planlanması önerilir.';
+        }
+
+        if (str_contains($normalized, 'yedekleme') || str_contains($normalized, 'felaket kurtarma')) {
+            return 'Yedekleme ve felaket kurtarma çözümleri sorun yaşanmadan önce sessiz çalışan ama ihtiyaç anında kritik hale gelen sistemlerdir. Lisans veya hizmet süresi dolduğunda yeni yedeklerin alınması, saklama politikaları, izleme uyarıları veya geri dönüş desteği etkilenebilir. Veri kaybı riskini büyütmemek için yenileme ve test süreçlerinin süre dolmadan tamamlanması önemlidir.';
+        }
+
+        if (str_contains($normalized, 'bulut')) {
+            return 'Bulut sunucu hizmetlerinde süre veya ödeme takibi gecikirse kaynaklar, yedekler, IP erişimi ve bağlı servisler etkilenebilir. Bazı sağlayıcılar kısa süreli uyarı dönemi sunsa da gecikme uzadığında servis durdurma veya veri erişiminde kısıtlama riski oluşabilir. Canlı sistemlerin etkilenmemesi için yenileme planı önceden yapılmalıdır.';
+        }
+
+        if (str_contains($normalized, 'bakim') || str_contains($normalized, 'destek') || str_contains($normalized, 'helpdesk') || str_contains($normalized, 'network') || str_contains($normalized, 'web site')) {
+            return 'Bakım ve destek hizmetleri sorun çıkmadığı dönemlerde arka planda kalır; ancak ihtiyaç anında müdahale süresi ve kapsamı belirleyen ana güvencedir. Hizmet süresi yenilenmezse planlı kontroller, öncelikli destek, güncelleme takibi ve arıza müdahalesi kapsam dışı kalabilir. Operasyonun aksamaması için hizmet devamlılığının süre dolmadan netleşmesi önerilir.';
+        }
+
+        if (str_contains($normalized, 'sunucu') || str_contains($normalized, 'server cal') || str_contains($normalized, 'sql server')) {
+            return 'Sunucu ve veritabanı lisansları erişim, yasal kullanım, güncelleme ve destek sürekliliği açısından önemlidir. Yenileme veya lisans takibi geciktiğinde kullanıcı erişimleri, denetim süreçleri, üretici desteği ve güvenlik güncellemeleri riskli hale gelebilir. İş kritik sistemlerde sürpriz kesinti yaşamamak için lisans durumunun önceden planlanması önerilir.';
+        }
+
+        if (str_contains($normalized, 'erp') || str_contains($normalized, 'crm')) {
+            return 'ERP ve CRM lisansları satış, muhasebe, stok, müşteri takibi ve entegrasyon süreçlerinin merkezinde yer alır. Süre dolumu veya bakım yenilemesinin gecikmesi kullanıcı erişimlerini, güncelleme hakkını, destek taleplerini ve bağlı entegrasyonları etkileyebilir. Operasyonun aksamaması için yenileme kararının süre dolmadan netleşmesi faydalıdır.';
+        }
+
+        if (str_contains($normalized, 'santral')) {
+            return 'IP santral lisansı veya hizmet süresi dolduğunda dahili görüşmeler, dış hat kullanımı, çağrı yönlendirme, kayıt ve raporlama gibi telefon süreçleri etkilenebilir. Çağrı trafiği müşteriye doğrudan temas ettiği için küçük bir kesinti bile operasyonel görünürlüğü azaltabilir. Yenilemenin süre dolmadan tamamlanması önerilir.';
+        }
+
+        if (str_contains($normalized, 'kamera') || str_contains($normalized, 'kayit')) {
+            return 'Kamera kayıt yazılımı ve izleme lisansları güvenlik olaylarında geriye dönük inceleme yapabilmek için kritik öneme sahiptir. Süre dolduğunda canlı izleme çalışıyor gibi görünse bile kayıt, arşivleme, uzaktan erişim veya alarm entegrasyonları etkilenebilir. Kayıt bütünlüğünün bozulmaması için yenileme zamanında yapılmalıdır.';
+        }
+
+        if (str_contains($normalized, 'siber guvenlik') || str_contains($normalized, 'e-posta guvenligi') || str_contains($normalized, 'penetrasyon') || str_contains($normalized, 'kvkk')) {
+            return 'Güvenlik ve uyumluluk hizmetleri düzenli takip edilmediğinde riskler görünmez hale gelebilir. İzleme, test, raporlama veya danışmanlık süresinin bitmesi; zafiyetlerin geç fark edilmesine, e-posta tehditlerinin artmasına ve uyum süreçlerinde eksik kayıt oluşmasına neden olabilir. Risklerin büyümeden yönetilebilmesi için hizmet takviminin kesintisiz sürmesi önerilir.';
+        }
+
+        if ($kind === 'service') {
+            return 'Bu hizmetin yenilemesi gecikirse destek kapsamı, müdahale süresi, planlı kontroller ve hizmet sürekliliği etkilenebilir. Günlük işleyişte sorun görünmese bile ihtiyaç anında kapsam dışı kalma veya yeniden planlama gecikmesi yaşanabilir. Süre dolmadan yenileme kararı verilmesi operasyonel süreklilik açısından önemlidir.';
+        }
+
+        return 'Bu ürünün yenilemesi zamanında planlanmadığında lisans, destek, güncelleme veya erişim sürekliliği etkilenebilir. İlk anda sistem çalışıyor gibi görünse bile süre uzadıkça servis kısıtları, güvenlik açıkları, ek maliyetler veya kullanım kesintileri oluşabilir. Yenileme kararının süre dolmadan netleşmesi önerilir.';
+    }
+
+    private static function normalizedDefinitionName(string $name): string
+    {
+        $name = mb_strtolower($name);
+        $search = ['ı', 'ğ', 'ü', 'ş', 'ö', 'ç', 'İ'];
+        $replace = ['i', 'g', 'u', 's', 'o', 'c', 'i'];
+
+        return str_replace($search, $replace, $name);
+    }
+
+    private static function domainHostingNotificationInfo(): string
+    {
+        return 'Alan adı ve hosting yenilemeleri genellikle sessiz ilerleyen, ancak süresi kaçırıldığında etkisi hızlı hissedilen süreçlerdir. Süre dolduğunda web sitesi, e-posta hesapları, DNS yönlendirmeleri ve bağlı servislerde erişim kesintileri yaşanabilir. Alan adı tarafında ilk günlerde yenileme çoğu zaman yapılabilse de, bekleme veya kurtarma dönemine girildiğinde ek ücret, kesinti süresi ve alan adının kaybedilmesi riski oluşabilir. Hosting tarafında ise dosya, yedek ve e-posta erişimi etkilenebileceği için yenileme tercihinin süre dolmadan netleşmesi önerilir.';
     }
 
     private function ensurePaymentMethodSchema(): void
@@ -2601,6 +3767,7 @@ final class RenewalRepository
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS supplier_quote_requests (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                quote_number VARCHAR(30) NULL,
                 renewal_id INT UNSIGNED NOT NULL,
                 supplier_id INT UNSIGNED NULL,
                 supplier_contact_id INT UNSIGNED NULL,
@@ -2625,12 +3792,16 @@ final class RenewalRepository
                 CONSTRAINT fk_supplier_quote_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
                 CONSTRAINT fk_supplier_quote_requests_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
                 CONSTRAINT fk_supplier_quote_requests_contact FOREIGN KEY (supplier_contact_id) REFERENCES supplier_contacts(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_supplier_quote_requests_number (quote_number),
                 UNIQUE KEY uq_supplier_quote_requests_token (token_hash),
                 INDEX idx_supplier_quote_requests_renewal (renewal_id, status, created_at),
                 INDEX idx_supplier_quote_requests_supplier (supplier_id, created_at),
                 INDEX idx_supplier_quote_requests_email (recipient_email)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('supplier_quote_requests', 'quote_number', 'VARCHAR(30) NULL AFTER id');
+        $this->backfillGeneratedOfferNumbers('supplier_quote_requests', 'quote_number', 'TT');
+        $this->ensureIndex('supplier_quote_requests', 'uq_supplier_quote_requests_number', 'UNIQUE KEY uq_supplier_quote_requests_number (quote_number)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS supplier_quote_lines (
@@ -2765,6 +3936,7 @@ final class RenewalRepository
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS customer_offer_requests (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_number VARCHAR(30) NULL,
                 renewal_id INT UNSIGNED NOT NULL,
                 recipient_email VARCHAR(190) NOT NULL,
                 recipient_name VARCHAR(190) NULL,
@@ -2788,12 +3960,22 @@ final class RenewalRepository
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 CONSTRAINT fk_customer_offer_requests_renewal FOREIGN KEY (renewal_id) REFERENCES renewals(id) ON DELETE CASCADE,
                 CONSTRAINT fk_customer_offer_requests_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_customer_offer_requests_number (offer_number),
                 UNIQUE KEY uq_customer_offer_requests_token (token_hash),
                 INDEX idx_customer_offer_requests_renewal (renewal_id, status, created_at),
                 INDEX idx_customer_offer_requests_email (recipient_email)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('customer_offer_requests', 'offer_number', 'VARCHAR(30) NULL AFTER id');
         $this->ensureColumn('customer_offer_requests', 'view_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER opened_at');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_id', 'VARCHAR(64) NULL AFTER total');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_no', 'VARCHAR(120) NULL AFTER parasut_invoice_id');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_status', "VARCHAR(30) NULL AFTER parasut_invoice_no");
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_error', 'TEXT NULL AFTER parasut_invoice_status');
+        $this->ensureColumn('customer_offer_requests', 'parasut_invoice_created_at', 'DATETIME NULL AFTER parasut_invoice_error');
+        $this->backfillGeneratedOfferNumbers('customer_offer_requests', 'offer_number', 'YT');
+        $this->ensureIndex('customer_offer_requests', 'uq_customer_offer_requests_number', 'UNIQUE KEY uq_customer_offer_requests_number (offer_number)');
+        $this->ensureIndex('customer_offer_requests', 'idx_customer_offer_parasut_invoice', 'INDEX idx_customer_offer_parasut_invoice (parasut_invoice_id)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS customer_offer_lines (
@@ -2832,6 +4014,174 @@ final class RenewalRepository
         );
 
         self::$customerOfferSchemaEnsured = true;
+    }
+
+    private function ensureSalesOfferSchema(): void
+    {
+        if (self::$salesOfferSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS offer_templates (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(190) NOT NULL,
+                description TEXT NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_by INT UNSIGNED NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_offer_templates_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_offer_templates_name (name),
+                INDEX idx_offer_templates_active (is_active, name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS offer_template_items (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                template_id INT UNSIGNED NOT NULL,
+                stock_item_id INT UNSIGNED NULL,
+                title VARCHAR(190) NOT NULL,
+                brand VARCHAR(120) NULL,
+                description TEXT NULL,
+                quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+                unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_offer_template_items_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE CASCADE,
+                INDEX idx_offer_template_items_template (template_id, sort_order),
+                INDEX idx_offer_template_items_stock (stock_item_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS sales_offers (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_number VARCHAR(30) NULL,
+                template_id INT UNSIGNED NULL,
+                customer_id INT UNSIGNED NULL,
+                title VARCHAR(190) NOT NULL,
+                customer_name VARCHAR(190) NOT NULL,
+                customer_email VARCHAR(190) NULL,
+                customer_phone VARCHAR(60) NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                status ENUM('draft', 'sent', 'approved', 'revision_requested', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+                subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                notes TEXT NULL,
+                payment_request_enabled TINYINT(1) NOT NULL DEFAULT 0,
+                payment_request_percent DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                payment_request_id INT UNSIGNED NULL,
+                balance_payment_request_id INT UNSIGNED NULL,
+                parasut_invoice_id VARCHAR(64) NULL,
+                parasut_invoice_no VARCHAR(120) NULL,
+                parasut_invoice_status VARCHAR(30) NULL,
+                parasut_invoice_error TEXT NULL,
+                parasut_invoice_created_at DATETIME NULL,
+                created_by INT UNSIGNED NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
+                CONSTRAINT fk_sales_offers_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
+                CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uq_sales_offers_number (offer_number),
+                INDEX idx_sales_offers_status (status, updated_at),
+                INDEX idx_sales_offers_template (template_id),
+                INDEX idx_sales_offers_customer (customer_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        $this->ensureColumn('sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
+        $this->ensureColumn('sales_offers', 'customer_id', 'INT UNSIGNED NULL AFTER template_id');
+        $this->ensureColumn('sales_offers', 'payment_request_enabled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER notes');
+        $this->ensureColumn('sales_offers', 'payment_request_percent', 'DECIMAL(5,2) NOT NULL DEFAULT 20.00 AFTER payment_request_enabled');
+        $this->ensureColumn('sales_offers', 'payment_request_id', 'INT UNSIGNED NULL AFTER payment_request_percent');
+        $this->ensureColumn('sales_offers', 'balance_payment_request_id', 'INT UNSIGNED NULL AFTER payment_request_id');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_id', 'VARCHAR(64) NULL AFTER balance_payment_request_id');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_no', 'VARCHAR(120) NULL AFTER parasut_invoice_id');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_status', 'VARCHAR(30) NULL AFTER parasut_invoice_no');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_error', 'TEXT NULL AFTER parasut_invoice_status');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_created_at', 'DATETIME NULL AFTER parasut_invoice_error');
+        $this->backfillGeneratedOfferNumbers('sales_offers', 'offer_number', 'TK');
+        $this->ensureIndex('sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_customer_id', 'INDEX idx_sales_offers_customer_id (customer_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_payment_request', 'INDEX idx_sales_offers_payment_request (payment_request_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_balance_payment_request', 'INDEX idx_sales_offers_balance_payment_request (balance_payment_request_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_parasut_invoice', 'INDEX idx_sales_offers_parasut_invoice (parasut_invoice_id)');
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS sales_offer_items (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                offer_id INT UNSIGNED NOT NULL,
+                stock_item_id INT UNSIGNED NULL,
+                title VARCHAR(190) NOT NULL,
+                brand VARCHAR(120) NULL,
+                description TEXT NULL,
+                quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+                unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                line_subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                line_vat DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                line_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+                INDEX idx_sales_offer_items_offer (offer_id, sort_order),
+                INDEX idx_sales_offer_items_stock (stock_item_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->ensureColumn('offer_template_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER template_id');
+        $this->ensureIndex('offer_template_items', 'idx_offer_template_items_stock', 'INDEX idx_offer_template_items_stock (stock_item_id)');
+        $this->ensureColumn('sales_offer_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER offer_id');
+        $this->ensureIndex('sales_offer_items', 'idx_sales_offer_items_stock', 'INDEX idx_sales_offer_items_stock (stock_item_id)');
+
+        self::$salesOfferSchemaEnsured = true;
+    }
+
+    private function ensureStockItemSchema(): void
+    {
+        if (self::$stockItemSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS stock_items (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                parasut_product_id VARCHAR(64) NULL,
+                name VARCHAR(190) NOT NULL,
+                code VARCHAR(120) NULL,
+                barcode VARCHAR(120) NULL,
+                brand VARCHAR(120) NULL,
+                unit VARCHAR(40) NULL,
+                currency CHAR(3) NOT NULL DEFAULT 'TRY',
+                list_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                buying_price DECIMAL(12,2) NULL,
+                vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                inventory_tracking TINYINT(1) NOT NULL DEFAULT 0,
+                stock_count DECIMAL(12,2) NULL,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                is_archived TINYINT(1) NOT NULL DEFAULT 0,
+                source VARCHAR(30) NOT NULL DEFAULT 'parasut',
+                raw_payload MEDIUMTEXT NULL,
+                last_synced_at DATETIME NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_stock_items_parasut_product (parasut_product_id),
+                INDEX idx_stock_items_search (is_active, name),
+                INDEX idx_stock_items_code (code),
+                INDEX idx_stock_items_source (source),
+                INDEX idx_stock_items_synced (last_synced_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        self::$stockItemSchemaEnsured = true;
     }
 
     private function ensurePhoneNormalization(): void
@@ -2945,6 +4295,87 @@ final class RenewalRepository
         }
     }
 
+    private function assignGeneratedOfferNumber(string $table, string $column, string $prefix, int $id): string
+    {
+        if ($id < 1) {
+            return '';
+        }
+
+        $quotedTable = str_replace('`', '``', $table);
+        $quotedColumn = str_replace('`', '``', $column);
+        $stmt = $this->db->prepare(
+            "SELECT `{$quotedColumn}` AS number_value, created_at
+             FROM `{$quotedTable}`
+             WHERE id = :id
+             LIMIT 1"
+        );
+        $stmt->execute(['id' => $id]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return '';
+        }
+
+        $current = trim((string) ($row['number_value'] ?? ''));
+        if ($current !== '') {
+            return $current;
+        }
+
+        $number = $this->generatedOfferNumber($prefix, $id, (string) ($row['created_at'] ?? ''));
+        $update = $this->db->prepare(
+            "UPDATE `{$quotedTable}`
+             SET `{$quotedColumn}` = :number
+             WHERE id = :id
+               AND COALESCE(`{$quotedColumn}`, '') = ''"
+        );
+        $update->execute([
+            'id' => $id,
+            'number' => $number,
+        ]);
+
+        return $number;
+    }
+
+    private function backfillGeneratedOfferNumbers(string $table, string $column, string $prefix): void
+    {
+        $quotedTable = str_replace('`', '``', $table);
+        $quotedColumn = str_replace('`', '``', $column);
+        $rows = $this->db->query(
+            "SELECT id, created_at
+             FROM `{$quotedTable}`
+             WHERE COALESCE(`{$quotedColumn}`, '') = ''
+             ORDER BY id ASC"
+        )->fetchAll();
+        if ($rows === []) {
+            return;
+        }
+
+        $update = $this->db->prepare(
+            "UPDATE `{$quotedTable}`
+             SET `{$quotedColumn}` = :number
+             WHERE id = :id
+               AND COALESCE(`{$quotedColumn}`, '') = ''"
+        );
+        foreach ($rows as $row) {
+            $id = (int) ($row['id'] ?? 0);
+            if ($id < 1) {
+                continue;
+            }
+
+            $update->execute([
+                'id' => $id,
+                'number' => $this->generatedOfferNumber($prefix, $id, (string) ($row['created_at'] ?? '')),
+            ]);
+        }
+    }
+
+    private function generatedOfferNumber(string $prefix, int $id, string $createdAt = ''): string
+    {
+        $timestamp = $createdAt !== '' ? strtotime($createdAt) : false;
+        $year = $timestamp !== false ? date('Y', $timestamp) : date('Y');
+
+        return sprintf('%s-%s-%06d', strtoupper($prefix), $year, $id);
+    }
+
     private function ensureItemSchema(): void
     {
         if (self::$itemSchemaEnsured) {
@@ -2975,7 +4406,51 @@ final class RenewalRepository
         );
 
         $this->seedExistingRenewalItems();
+        $this->standardizeReminderRulesForExistingRenewals();
         self::$itemSchemaEnsured = true;
+    }
+
+    private function standardizeReminderRulesForExistingRenewals(): void
+    {
+        try {
+            $this->db->exec(
+                "CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key VARCHAR(120) PRIMARY KEY,
+                    setting_value MEDIUMTEXT NULL,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+
+            $key = 'maintenance.standard_reminder_rules_v1';
+            $stmt = $this->db->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :setting_key LIMIT 1');
+            $stmt->execute(['setting_key' => $key]);
+            if ((string) $stmt->fetchColumn() === '1') {
+                return;
+            }
+
+            $this->db->exec('UPDATE renewals SET reminder_days = 30 WHERE reminder_days <> 30');
+            $this->db->exec('DELETE FROM renewal_reminder_rules');
+            $this->db->exec(
+                'INSERT IGNORE INTO renewal_reminder_rules (renewal_id, days_before)
+                 SELECT r.id, reminder_days.days_before
+                 FROM renewals r
+                 JOIN (
+                     SELECT 30 AS days_before
+                     UNION ALL SELECT 20
+                     UNION ALL SELECT 15
+                     UNION ALL SELECT 7
+                 ) reminder_days'
+            );
+
+            $doneStmt = $this->db->prepare(
+                'INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                 VALUES (:setting_key, "1", NOW())
+                 ON DUPLICATE KEY UPDATE setting_value = "1", updated_at = NOW()'
+            );
+            $doneStmt->execute(['setting_key' => $key]);
+        } catch (\Throwable) {
+            // Reminder maintenance should not block the application if the host limits writes.
+        }
     }
 
     private function seedExistingRenewalItems(): void
@@ -3027,12 +4502,25 @@ final class RenewalRepository
         return [
             ['name' => 'Kredi kartı', 'description' => 'Güvenli kredi kartı ödeme sayfasına yönlendirir.'],
             ['name' => 'Havale / EFT', 'description' => 'Banka transferi ile ödeme alınır; dekont sonrası işlem tamamlanır.'],
-            ['name' => '30 gün cari hesap', 'description' => 'Fatura kesildikten sonra 30 gün vadeli cari hesap olarak takip edilir.'],
             ['name' => 'Cari hesap', 'description' => 'Ödeme cari hesap mutabakatına göre takip edilir.'],
             ['name' => 'Online ödeme', 'description' => 'Online ödeme kanalı üzerinden tahsilat yapılır.'],
             ['name' => 'Otomatik ödeme', 'description' => 'Tanımlı otomatik ödeme talimatı ile tahsil edilir.'],
             ['name' => 'Nakit', 'description' => 'Nakit ödeme olarak tahsil edilir.'],
         ];
+    }
+
+    private static function isRemovedPaymentMethodName(string $name): bool
+    {
+        $normalized = strtr(mb_strtolower(trim($name)), [
+            'ı' => 'i',
+            'ğ' => 'g',
+            'ü' => 'u',
+            'ş' => 's',
+            'ö' => 'o',
+            'ç' => 'c',
+        ]);
+
+        return str_contains($normalized, '30') && str_contains($normalized, 'cari');
     }
 
     public function notificationRecipients(int $customerId): array
@@ -3220,7 +4708,7 @@ final class RenewalRepository
         }
     }
 
-    public function logMail(int $renewalId, string $to, string $subject, string $body, string $status, ?string $error = null, bool $touchReminder = true): int
+    public function logMail(?int $renewalId, string $to, string $subject, string $body, string $status, ?string $error = null, bool $touchReminder = true): int
     {
         $stmt = $this->db->prepare(
             'INSERT INTO mail_logs (renewal_id, recipient_email, subject, body, status, error_message, sent_at)
@@ -3235,7 +4723,7 @@ final class RenewalRepository
             'error_message' => $error,
         ]);
 
-        if ($status === 'sent' && $touchReminder) {
+        if ($renewalId !== null && $renewalId > 0 && $status === 'sent' && $touchReminder) {
             $this->db->prepare('UPDATE renewals SET last_notified_at = NOW() WHERE id = :id')
                 ->execute(['id' => $renewalId]);
         }
@@ -3387,6 +4875,9 @@ final class RenewalRepository
         }
         $supplierPriceEnabled = $hasProduct && !empty($data['supplier_price_request_enabled']);
         $paymentMethod = trim((string) ($data['payment_method'] ?? ''));
+        if (self::isRemovedPaymentMethodName($paymentMethod)) {
+            $paymentMethod = '';
+        }
         $total = $this->itemsTotal($items);
         $status = (string) ($data['status'] ?? 'active');
         if (!in_array($status, ['active', 'renewed', 'cancelled'], true)) {
@@ -3682,7 +5173,7 @@ final class RenewalRepository
     {
         $rows = $data['reminder_rules'] ?? null;
         if (!is_array($rows)) {
-            $rows = [$data['reminder_days'] ?? \app_config('reminders.default_days_before', 30)];
+            $rows = self::STANDARD_REMINDER_DAYS;
         }
 
         $days = [];
@@ -3693,7 +5184,9 @@ final class RenewalRepository
             }
         }
 
-        $days[7] = 7;
+        foreach (self::STANDARD_REMINDER_DAYS as $standardDay) {
+            $days[$standardDay] = $standardDay;
+        }
 
         rsort($days, SORT_NUMERIC);
 
@@ -3825,6 +5318,13 @@ final class RenewalRepository
         $currency = strtoupper(trim((string) $currency));
 
         return in_array($currency, ['TRY', 'USD', 'EUR'], true) ? $currency : 'TRY';
+    }
+
+    private function salesOfferPaymentPercent(mixed $value): float
+    {
+        $percent = $this->decimalValue($value, 20.0);
+
+        return max(1.0, min(100.0, $percent));
     }
 
     private function nullableDecimalValue(mixed $value): ?float
@@ -3966,6 +5466,43 @@ final class RenewalRepository
         return $suppliers;
     }
 
+    private function salesReportUnionSql(): string
+    {
+        return "
+            SELECT
+                CONCAT('customer:', cor.id) AS sale_key,
+                col.item_title AS item_title,
+                col.quantity AS quantity,
+                col.line_total AS line_total,
+                COALESCE(NULLIF(col.currency, ''), cor.currency, 'TRY') AS currency,
+                COALESCE(cor.responded_at, cor.updated_at, cor.created_at) AS sale_date,
+                YEAR(COALESCE(cor.responded_at, cor.updated_at, cor.created_at)) AS sale_year,
+                MONTH(COALESCE(cor.responded_at, cor.updated_at, cor.created_at)) AS sale_month,
+                c.company_name AS customer_name
+            FROM customer_offer_lines col
+            INNER JOIN customer_offer_requests cor ON cor.id = col.offer_id
+            INNER JOIN renewals r ON r.id = cor.renewal_id
+            INNER JOIN customers c ON c.id = r.customer_id
+            WHERE cor.status = 'approved'
+
+            UNION ALL
+
+            SELECT
+                CONCAT('sales:', so.id) AS sale_key,
+                soi.title AS item_title,
+                soi.quantity AS quantity,
+                soi.line_total AS line_total,
+                COALESCE(NULLIF(soi.currency, ''), so.currency, 'TRY') AS currency,
+                COALESCE(so.updated_at, so.created_at) AS sale_date,
+                YEAR(COALESCE(so.updated_at, so.created_at)) AS sale_year,
+                MONTH(COALESCE(so.updated_at, so.created_at)) AS sale_month,
+                so.customer_name AS customer_name
+            FROM sales_offer_items soi
+            INNER JOIN sales_offers so ON so.id = soi.offer_id
+            WHERE so.status = 'approved'
+        ";
+    }
+
     private function createSupplierContacts(int $supplierId, array $data): void
     {
         $contacts = $this->submittedContacts($data);
@@ -4080,6 +5617,207 @@ final class RenewalRepository
         return $contacts;
     }
 
+    private function attachOfferTemplateItems(array $templates): array
+    {
+        if ($templates === []) {
+            return [];
+        }
+
+        $ids = array_map(static fn (array $template): int => (int) $template['id'], $templates);
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM offer_template_items
+             WHERE template_id IN (' . $placeholders . ')
+             ORDER BY template_id ASC, sort_order ASC, id ASC'
+        );
+        $stmt->execute($ids);
+
+        $itemsByTemplate = [];
+        foreach ($stmt->fetchAll() as $item) {
+            $itemsByTemplate[(int) $item['template_id']][] = $item;
+        }
+
+        foreach ($templates as &$template) {
+            $template['items'] = $itemsByTemplate[(int) $template['id']] ?? [];
+        }
+        unset($template);
+
+        return $templates;
+    }
+
+    private function submittedSalesOfferItems(array $data): array
+    {
+        $rows = $data['items'] ?? [];
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $items = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $title = trim((string) ($row['title'] ?? ''));
+            $brand = trim((string) ($row['brand'] ?? ''));
+            $description = trim((string) ($row['description'] ?? ''));
+            $quantity = max(0.01, (float) str_replace(',', '.', (string) ($row['quantity'] ?? 1)));
+            $unitPrice = max(0.0, (float) str_replace(',', '.', (string) ($row['unit_price'] ?? 0)));
+            $vatRate = max(0.0, min(100.0, (float) str_replace(',', '.', (string) ($row['vat_rate'] ?? 20))));
+            $stockItemId = max(0, (int) ($row['stock_item_id'] ?? 0));
+
+            if ($title === '' && $brand === '' && $description === '' && $unitPrice <= 0.0) {
+                continue;
+            }
+
+            $items[] = [
+                'stock_item_id' => $stockItemId > 0 ? $stockItemId : null,
+                'title' => $title !== '' ? $title : 'Teklif kalemi',
+                'brand' => $brand,
+                'description' => $description,
+                'quantity' => $quantity,
+                'unit_price' => $unitPrice,
+                'vat_rate' => $vatRate,
+            ];
+        }
+
+        return $items;
+    }
+
+    private function resolveSalesOfferCustomerId(array $data): ?int
+    {
+        $customerId = (int) ($data['customer_id'] ?? 0);
+        if ($customerId > 0 && $this->findCustomer($customerId) !== null) {
+            return $customerId;
+        }
+
+        $customerName = trim((string) ($data['customer_name'] ?? ''));
+        $email = trim(mb_strtolower((string) ($data['customer_email'] ?? '')));
+        if ($customerName === '' && $email === '') {
+            return null;
+        }
+
+        $conditions = [];
+        $params = [];
+        if ($customerName !== '') {
+            $conditions[] = 'company_name = :company_name';
+            $params['company_name'] = $customerName;
+        }
+        if ($email !== '') {
+            $conditions[] = 'LOWER(email) = :email';
+            $params['email'] = $email;
+        }
+        if ($conditions === []) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT id
+             FROM customers
+             WHERE deleted_at IS NULL
+               AND (' . implode(' OR ', $conditions) . ')
+             ORDER BY CASE WHEN company_name = :order_company_name THEN 0 ELSE 1 END, id ASC
+             LIMIT 1'
+        );
+        $params['order_company_name'] = $customerName;
+        $stmt->execute($params);
+        $resolved = (int) $stmt->fetchColumn();
+
+        return $resolved > 0 ? $resolved : null;
+    }
+
+    private function salesOfferItems(int $offerId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM sales_offer_items
+             WHERE offer_id = :offer_id
+             ORDER BY sort_order ASC, id ASC'
+        );
+        $stmt->execute(['offer_id' => $offerId]);
+
+        return $stmt->fetchAll();
+    }
+
+    private function replaceOfferTemplateItems(int $templateId, array $items): void
+    {
+        $this->db->prepare('DELETE FROM offer_template_items WHERE template_id = :template_id')
+            ->execute(['template_id' => $templateId]);
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO offer_template_items
+                (template_id, stock_item_id, title, brand, description, quantity, unit_price, vat_rate, sort_order)
+             VALUES
+                (:template_id, :stock_item_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :sort_order)'
+        );
+
+        foreach (array_values($items) as $index => $item) {
+            $stmt->execute([
+                'template_id' => $templateId,
+                'stock_item_id' => empty($item['stock_item_id']) ? null : (int) $item['stock_item_id'],
+                'title' => $item['title'],
+                'brand' => $this->nullableString($item['brand'] ?? ''),
+                'description' => $this->nullableString($item['description'] ?? ''),
+                'quantity' => $item['quantity'],
+                'unit_price' => $item['unit_price'],
+                'vat_rate' => $item['vat_rate'],
+                'sort_order' => $index,
+            ]);
+        }
+    }
+
+    private function replaceSalesOfferItems(int $offerId, array $items, string $currency): void
+    {
+        $this->db->prepare('DELETE FROM sales_offer_items WHERE offer_id = :offer_id')
+            ->execute(['offer_id' => $offerId]);
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO sales_offer_items
+                (offer_id, stock_item_id, title, brand, description, quantity, unit_price, vat_rate, line_subtotal, line_vat, line_total, currency, sort_order)
+             VALUES
+                (:offer_id, :stock_item_id, :title, :brand, :description, :quantity, :unit_price, :vat_rate, :line_subtotal, :line_vat, :line_total, :currency, :sort_order)'
+        );
+
+        foreach (array_values($items) as $index => $item) {
+            $lineSubtotal = round((float) $item['quantity'] * (float) $item['unit_price'], 2);
+            $lineVat = round($lineSubtotal * ((float) $item['vat_rate'] / 100), 2);
+            $lineTotal = round($lineSubtotal + $lineVat, 2);
+            $stmt->execute([
+                'offer_id' => $offerId,
+                'stock_item_id' => empty($item['stock_item_id']) ? null : (int) $item['stock_item_id'],
+                'title' => $item['title'],
+                'brand' => $this->nullableString($item['brand'] ?? ''),
+                'description' => $this->nullableString($item['description'] ?? ''),
+                'quantity' => $item['quantity'],
+                'unit_price' => $item['unit_price'],
+                'vat_rate' => $item['vat_rate'],
+                'line_subtotal' => $lineSubtotal,
+                'line_vat' => $lineVat,
+                'line_total' => $lineTotal,
+                'currency' => $currency,
+                'sort_order' => $index,
+            ]);
+        }
+    }
+
+    private function salesOfferTotals(array $items): array
+    {
+        $subtotal = 0.0;
+        $vatTotal = 0.0;
+        foreach ($items as $item) {
+            $lineSubtotal = (float) $item['quantity'] * (float) $item['unit_price'];
+            $subtotal += $lineSubtotal;
+            $vatTotal += $lineSubtotal * ((float) $item['vat_rate'] / 100);
+        }
+
+        return [
+            'subtotal' => round($subtotal, 2),
+            'vat_total' => round($vatTotal, 2),
+            'total' => round($subtotal + $vatTotal, 2),
+        ];
+    }
+
     private function baseSelect(): string
     {
         return "SELECT
@@ -4123,6 +5861,7 @@ final class RenewalRepository
                     FROM renewal_payments rp_paid
                     WHERE rp_paid.renewal_id = r.id
                       AND rp_paid.status = 'paid'
+                      AND COALESCE(rp_paid.payment_id, '') <> ''
                 ) AS has_paid_card_payment,
                 (
                     SELECT rp_latest.status

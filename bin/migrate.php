@@ -278,6 +278,195 @@ ensure_table($pdo, 'renewal_payment_receipts', "
         INDEX idx_renewal_payment_receipts_status (notification_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_table($pdo, 'manual_payment_requests', "
+    CREATE TABLE manual_payment_requests (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        public_token VARCHAR(96) NOT NULL,
+        customer_id INT UNSIGNED NULL,
+        title VARCHAR(190) NOT NULL,
+        description TEXT NULL,
+        customer_name VARCHAR(190) NULL,
+        customer_email VARCHAR(190) NULL,
+        customer_phone VARCHAR(60) NULL,
+        customer_tax_number VARCHAR(60) NULL,
+        recipients_json MEDIUMTEXT NULL,
+        amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+        currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+        status ENUM('pending','paid','cancelled') NOT NULL DEFAULT 'pending',
+        paid_at DATETIME NULL,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_manual_payment_requests_token (public_token),
+        INDEX idx_manual_payment_requests_customer (customer_id),
+        INDEX idx_manual_payment_requests_status (status, created_at),
+        INDEX idx_manual_payment_requests_created_by (created_by)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_column($pdo, 'manual_payment_requests', 'customer_id', 'INT UNSIGNED NULL AFTER public_token');
+ensure_column($pdo, 'manual_payment_requests', 'recipients_json', 'MEDIUMTEXT NULL AFTER customer_tax_number');
+ensure_index($pdo, 'manual_payment_requests', 'idx_manual_payment_requests_customer', 'INDEX idx_manual_payment_requests_customer (customer_id)');
+ensure_table($pdo, 'manual_payment_transactions', "
+    CREATE TABLE manual_payment_transactions (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        request_id INT UNSIGNED NOT NULL,
+        provider VARCHAR(30) NOT NULL DEFAULT 'iyzico',
+        conversation_id VARCHAR(190) NOT NULL,
+        token VARCHAR(190) NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        currency VARCHAR(3) NOT NULL DEFAULT 'TRY',
+        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        payment_status VARCHAR(50) NULL,
+        payment_id VARCHAR(120) NULL,
+        payment_page_url TEXT NULL,
+        error_message TEXT NULL,
+        raw_request MEDIUMTEXT NULL,
+        raw_response MEDIUMTEXT NULL,
+        paid_at DATETIME NULL,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_manual_payment_transactions_request FOREIGN KEY (request_id) REFERENCES manual_payment_requests(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_manual_payment_transactions_conversation (conversation_id),
+        INDEX idx_manual_payment_transactions_token (token),
+        INDEX idx_manual_payment_transactions_status (status),
+        INDEX idx_manual_payment_transactions_request (request_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_table($pdo, 'manual_payment_request_logs', "
+    CREATE TABLE manual_payment_request_logs (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        request_id INT UNSIGNED NOT NULL,
+        channel VARCHAR(30) NOT NULL,
+        recipient VARCHAR(190) NOT NULL,
+        subject VARCHAR(240) NULL,
+        body MEDIUMTEXT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'sent',
+        error_message TEXT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_manual_payment_request_logs_request FOREIGN KEY (request_id) REFERENCES manual_payment_requests(id) ON DELETE CASCADE,
+        INDEX idx_manual_payment_request_logs_request (request_id, created_at),
+        INDEX idx_manual_payment_request_logs_channel (channel, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_table($pdo, 'offer_templates', "
+    CREATE TABLE offer_templates (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(190) NOT NULL,
+        description TEXT NULL,
+        currency CHAR(3) NOT NULL DEFAULT 'TRY',
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_offer_templates_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+        UNIQUE KEY uq_offer_templates_name (name),
+        INDEX idx_offer_templates_active (is_active, name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_table($pdo, 'stock_items', "
+    CREATE TABLE stock_items (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        parasut_product_id VARCHAR(64) NULL,
+        name VARCHAR(190) NOT NULL,
+        code VARCHAR(120) NULL,
+        barcode VARCHAR(120) NULL,
+        brand VARCHAR(120) NULL,
+        unit VARCHAR(40) NULL,
+        currency CHAR(3) NOT NULL DEFAULT 'TRY',
+        list_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        buying_price DECIMAL(12,2) NULL,
+        vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+        inventory_tracking TINYINT(1) NOT NULL DEFAULT 0,
+        stock_count DECIMAL(12,2) NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        is_archived TINYINT(1) NOT NULL DEFAULT 0,
+        source VARCHAR(30) NOT NULL DEFAULT 'parasut',
+        raw_payload MEDIUMTEXT NULL,
+        last_synced_at DATETIME NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_stock_items_parasut_product (parasut_product_id),
+        INDEX idx_stock_items_search (is_active, name),
+        INDEX idx_stock_items_code (code),
+        INDEX idx_stock_items_source (source),
+        INDEX idx_stock_items_synced (last_synced_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_table($pdo, 'offer_template_items', "
+    CREATE TABLE offer_template_items (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        template_id INT UNSIGNED NOT NULL,
+        stock_item_id INT UNSIGNED NULL,
+        title VARCHAR(190) NOT NULL,
+        brand VARCHAR(120) NULL,
+        description TEXT NULL,
+        quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+        unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+        sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_offer_template_items_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE CASCADE,
+        INDEX idx_offer_template_items_template (template_id, sort_order),
+        INDEX idx_offer_template_items_stock (stock_item_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_column($pdo, 'offer_template_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER template_id');
+ensure_index($pdo, 'offer_template_items', 'idx_offer_template_items_stock', 'INDEX idx_offer_template_items_stock (stock_item_id)');
+ensure_table($pdo, 'sales_offers', "
+    CREATE TABLE sales_offers (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        offer_number VARCHAR(30) NULL,
+        template_id INT UNSIGNED NULL,
+        title VARCHAR(190) NOT NULL,
+        customer_name VARCHAR(190) NOT NULL,
+        customer_email VARCHAR(190) NULL,
+        customer_phone VARCHAR(60) NULL,
+        currency CHAR(3) NOT NULL DEFAULT 'TRY',
+        status ENUM('draft', 'sent', 'approved', 'revision_requested', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+        subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        notes TEXT NULL,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
+        CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+        UNIQUE KEY uq_sales_offers_number (offer_number),
+        INDEX idx_sales_offers_status (status, updated_at),
+        INDEX idx_sales_offers_template (template_id),
+        INDEX idx_sales_offers_customer (customer_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_column($pdo, 'sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
+ensure_index($pdo, 'sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
+ensure_table($pdo, 'sales_offer_items', "
+    CREATE TABLE sales_offer_items (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        offer_id INT UNSIGNED NOT NULL,
+        stock_item_id INT UNSIGNED NULL,
+        title VARCHAR(190) NOT NULL,
+        brand VARCHAR(120) NULL,
+        description TEXT NULL,
+        quantity DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+        unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+        line_subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        line_vat DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        line_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+        currency CHAR(3) NOT NULL DEFAULT 'TRY',
+        sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_sales_offer_items_offer FOREIGN KEY (offer_id) REFERENCES sales_offers(id) ON DELETE CASCADE,
+        INDEX idx_sales_offer_items_offer (offer_id, sort_order),
+        INDEX idx_sales_offer_items_stock (stock_item_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+ensure_column($pdo, 'sales_offer_items', 'stock_item_id', 'INT UNSIGNED NULL AFTER offer_id');
+ensure_index($pdo, 'sales_offer_items', 'idx_sales_offer_items_stock', 'INDEX idx_sales_offer_items_stock (stock_item_id)');
 ensure_table($pdo, 'renewal_decisions', "
     CREATE TABLE renewal_decisions (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -668,11 +857,68 @@ function seed_default_renewal_definitions(PDO $pdo): void
 
 function default_renewal_definition_info(string $name): ?string
 {
-    if ($name === 'Alan Adi Yenileme') {
-        return 'Alan adının süresi bittikten sonraki 20 gün içinde alan adı normal ücretle yenilenebilir. Bu süre içinde, alan adına bağlı web sitesi, e-mailler ve benzer bütün servisler duracaktır. 20 günü aştığı taktirde ise alan adı kurtarma periyoduna girer ve normal ücretle yenilenemez, böyle bir durumda yenilemek isterseniz destek bildirimi açarak güncel kurtarma ücretini sorabilirsiniz. Süre bitiminden 20 gün geçtikten sonra alan adınızı kurtarabileceğiniz ve sahipliğini sağlayabileceğiniz konusunda garanti verememekteyiz. Firmalar arası farklılıklar göstermektedir.';
+    $normalized = normalized_definition_name($name);
+
+    if (str_contains($normalized, 'alan adi') || str_contains($normalized, 'hosting')) {
+        return 'Alan adı ve hosting yenilemeleri genellikle sessiz ilerleyen, ancak süresi kaçırıldığında etkisi hızlı hissedilen süreçlerdir. Süre dolduğunda web sitesi, e-posta hesapları, DNS yönlendirmeleri ve bağlı servislerde erişim kesintileri yaşanabilir. Alan adı tarafında ilk günlerde yenileme çoğu zaman yapılabilse de, bekleme veya kurtarma dönemine girildiğinde ek ücret, kesinti süresi ve alan adının kaybedilmesi riski oluşabilir. Hosting tarafında ise dosya, yedek ve e-posta erişimi etkilenebileceği için yenileme tercihinin süre dolmadan netleşmesi önerilir.';
     }
 
-    return null;
+    if (str_contains($normalized, 'ssl')) {
+        return 'SSL sertifikası yenilenmediğinde web sitesi teknik olarak yayında olsa bile tarayıcılar ziyaretçilere güvenlik uyarısı gösterebilir. Bu uyarılar kullanıcı güvenini düşürür, formlar ve ödeme adımları daha az tercih edilir hale gelir ve bazı entegrasyonlar güvenli bağlantı kabul etmediği için çalışmayabilir. Sertifika süresi dolmadan yenileme yapılması, kesintisiz ve güven veren bir erişim için önemlidir.';
+    }
+
+    if (str_contains($normalized, 'microsoft 365') || str_contains($normalized, 'google workspace')) {
+        return 'Bulut çalışma lisanslarında yenileme gecikirse e-posta, takvim, dosya paylaşımı ve kullanıcı oturumları etkilenebilir. İlk aşamada uyarılar görünse bile süre uzadığında hesap erişimleri, kota ve yönetim işlemleri kısıtlanabilir. İş akışlarının ve ekip içi iletişimin kesintiye uğramaması için lisans durumunun süre dolmadan netleştirilmesi önerilir.';
+    }
+
+    if (str_contains($normalized, 'antivirus') || str_contains($normalized, 'edr')) {
+        return 'Antivirüs ve EDR lisansları yalnızca kurulu yazılımı değil; güncel tehdit imzalarını, merkezi yönetimi, olay kayıtlarını ve müdahale kabiliyetini de kapsar. Süre dolduğunda cihazlar çalışmaya devam ediyor gibi görünse bile yeni tehditlere karşı görünürlük ve koruma seviyesi düşebilir. Güvenlik zincirinde boşluk oluşmaması için yenileme kararının gecikmeden verilmesi önemlidir.';
+    }
+
+    if (str_contains($normalized, 'firewall') || str_contains($normalized, 'utm') || str_contains($normalized, 'vpn')) {
+        return 'Firewall, UTM ve VPN lisanslarında süre dolumu internet erişimini her zaman anında kesmeyebilir; ancak web filtreleme, saldırı önleme, VPN erişimi, güvenlik güncellemeleri ve raporlama gibi kritik katmanlar etkilenebilir. Bu durum dış tehditlere karşı savunmayı zayıflatır ve uzaktan erişim sürekliliğini riske atabilir. Yenilemenin süre bitmeden planlanması önerilir.';
+    }
+
+    if (str_contains($normalized, 'yedekleme') || str_contains($normalized, 'felaket kurtarma')) {
+        return 'Yedekleme ve felaket kurtarma çözümleri sorun yaşanmadan önce sessiz çalışan ama ihtiyaç anında kritik hale gelen sistemlerdir. Lisans veya hizmet süresi dolduğunda yeni yedeklerin alınması, saklama politikaları, izleme uyarıları veya geri dönüş desteği etkilenebilir. Veri kaybı riskini büyütmemek için yenileme ve test süreçlerinin süre dolmadan tamamlanması önemlidir.';
+    }
+
+    if (str_contains($normalized, 'bulut')) {
+        return 'Bulut sunucu hizmetlerinde süre veya ödeme takibi gecikirse kaynaklar, yedekler, IP erişimi ve bağlı servisler etkilenebilir. Bazı sağlayıcılar kısa süreli uyarı dönemi sunsa da gecikme uzadığında servis durdurma veya veri erişiminde kısıtlama riski oluşabilir. Canlı sistemlerin etkilenmemesi için yenileme planı önceden yapılmalıdır.';
+    }
+
+    if (str_contains($normalized, 'bakim') || str_contains($normalized, 'destek') || str_contains($normalized, 'helpdesk') || str_contains($normalized, 'network') || str_contains($normalized, 'web site')) {
+        return 'Bakım ve destek hizmetleri sorun çıkmadığı dönemlerde arka planda kalır; ancak ihtiyaç anında müdahale süresi ve kapsamı belirleyen ana güvencedir. Hizmet süresi yenilenmezse planlı kontroller, öncelikli destek, güncelleme takibi ve arıza müdahalesi kapsam dışı kalabilir. Operasyonun aksamaması için hizmet devamlılığının süre dolmadan netleşmesi önerilir.';
+    }
+
+    if (str_contains($normalized, 'sunucu') || str_contains($normalized, 'server cal') || str_contains($normalized, 'sql server')) {
+        return 'Sunucu ve veritabanı lisansları erişim, yasal kullanım, güncelleme ve destek sürekliliği açısından önemlidir. Yenileme veya lisans takibi geciktiğinde kullanıcı erişimleri, denetim süreçleri, üretici desteği ve güvenlik güncellemeleri riskli hale gelebilir. İş kritik sistemlerde sürpriz kesinti yaşamamak için lisans durumunun önceden planlanması önerilir.';
+    }
+
+    if (str_contains($normalized, 'erp') || str_contains($normalized, 'crm')) {
+        return 'ERP ve CRM lisansları satış, muhasebe, stok, müşteri takibi ve entegrasyon süreçlerinin merkezinde yer alır. Süre dolumu veya bakım yenilemesinin gecikmesi kullanıcı erişimlerini, güncelleme hakkını, destek taleplerini ve bağlı entegrasyonları etkileyebilir. Operasyonun aksamaması için yenileme kararının süre dolmadan netleşmesi faydalıdır.';
+    }
+
+    if (str_contains($normalized, 'santral')) {
+        return 'IP santral lisansı veya hizmet süresi dolduğunda dahili görüşmeler, dış hat kullanımı, çağrı yönlendirme, kayıt ve raporlama gibi telefon süreçleri etkilenebilir. Çağrı trafiği müşteriye doğrudan temas ettiği için küçük bir kesinti bile operasyonel görünürlüğü azaltabilir. Yenilemenin süre dolmadan tamamlanması önerilir.';
+    }
+
+    if (str_contains($normalized, 'kamera') || str_contains($normalized, 'kayit')) {
+        return 'Kamera kayıt yazılımı ve izleme lisansları güvenlik olaylarında geriye dönük inceleme yapabilmek için kritik öneme sahiptir. Süre dolduğunda canlı izleme çalışıyor gibi görünse bile kayıt, arşivleme, uzaktan erişim veya alarm entegrasyonları etkilenebilir. Kayıt bütünlüğünün bozulmaması için yenileme zamanında yapılmalıdır.';
+    }
+
+    if (str_contains($normalized, 'siber guvenlik') || str_contains($normalized, 'e-posta guvenligi') || str_contains($normalized, 'penetrasyon') || str_contains($normalized, 'kvkk')) {
+        return 'Güvenlik ve uyumluluk hizmetleri düzenli takip edilmediğinde riskler görünmez hale gelebilir. İzleme, test, raporlama veya danışmanlık süresinin bitmesi; zafiyetlerin geç fark edilmesine, e-posta tehditlerinin artmasına ve uyum süreçlerinde eksik kayıt oluşmasına neden olabilir. Risklerin büyümeden yönetilebilmesi için hizmet takviminin kesintisiz sürmesi önerilir.';
+    }
+
+    return 'Bu ürün veya hizmetin yenilemesi zamanında planlanmadığında lisans, destek, güncelleme veya erişim sürekliliği etkilenebilir. İlk anda sistem çalışıyor gibi görünse bile süre uzadıkça servis kısıtları, güvenlik açıkları, ek maliyetler veya kullanım kesintileri oluşabilir. Yenileme kararının süre dolmadan netleşmesi önerilir.';
+}
+
+function normalized_definition_name(string $name): string
+{
+    $name = mb_strtolower($name);
+
+    return str_replace(['ı', 'ğ', 'ü', 'ş', 'ö', 'ç', 'İ'], ['i', 'g', 'u', 's', 'o', 'c', 'i'], $name);
 }
 
 function seed_default_renewal_periods(PDO $pdo): void

@@ -139,6 +139,229 @@ final class ParasutClient
         ];
     }
 
+    public function fetchAllProducts(int $maxPages = 200): array
+    {
+        $companyId = $this->companyId();
+        $products = [];
+        $totalPages = null;
+        $maxPages = max(1, min($maxPages, 500));
+
+        for ($page = 1; $page <= $maxPages; $page++) {
+            $params = [
+                'sort' => 'name',
+                'page[number]' => $page,
+                'page[size]' => 25,
+            ];
+            $response = $this->request('GET', sprintf('/v4/%s/products?%s', rawurlencode($companyId), http_build_query($params)));
+            $pageProducts = $this->mapProducts($response['data'] ?? []);
+            if ($pageProducts === []) {
+                break;
+            }
+
+            foreach ($pageProducts as $product) {
+                $productId = (string) ($product['id'] ?? '');
+                if ($productId === '') {
+                    continue;
+                }
+                $products[$productId] = $product;
+            }
+
+            $totalPages = isset($response['meta']['total_pages']) ? (int) $response['meta']['total_pages'] : $totalPages;
+            if ($totalPages !== null && $page >= $totalPages) {
+                break;
+            }
+
+            usleep(350000);
+        }
+
+        return array_values($products);
+    }
+
+    public function createSalesInvoiceFromOffer(array $offer, array $lines, ?array $payment = null): array
+    {
+        $companyId = $this->companyId();
+        $contactId = trim((string) ($offer['parasut_contact_id'] ?? ''));
+        if ($contactId === '') {
+            throw new RuntimeException('Müşterinin Paraşüt cari ID bilgisi yok. Önce müşteriyi Paraşüt carisiyle eşleştirin.');
+        }
+
+        if ($lines === []) {
+            throw new RuntimeException('Fatura oluşturmak için teklif satırı bulunamadı.');
+        }
+
+        $currency = $this->parasutCurrency((string) ($offer['currency'] ?? 'TRY'));
+        $details = [];
+        foreach ($lines as $line) {
+            $title = trim((string) ($line['item_title'] ?? ''));
+            if ($title === '') {
+                $title = 'Ürün / hizmet';
+            }
+
+            $quantity = max(0.01, (float) ($line['quantity'] ?? 1));
+            $unitPrice = max(0.0, (float) ($line['unit_price'] ?? 0));
+            $vatRate = max(0.0, (float) ($line['vat_rate'] ?? 20));
+            $product = $this->findOrCreateProduct($title, $vatRate, $unitPrice, $currency);
+
+            $details[] = [
+                'type' => 'sales_invoice_details',
+                'attributes' => [
+                    'quantity' => round($quantity, 2),
+                    'unit_price' => round($unitPrice, 2),
+                    'vat_rate' => round($vatRate, 2),
+                    'description' => $title,
+                ],
+                'relationships' => [
+                    'product' => [
+                        'data' => [
+                            'id' => (string) $product['id'],
+                            'type' => 'products',
+                        ],
+                    ],
+                ],
+            ];
+        }
+
+        $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
+        $description = trim((string) ($offer['subject'] ?? ''));
+        if ($description === '') {
+            $description = 'Hızlı Takip ve Teklif yenileme teklifi ' . ($offerNumber !== '' ? $offerNumber : '#' . (int) ($offer['id'] ?? 0));
+        } elseif ($offerNumber !== '' && !str_contains($description, $offerNumber)) {
+            $description = $offerNumber . ' - ' . $description;
+        }
+
+        $payload = [
+            'data' => [
+                'type' => 'sales_invoices',
+                'attributes' => [
+                    'item_type' => 'invoice',
+                    'description' => mb_substr($description, 0, 255),
+                    'issue_date' => date('Y-m-d'),
+                    'currency' => $currency,
+                    'invoice_note' => $this->salesInvoiceNote($offer, $payment),
+                ],
+                'relationships' => [
+                    'contact' => [
+                        'data' => [
+                            'id' => $contactId,
+                            'type' => 'contacts',
+                        ],
+                    ],
+                    'details' => [
+                        'data' => $details,
+                    ],
+                ],
+            ],
+        ];
+
+        $response = $this->request('POST', sprintf('/v4/%s/sales_invoices?include=details,contact', rawurlencode($companyId)), $payload);
+        $data = $response['data'] ?? [];
+        $attributes = is_array($data['attributes'] ?? null) ? $data['attributes'] : [];
+
+        return [
+            'id' => (string) ($data['id'] ?? ''),
+            'invoice_no' => (string) ($attributes['invoice_no'] ?? ''),
+            'net_total' => $attributes['net_total'] ?? null,
+            'gross_total' => $attributes['gross_total'] ?? null,
+            'raw' => $response,
+        ];
+    }
+
+    public function updateSalesInvoiceNote(string $invoiceId, string $note): array
+    {
+        $invoiceId = trim($invoiceId);
+        if ($invoiceId === '') {
+            throw new RuntimeException('Paraşüt fatura ID boş olamaz.');
+        }
+
+        $companyId = $this->companyId();
+        $payload = [
+            'data' => [
+                'id' => $invoiceId,
+                'type' => 'sales_invoices',
+                'attributes' => [
+                    'invoice_note' => mb_substr(trim($note), 0, 5000),
+                ],
+            ],
+        ];
+
+        $response = $this->request('PUT', sprintf('/v4/%s/sales_invoices/%s?include=details,contact', rawurlencode($companyId), rawurlencode($invoiceId)), $payload);
+        $data = $response['data'] ?? [];
+        $attributes = is_array($data['attributes'] ?? null) ? $data['attributes'] : [];
+
+        return [
+            'id' => (string) ($data['id'] ?? $invoiceId),
+            'invoice_no' => (string) ($attributes['invoice_no'] ?? ''),
+            'invoice_note' => (string) ($attributes['invoice_note'] ?? ''),
+            'raw' => $response,
+        ];
+    }
+
+    public function salesInvoiceNote(array $offer, ?array $payment = null): string
+    {
+        $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
+        $lines = [
+            'Bu fatura Hızlı Takip ve Teklif Platformu üzerinden onaylanan teklif ' . ($offerNumber !== '' ? $offerNumber : '#' . (int) ($offer['id'] ?? 0)) . ' için oluşturuldu.',
+        ];
+
+        $method = trim((string) (($offer['renewal_payment_method'] ?? '') ?: ($offer['payment_method'] ?? '')));
+        $provider = $payment !== null ? $this->paymentProviderLabel((string) ($payment['provider'] ?? '')) : '';
+        if ($method === '' && $provider !== '') {
+            $method = 'Kredi kartı / ' . $provider;
+        } elseif ($method !== '' && $provider !== '' && !str_contains(mb_strtolower($method, 'UTF-8'), mb_strtolower($provider, 'UTF-8'))) {
+            $method .= ' / ' . $provider;
+        }
+
+        if ($method !== '') {
+            $lines[] = 'Ödeme yöntemi: ' . $method;
+        }
+
+        if ($payment !== null && $payment !== []) {
+            $paymentId = trim((string) ($payment['payment_id'] ?? ''));
+            $conversationId = trim((string) ($payment['conversation_id'] ?? ''));
+            $paidAt = trim((string) (($payment['paid_at'] ?? '') ?: ($payment['updated_at'] ?? '') ?: ($payment['created_at'] ?? '')));
+            $amount = $this->formatPaymentAmount($payment);
+
+            if ($paymentId !== '') {
+                $lines[] = 'Ödeme ID: ' . $paymentId;
+            }
+            if (!empty($payment['id'])) {
+                $lines[] = 'Sistem ödeme kayıt no: #' . (int) $payment['id'];
+            }
+            if ($conversationId !== '') {
+                $lines[] = 'Ödeme numarası / Conversation ID: ' . $conversationId;
+            }
+            if ($paidAt !== '') {
+                $timestamp = strtotime($paidAt);
+                $lines[] = 'Ödeme tarihi: ' . ($timestamp !== false ? date('d.m.Y H:i:s', $timestamp) : $paidAt);
+            }
+            if ($amount !== '') {
+                $lines[] = 'Ödeme tutarı: ' . $amount;
+            }
+        }
+
+        return mb_substr(implode("\n", $lines), 0, 5000);
+    }
+
+    private function paymentProviderLabel(string $provider): string
+    {
+        return match (mb_strtolower(trim($provider), 'UTF-8')) {
+            'iyzico' => 'iyzico',
+            'paytr' => 'PayTR',
+            default => trim($provider),
+        };
+    }
+
+    private function formatPaymentAmount(array $payment): string
+    {
+        if (!isset($payment['amount']) || (float) $payment['amount'] <= 0) {
+            return '';
+        }
+
+        $currency = strtoupper(trim((string) ($payment['currency'] ?? 'TRY'))) ?: 'TRY';
+
+        return number_format((float) $payment['amount'], 2, ',', '.') . ' ' . $currency;
+    }
+
     private function contactSearchFilters(string $query): array
     {
         if (str_contains($query, '@')) {
@@ -403,6 +626,55 @@ final class ParasutClient
             'supplier' => 'Tedarikci',
             default => $accountType,
         };
+    }
+
+    private function mapProducts(array $items): array
+    {
+        $products = [];
+
+        foreach ($items as $product) {
+            if (!is_array($product)) {
+                continue;
+            }
+
+            $attrs = is_array($product['attributes'] ?? null) ? $product['attributes'] : [];
+            $currency = strtoupper(trim((string) ($attrs['currency'] ?? 'TRY')));
+            if ($currency === 'TRL' || $currency === 'TL') {
+                $currency = 'TRY';
+            }
+            if (!in_array($currency, ['TRY', 'USD', 'EUR'], true)) {
+                $currency = 'TRY';
+            }
+
+            $stockCount = $attrs['stock_count']
+                ?? $attrs['inventory_count']
+                ?? $attrs['available_stock_count']
+                ?? $attrs['remaining_stock_count']
+                ?? null;
+
+            $isArchived = !empty($attrs['archived'])
+                || !empty($attrs['is_archived'])
+                || (array_key_exists('is_active', $attrs) && empty($attrs['is_active']));
+
+            $products[] = [
+                'id' => (string) ($product['id'] ?? ''),
+                'name' => (string) ($attrs['name'] ?? ''),
+                'code' => (string) ($attrs['code'] ?? $attrs['item_code'] ?? ''),
+                'barcode' => (string) ($attrs['barcode'] ?? ''),
+                'brand' => (string) ($attrs['brand'] ?? ''),
+                'unit' => (string) ($attrs['unit'] ?? 'Adet'),
+                'currency' => $currency,
+                'list_price' => (float) ($attrs['list_price'] ?? $attrs['sales_price'] ?? 0),
+                'buying_price' => isset($attrs['buying_price']) ? (float) $attrs['buying_price'] : null,
+                'vat_rate' => (float) ($attrs['vat_rate'] ?? 20),
+                'inventory_tracking' => !empty($attrs['inventory_tracking']),
+                'stock_count' => $stockCount !== null ? (float) $stockCount : null,
+                'is_archived' => $isArchived,
+                'raw' => $product,
+            ];
+        }
+
+        return $products;
     }
 
     private function exportContacts(string $companyId): array
@@ -686,22 +958,99 @@ final class ParasutClient
         return (string) preg_replace('/[^a-z0-9]+/u', '', $this->normalizeSearch($value));
     }
 
-    private function request(string $method, string $path): array
+    private function findOrCreateProduct(string $name, float $vatRate, float $unitPrice, string $currency): array
+    {
+        $companyId = $this->companyId();
+        $query = http_build_query([
+            'filter[name]' => $name,
+            'page[number]' => 1,
+            'page[size]' => 10,
+        ]);
+        $response = $this->request('GET', sprintf('/v4/%s/products?%s', rawurlencode($companyId), $query));
+        $normalizedName = $this->normalizeSearch($name);
+        foreach (($response['data'] ?? []) as $product) {
+            $attrs = is_array($product['attributes'] ?? null) ? $product['attributes'] : [];
+            $productId = trim((string) ($product['id'] ?? ''));
+            if ($productId !== '' && $this->normalizeSearch((string) ($attrs['name'] ?? '')) === $normalizedName) {
+                return [
+                    'id' => $productId,
+                    'name' => (string) ($attrs['name'] ?? $name),
+                ];
+            }
+        }
+
+        $payload = [
+            'data' => [
+                'type' => 'products',
+                'attributes' => [
+                    'name' => $name,
+                    'vat_rate' => round($vatRate, 2),
+                    'unit' => 'Adet',
+                    'list_price' => round($unitPrice, 2),
+                    'currency' => $currency,
+                    'inventory_tracking' => false,
+                ],
+            ],
+        ];
+        $created = $this->request('POST', sprintf('/v4/%s/products', rawurlencode($companyId)), $payload);
+        $data = $created['data'] ?? [];
+        if (trim((string) ($data['id'] ?? '')) === '') {
+            throw new RuntimeException('Paraşüt ürün oluşturdu ancak ürün ID dönmedi.');
+        }
+
+        return [
+            'id' => (string) ($data['id'] ?? ''),
+            'name' => $name,
+        ];
+    }
+
+    private function request(string $method, string $path, ?array $payload = null): array
     {
         $accessToken = $this->accessToken();
-        $ch = curl_init($this->baseUrl() . $path);
-        curl_setopt_array($ch, [
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'Accept: application/json',
-                'Content-Type: application/json',
-                'Authorization: Bearer ' . $accessToken,
-            ],
-            CURLOPT_TIMEOUT => 20,
-        ]);
 
-        return $this->executeJson($ch);
+        return $this->performJsonRequest(function () use ($method, $path, $payload, $accessToken) {
+            $ch = curl_init($this->baseUrl() . $path);
+            $options = [
+                CURLOPT_CUSTOMREQUEST => $method,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => [
+                    'Accept: application/json',
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $accessToken,
+                ],
+                CURLOPT_TIMEOUT => 30,
+            ];
+            if ($payload !== null) {
+                $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+            curl_setopt_array($ch, $options);
+
+            return $ch;
+        }, 4);
+    }
+
+    private function companyId(): string
+    {
+        $token = $this->readToken();
+        $companyId = (string) ($token['company_id'] ?? '');
+        if ($companyId === '') {
+            throw new RuntimeException('Parasut firma ID tanimli degil.');
+        }
+
+        return $companyId;
+    }
+
+    private function parasutCurrency(string $currency): string
+    {
+        $currency = strtoupper(trim($currency));
+
+        return match ($currency) {
+            'TRY', 'TL', 'TRL' => 'TRL',
+            'USD' => 'USD',
+            'EUR' => 'EUR',
+            'GBP' => 'GBP',
+            default => 'TRL',
+        };
     }
 
     private function accessToken(): string
@@ -731,40 +1080,109 @@ final class ParasutClient
 
     private function postToken(array $fields): array
     {
-        $ch = curl_init($this->baseUrl() . '/oauth/token');
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $fields,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 20,
-            CURLOPT_HTTPHEADER => ['Accept: application/json'],
-        ]);
+        return $this->performJsonRequest(function () use ($fields) {
+            $ch = curl_init($this->baseUrl() . '/oauth/token');
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $fields,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_HTTPHEADER => ['Accept: application/json'],
+            ]);
 
-        return $this->executeJson($ch);
+            return $ch;
+        }, 2);
     }
 
-    private function executeJson($ch): array
+    private function performJsonRequest(callable $createHandle, int $maxAttempts = 3): array
     {
-        $body = curl_exec($ch);
-        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
+        $maxAttempts = max(1, $maxAttempts);
+        $lastMessage = 'Parasut API hata verdi.';
 
-        if ($body === false || $error !== '') {
-            throw new RuntimeException('Parasut API baglantisi basarisiz: ' . $error);
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $headers = [];
+            $ch = $createHandle();
+            curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($curl, string $header) use (&$headers): int {
+                $length = strlen($header);
+                $header = trim($header);
+                if ($header !== '' && str_contains($header, ':')) {
+                    [$name, $value] = explode(':', $header, 2);
+                    $headers[strtolower(trim($name))] = trim($value);
+                }
+
+                return $length;
+            });
+
+            $body = curl_exec($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            if ($body === false || $error !== '') {
+                $lastMessage = 'Parasut API baglantisi basarisiz: ' . $error;
+                if ($attempt < $maxAttempts) {
+                    sleep($this->retryDelaySeconds($headers, $error, $attempt));
+                    continue;
+                }
+
+                throw new RuntimeException($lastMessage);
+            }
+
+            $decoded = json_decode((string) $body, true);
+            if (!is_array($decoded)) {
+                $detail = trim(strip_tags((string) $body));
+                $lastMessage = $status >= 400 && $detail !== ''
+                    ? 'Parasut API hata verdi: ' . $detail
+                    : 'Parasut API gecersiz yanit dondu.';
+                if ($attempt < $maxAttempts && $this->shouldRetryParasutResponse($status, $detail)) {
+                    sleep($this->retryDelaySeconds($headers, $detail, $attempt));
+                    continue;
+                }
+
+                throw new RuntimeException($lastMessage);
+            }
+
+            if ($status >= 400) {
+                $detail = $decoded['error_description'] ?? $decoded['error'] ?? ($decoded['errors'][0]['detail'] ?? 'Bilinmeyen hata');
+                $detail = is_scalar($detail) ? (string) $detail : 'Bilinmeyen hata';
+                $lastMessage = 'Parasut API hata verdi: ' . $detail;
+                if ($attempt < $maxAttempts && $this->shouldRetryParasutResponse($status, $detail)) {
+                    sleep($this->retryDelaySeconds($headers, $detail, $attempt));
+                    continue;
+                }
+
+                throw new RuntimeException($lastMessage);
+            }
+
+            return $decoded;
         }
 
-        $decoded = json_decode((string) $body, true);
-        if (!is_array($decoded)) {
-            throw new RuntimeException('Parasut API gecersiz yanit dondu.');
+        throw new RuntimeException($lastMessage);
+    }
+
+    private function shouldRetryParasutResponse(int $status, string $detail): bool
+    {
+        $detail = mb_strtolower($detail, 'UTF-8');
+
+        return in_array($status, [429, 500, 502, 503, 504], true)
+            || str_contains($detail, 'try again')
+            || str_contains($detail, 'too many')
+            || str_contains($detail, 'rate limit')
+            || str_contains($detail, 'temporarily');
+    }
+
+    private function retryDelaySeconds(array $headers, string $detail, int $attempt): int
+    {
+        $retryAfter = trim((string) ($headers['retry-after'] ?? ''));
+        if (ctype_digit($retryAfter)) {
+            return max(1, min(30, (int) $retryAfter));
         }
 
-        if ($status >= 400) {
-            $detail = $decoded['error_description'] ?? $decoded['error'] ?? ($decoded['errors'][0]['detail'] ?? 'Bilinmeyen hata');
-            throw new RuntimeException('Parasut API hata verdi: ' . $detail);
+        if (preg_match('/try again in\s+(\d+)\s+seconds?/i', $detail, $matches)) {
+            return max(1, min(30, (int) $matches[1]));
         }
 
-        return $decoded;
+        return max(1, min(10, $attempt * 2));
     }
 
     private function normalizeToken(array $token): array

@@ -643,6 +643,238 @@
         syncCustomerOfferTotals();
     });
 
+    document.querySelectorAll('[data-offer-builder-form]').forEach((offerForm) => {
+        const currencySelect = offerForm.querySelector('[data-offer-builder-currency]');
+        const subtotalOutput = offerForm.querySelector('[data-offer-subtotal]');
+        const vatOutput = offerForm.querySelector('[data-offer-vat]');
+        const totalOutput = offerForm.querySelector('[data-offer-total]');
+        const list = offerForm.querySelector('[data-offer-line-list]');
+        const template = offerForm.querySelector('[data-offer-line-template]');
+        const addButton = offerForm.querySelector('[data-offer-add-line]');
+        const stockSearchUrl = offerForm.dataset.stockSearchUrl || '';
+        const stockList = document.getElementById('stock-item-options');
+        const stockCache = new Map();
+        let stockSearchTimer = null;
+        const numberValue = (input, fallback = 0) => {
+            const value = String(input?.value || '').replace(',', '.');
+            const parsed = Number(value);
+
+            return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const formatter = () => new Intl.NumberFormat('tr-TR', {
+            style: 'currency',
+            currency: currencySelect?.value || 'TRY',
+        });
+        const rows = () => Array.from(offerForm.querySelectorAll('[data-offer-line]'));
+        const optionDisplayValue = (item) => [item.name, item.code, item.brand].filter(Boolean).join(' | ');
+        const appendStockOptions = (items) => {
+            if (!stockList || !Array.isArray(items)) {
+                return;
+            }
+            const existingIds = new Set(Array.from(stockList.options).map((option) => option.dataset.stockId || ''));
+            items.forEach((item) => {
+                const id = String(item.id || '');
+                const name = String(item.name || '').trim();
+                if (!id || !name || existingIds.has(id)) {
+                    return;
+                }
+                const option = document.createElement('option');
+                option.value = optionDisplayValue(item) || name;
+                option.dataset.stockId = id;
+                option.dataset.title = name;
+                option.dataset.brand = String(item.brand || '');
+                option.dataset.description = item.code ? `Kod: ${item.code}` : '';
+                option.dataset.unitPrice = String(item.list_price ?? 0);
+                option.dataset.vatRate = String(item.vat_rate ?? 20);
+                option.dataset.currency = String(item.currency || 'TRY');
+                stockList.appendChild(option);
+                existingIds.add(id);
+            });
+        };
+        const stockOptionFor = (input) => {
+            if (!stockList || !input) {
+                return null;
+            }
+            const value = String(input.value || '').trim();
+            if (!value) {
+                return null;
+            }
+
+            return Array.from(stockList.options).find((option) => {
+                return option.value === value || option.dataset.title === value;
+            }) || null;
+        };
+        const applyStockSelection = (input) => {
+            const option = stockOptionFor(input);
+            const row = input.closest('[data-offer-line]');
+            if (!row) {
+                return false;
+            }
+
+            const stockInput = row.querySelector('[data-stock-item-id]');
+            if (!option) {
+                if (stockInput) {
+                    stockInput.value = '';
+                }
+                return false;
+            }
+
+            if (stockInput) {
+                stockInput.value = option.dataset.stockId || '';
+            }
+            input.value = option.dataset.title || input.value;
+
+            const brandInput = row.querySelector('[data-stock-brand]');
+            if (brandInput) {
+                brandInput.value = option.dataset.brand || '';
+            }
+            const descriptionInput = row.querySelector('[data-stock-description]');
+            if (descriptionInput && (!descriptionInput.value.trim() || descriptionInput.dataset.fromStock === '1')) {
+                descriptionInput.value = option.dataset.description || '';
+                descriptionInput.dataset.fromStock = '1';
+            }
+            const unitInput = row.querySelector('[data-offer-unit]');
+            if (unitInput) {
+                unitInput.value = Number(option.dataset.unitPrice || 0).toFixed(2);
+            }
+            const vatInput = row.querySelector('[data-offer-vat-rate]');
+            if (vatInput) {
+                vatInput.value = Number(option.dataset.vatRate || 20).toFixed(2);
+            }
+            if (currencySelect && option.dataset.currency) {
+                currencySelect.value = option.dataset.currency;
+            }
+
+            return true;
+        };
+        const searchStockItems = (input) => {
+            if (!stockSearchUrl) {
+                return;
+            }
+            const query = String(input.value || '').trim();
+            if (query.length < 2) {
+                return;
+            }
+            if (stockCache.has(query)) {
+                appendStockOptions(stockCache.get(query));
+                applyStockSelection(input);
+                return;
+            }
+
+            clearTimeout(stockSearchTimer);
+            stockSearchTimer = window.setTimeout(() => {
+                const url = `${stockSearchUrl}?q=${encodeURIComponent(query)}`;
+                fetch(url, { headers: { Accept: 'application/json' } })
+                    .then((response) => response.ok ? response.json() : null)
+                    .then((payload) => {
+                        const items = payload?.ok && Array.isArray(payload.data) ? payload.data : [];
+                        stockCache.set(query, items);
+                        appendStockOptions(items);
+                        applyStockSelection(input);
+                    })
+                    .catch(() => {});
+            }, 220);
+        };
+        const reindexRows = () => {
+            rows().forEach((row, index) => {
+                row.querySelectorAll('[name]').forEach((input) => {
+                    input.name = input.name.replace(/items\[[^\]]+\]/, `items[${index}]`);
+                });
+            });
+        };
+        const updateRemoveButtons = () => {
+            const count = rows().length;
+            rows().forEach((row) => {
+                const remove = row.querySelector('[data-offer-remove-line]');
+                if (remove) {
+                    remove.disabled = count <= 1;
+                }
+            });
+        };
+        const syncTotals = () => {
+            let subtotal = 0;
+            let vatTotal = 0;
+            let total = 0;
+            rows().forEach((row) => {
+                const quantity = Math.max(0, numberValue(row.querySelector('[data-offer-qty]'), 1));
+                const unit = Math.max(0, numberValue(row.querySelector('[data-offer-unit]'), 0));
+                const vatRate = Math.max(0, numberValue(row.querySelector('[data-offer-vat-rate]'), 0));
+                const lineSubtotal = quantity * unit;
+                const lineVat = lineSubtotal * (vatRate / 100);
+                const lineTotal = lineSubtotal + lineVat;
+                subtotal += lineSubtotal;
+                vatTotal += lineVat;
+                total += lineTotal;
+
+                const subtotalPreview = row.querySelector('[data-offer-line-subtotal]');
+                const totalPreview = row.querySelector('[data-offer-line-total]');
+                if (subtotalPreview) {
+                    subtotalPreview.textContent = formatter().format(lineSubtotal);
+                }
+                if (totalPreview) {
+                    totalPreview.textContent = formatter().format(lineTotal);
+                }
+            });
+
+            if (subtotalOutput) {
+                subtotalOutput.textContent = formatter().format(subtotal);
+            }
+            if (vatOutput) {
+                vatOutput.textContent = formatter().format(vatTotal);
+            }
+            if (totalOutput) {
+                totalOutput.textContent = formatter().format(total);
+            }
+            updateRemoveButtons();
+        };
+
+        addButton?.addEventListener('click', () => {
+            if (!list || !template) {
+                return;
+            }
+            const index = rows().length;
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = template.innerHTML.replaceAll('__INDEX__', String(index)).trim();
+            const row = wrapper.firstElementChild;
+            if (row) {
+                list.appendChild(row);
+                reindexRows();
+                syncTotals();
+            }
+        });
+
+        offerForm.addEventListener('click', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const remove = target?.closest('[data-offer-remove-line]');
+            if (!remove) {
+                return;
+            }
+            const row = remove.closest('[data-offer-line]');
+            if (row && rows().length > 1) {
+                row.remove();
+                reindexRows();
+                syncTotals();
+            }
+        });
+        offerForm.addEventListener('input', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.matches('[data-stock-title]')) {
+                searchStockItems(target);
+                applyStockSelection(target);
+            }
+            syncTotals();
+        });
+        offerForm.addEventListener('change', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.matches('[data-stock-title]')) {
+                applyStockSelection(target);
+            }
+            syncTotals();
+        });
+        reindexRows();
+        syncTotals();
+    });
+
     document.querySelectorAll('[data-supplier-quote-card]').forEach((quoteCard) => {
         const currencySelect = quoteCard.querySelector('[data-supplier-price-currency]');
         const quantity = Math.max(0, Number(String(quoteCard.dataset.quantity || '1').replace(',', '.')) || 1);
@@ -756,23 +988,34 @@
         const methodSelect = publicPaymentForm.querySelector('[data-public-payment-method]');
         const bankPanel = publicPaymentForm.querySelector('[data-bank-transfer-panel]');
         const receiptInput = publicPaymentForm.querySelector('[data-bank-transfer-receipt]');
+        const otherPanel = publicPaymentForm.querySelector('[data-other-payment-panel]');
+        const otherInput = publicPaymentForm.querySelector('[data-other-payment-input]');
         const isBankTransfer = (value) => {
             const normalized = String(value || '').toLocaleLowerCase('tr-TR');
 
             return normalized.includes('havale') || normalized.includes('eft');
         };
-        const syncBankTransferPanel = () => {
-            const active = isBankTransfer(methodSelect?.value);
+        const isOtherPayment = (value) => value === '__other_payment_terms__';
+        const syncPaymentPanels = () => {
+            const value = methodSelect?.value;
+            const otherActive = isOtherPayment(value);
+            const bankActive = isBankTransfer(value) && !otherActive;
             if (bankPanel) {
-                bankPanel.hidden = !active;
+                bankPanel.hidden = !bankActive;
             }
             if (receiptInput) {
-                receiptInput.required = active;
+                receiptInput.required = bankActive;
+            }
+            if (otherPanel) {
+                otherPanel.hidden = !otherActive;
+            }
+            if (otherInput) {
+                otherInput.required = otherActive;
             }
         };
 
-        methodSelect?.addEventListener('change', syncBankTransferPanel);
-        syncBankTransferPanel();
+        methodSelect?.addEventListener('change', syncPaymentPanels);
+        syncPaymentPanels();
     }
 
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
@@ -782,6 +1025,286 @@
         '"': '&quot;',
         "'": '&#039;',
     }[character]));
+
+    const normalizeSearchText = (value) => String(value || '')
+        .toLocaleLowerCase('tr-TR')
+        .replaceAll('ı', 'i')
+        .replaceAll('ğ', 'g')
+        .replaceAll('ü', 'u')
+        .replaceAll('ş', 's')
+        .replaceAll('ö', 'o')
+        .replaceAll('ç', 'c')
+        .replaceAll('İ', 'i')
+        .replaceAll('Ğ', 'g')
+        .replaceAll('Ü', 'u')
+        .replaceAll('Ş', 's')
+        .replaceAll('Ö', 'o')
+        .replaceAll('Ç', 'c')
+        .trim();
+
+    const offerCustomerSource = document.getElementById('offer-builder-customers-json');
+    let offerCustomers = [];
+    try {
+        offerCustomers = offerCustomerSource?.textContent ? JSON.parse(offerCustomerSource.textContent) : [];
+    } catch (error) {
+        offerCustomers = [];
+    }
+
+    document.querySelectorAll('[data-offer-builder-form]').forEach((form) => {
+        const input = form.querySelector('[data-offer-customer-input]');
+        const customerId = form.querySelector('[data-offer-customer-id]');
+        const email = form.querySelector('[data-offer-customer-email]');
+        const phone = form.querySelector('[data-offer-customer-phone]');
+        const results = form.querySelector('[data-offer-customer-results]');
+
+        if (!input || !results) {
+            return;
+        }
+
+        const customerContacts = (customer) => Array.isArray(customer?.contacts) ? customer.contacts : [];
+        const preferredContactValue = (customer, key) => {
+            const contacts = customerContacts(customer);
+            const preferred = contacts.find((contact) => contact.notify && String(contact[key] || '').trim() !== '')
+                || contacts.find((contact) => String(contact[key] || '').trim() !== '');
+
+            return preferred ? String(preferred[key] || '').trim() : '';
+        };
+        const closeResults = () => {
+            results.hidden = true;
+            results.innerHTML = '';
+        };
+        const customerSearchValue = (customer) => normalizeSearchText([
+            customer.name,
+            customer.email,
+            customer.phone,
+            customer.tax,
+            ...customerContacts(customer).flatMap((contact) => [
+                contact.name,
+                contact.email,
+                contact.phone,
+            ]),
+        ].join(' '));
+        const selectCustomer = (customer) => {
+            const customerName = String(customer.name || '');
+            const nextEmail = String(customer.email || '').trim() || preferredContactValue(customer, 'email');
+            const nextPhone = String(customer.phone || '').trim() || preferredContactValue(customer, 'phone');
+
+            input.value = customerName;
+            input.dataset.selectedCustomerId = String(customer.id || '');
+            if (customerId) {
+                customerId.value = String(customer.id || '');
+            }
+            if (email) {
+                email.value = nextEmail;
+            }
+            if (phone) {
+                phone.value = nextPhone;
+            }
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            closeResults();
+        };
+        const renderResults = () => {
+            const query = normalizeSearchText(input.value);
+            results.innerHTML = '';
+
+            if (input.dataset.selectedCustomerId && query !== '' && offerCustomers.some((customer) => String(customer.id || '') === input.dataset.selectedCustomerId && normalizeSearchText(customer.name || '') === query)) {
+                closeResults();
+                return;
+            }
+
+            if (!Array.isArray(offerCustomers) || offerCustomers.length < 1) {
+                results.innerHTML = '<div class="offer-customer-empty">Kayıtlı cari bulunamadı. Manuel yazabilirsiniz.</div>';
+                results.hidden = false;
+                return;
+            }
+
+            const matches = offerCustomers
+                .filter((customer) => query === '' || customerSearchValue(customer).includes(query))
+                .slice(0, 10);
+
+            if (matches.length < 1) {
+                results.innerHTML = '<div class="offer-customer-empty">Cari bulunamadı. Manuel yazmaya devam edebilirsiniz.</div>';
+                results.hidden = false;
+                return;
+            }
+
+            matches.forEach((customer) => {
+                const contacts = customerContacts(customer);
+                const meta = [
+                    customer.email || preferredContactValue(customer, 'email') || customer.phone || customer.tax || 'Cari',
+                    contacts.length > 0 ? `${contacts.length} yetkili` : '',
+                ].filter(Boolean).join(' · ');
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'offer-customer-result';
+                button.innerHTML = `
+                    <strong>${escapeHtml(customer.name || '-')}</strong>
+                    <span>${escapeHtml(meta)}</span>
+                `;
+                button.addEventListener('mousedown', (event) => {
+                    event.preventDefault();
+                    selectCustomer(customer);
+                });
+                button.addEventListener('click', () => selectCustomer(customer));
+                results.appendChild(button);
+            });
+            results.hidden = false;
+        };
+
+        input.addEventListener('input', () => {
+            input.dataset.selectedCustomerId = '';
+            if (customerId) {
+                customerId.value = '';
+            }
+            renderResults();
+        });
+        input.addEventListener('focus', renderResults);
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeResults();
+            }
+        });
+        document.addEventListener('click', (event) => {
+            if (!form.contains(event.target)) {
+                closeResults();
+            }
+        });
+    });
+
+    document.querySelectorAll('[data-manual-payment-form]').forEach((form) => {
+        const source = document.getElementById('manual-payment-customers-json');
+        let customers = [];
+        try {
+            customers = source?.textContent ? JSON.parse(source.textContent) : [];
+        } catch (error) {
+            customers = [];
+        }
+
+        const input = form.querySelector('[data-manual-customer-input]');
+        const customerId = form.querySelector('[data-manual-customer-id]');
+        const email = form.querySelector('[data-manual-customer-email]');
+        const phone = form.querySelector('[data-manual-customer-phone]');
+        const tax = form.querySelector('[data-manual-customer-tax]');
+        const results = form.querySelector('[data-manual-customer-results]');
+        const contactPanel = form.querySelector('[data-manual-contact-panel]');
+        const contactList = form.querySelector('[data-manual-contact-list]');
+        const contactCount = form.querySelector('[data-manual-contact-count]');
+
+        if (!input || !results || !customerId || !contactPanel || !contactList) {
+            return;
+        }
+
+        const renderContacts = (customer) => {
+            const contacts = Array.isArray(customer?.contacts) ? customer.contacts : [];
+            contactList.innerHTML = '';
+
+            if (contacts.length < 1) {
+                contactPanel.hidden = false;
+                contactList.innerHTML = '<div class="empty compact">Bu caride e-posta veya telefon bilgisi olan yetkili yok.</div>';
+                if (contactCount) {
+                    contactCount.textContent = '0 yetkili';
+                }
+                return;
+            }
+
+            contacts.forEach((contact) => {
+                const id = Number(contact.id || 0);
+                const name = String(contact.name || 'Yetkili');
+                const contactEmail = String(contact.email || '');
+                const contactPhone = String(contact.phone || '');
+                const checked = contact.notify ? 'checked' : '';
+                const badge = contact.notify ? '<span class="manual-payment-contact-badge">Bilgilendirme açık</span>' : '';
+                contactList.insertAdjacentHTML('beforeend', `
+                    <label class="manual-payment-contact-option">
+                        <input type="checkbox" name="selected_contact_ids[]" value="${id}" ${checked}>
+                        <span class="manual-payment-contact-info">
+                            <strong>${escapeHtml(name)}</strong>
+                            <em>${escapeHtml(contactEmail || contactPhone || '-')}</em>
+                        </span>
+                        ${badge}
+                    </label>
+                `);
+            });
+
+            contactPanel.hidden = false;
+            if (contactCount) {
+                contactCount.textContent = `${contacts.length} yetkili`;
+            }
+        };
+
+        const selectCustomer = (customer) => {
+            input.value = String(customer.name || '');
+            customerId.value = String(customer.id || '');
+            if (email && !email.value) {
+                email.value = String(customer.email || '');
+            }
+            if (phone && !phone.value) {
+                phone.value = String(customer.phone || '');
+            }
+            if (tax && !tax.value) {
+                tax.value = String(customer.tax || '');
+            }
+            results.hidden = true;
+            renderContacts(customer);
+        };
+
+        const renderResults = () => {
+            const query = normalizeSearchText(input.value);
+            results.innerHTML = '';
+
+            if (query === '') {
+                results.hidden = true;
+                return;
+            }
+
+            const matches = customers
+                .filter((customer) => {
+                    const haystack = normalizeSearchText([
+                        customer.name,
+                        customer.email,
+                        customer.phone,
+                        customer.tax,
+                    ].join(' '));
+
+                    return haystack.includes(query);
+                })
+                .slice(0, 8);
+
+            if (matches.length < 1) {
+                results.innerHTML = '<div class="manual-payment-customer-empty">Cari bulunamadı. Manuel yazmaya devam edebilirsiniz.</div>';
+                results.hidden = false;
+                return;
+            }
+
+            matches.forEach((customer) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'manual-payment-customer-result';
+                button.innerHTML = `
+                    <strong>${escapeHtml(customer.name || '-')}</strong>
+                    <span>${escapeHtml(customer.email || customer.phone || customer.tax || 'Cari')}</span>
+                `;
+                button.addEventListener('click', () => selectCustomer(customer));
+                results.appendChild(button);
+            });
+            results.hidden = false;
+        };
+
+        input.addEventListener('input', () => {
+            customerId.value = '';
+            contactPanel.hidden = true;
+            contactList.innerHTML = '';
+            renderResults();
+        });
+
+        input.addEventListener('focus', renderResults);
+
+        document.addEventListener('click', (event) => {
+            if (!form.contains(event.target)) {
+                results.hidden = true;
+            }
+        });
+    });
 
     const supplierLinkCard = (link) => {
         const url = String(link?.url || '');
