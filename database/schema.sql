@@ -54,6 +54,40 @@ CREATE TABLE login_ip_attempts (
     INDEX idx_login_ip_attempts_last_failed_at (last_failed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE login_email_attempts (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    email_address VARCHAR(190) NOT NULL,
+    last_ip VARCHAR(45) NULL,
+    failed_count INT UNSIGNED NOT NULL DEFAULT 0,
+    locked_until DATETIME NULL,
+    first_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_login_email_attempts_email (email_address),
+    INDEX idx_login_email_attempts_locked_until (locked_until),
+    INDEX idx_login_email_attempts_last_failed_at (last_failed_at),
+    INDEX idx_login_email_attempts_last_ip (last_ip)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE security_events (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    event_type VARCHAR(80) NOT NULL,
+    severity VARCHAR(20) NOT NULL DEFAULT 'info',
+    ip_address VARCHAR(45) NULL,
+    email VARCHAR(190) NULL,
+    user_id INT UNSIGNED NULL,
+    message TEXT NOT NULL,
+    context_json MEDIUMTEXT NULL,
+    user_agent VARCHAR(255) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_security_events_created (created_at),
+    INDEX idx_security_events_type_created (event_type, created_at),
+    INDEX idx_security_events_ip_created (ip_address, created_at),
+    INDEX idx_security_events_email_created (email, created_at),
+    INDEX idx_security_events_severity (severity, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE customers (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     parasut_contact_id VARCHAR(64) NULL,
@@ -572,6 +606,7 @@ CREATE TABLE sales_offers (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     offer_number VARCHAR(30) NULL,
     template_id INT UNSIGNED NULL,
+    customer_id INT UNSIGNED NULL,
     title VARCHAR(190) NOT NULL,
     customer_name VARCHAR(190) NOT NULL,
     customer_email VARCHAR(190) NULL,
@@ -582,14 +617,28 @@ CREATE TABLE sales_offers (
     vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
     total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
     notes TEXT NULL,
+    payment_request_enabled TINYINT(1) NOT NULL DEFAULT 0,
+    payment_request_percent DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+    payment_request_id INT UNSIGNED NULL,
+    balance_payment_request_id INT UNSIGNED NULL,
+    parasut_invoice_id VARCHAR(64) NULL,
+    parasut_invoice_no VARCHAR(120) NULL,
+    parasut_invoice_status VARCHAR(30) NULL,
+    parasut_invoice_error TEXT NULL,
+    parasut_invoice_created_at DATETIME NULL,
     created_by INT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
+    CONSTRAINT fk_sales_offers_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
     CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
     UNIQUE KEY uq_sales_offers_number (offer_number),
     INDEX idx_sales_offers_status (status, updated_at),
     INDEX idx_sales_offers_template (template_id),
+    INDEX idx_sales_offers_customer_id (customer_id),
+    INDEX idx_sales_offers_payment_request (payment_request_id),
+    INDEX idx_sales_offers_balance_payment_request (balance_payment_request_id),
+    INDEX idx_sales_offers_parasut_invoice (parasut_invoice_id),
     INDEX idx_sales_offers_customer (customer_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

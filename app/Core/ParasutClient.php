@@ -170,6 +170,8 @@ final class ParasutClient
             if ($totalPages !== null && $page >= $totalPages) {
                 break;
             }
+
+            usleep(350000);
         }
 
         return array_values($products);
@@ -1005,23 +1007,26 @@ final class ParasutClient
     private function request(string $method, string $path, ?array $payload = null): array
     {
         $accessToken = $this->accessToken();
-        $ch = curl_init($this->baseUrl() . $path);
-        $options = [
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'Accept: application/json',
-                'Content-Type: application/json',
-                'Authorization: Bearer ' . $accessToken,
-            ],
-            CURLOPT_TIMEOUT => 20,
-        ];
-        if ($payload !== null) {
-            $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        }
-        curl_setopt_array($ch, $options);
 
-        return $this->executeJson($ch);
+        return $this->performJsonRequest(function () use ($method, $path, $payload, $accessToken) {
+            $ch = curl_init($this->baseUrl() . $path);
+            $options = [
+                CURLOPT_CUSTOMREQUEST => $method,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => [
+                    'Accept: application/json',
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $accessToken,
+                ],
+                CURLOPT_TIMEOUT => 30,
+            ];
+            if ($payload !== null) {
+                $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+            curl_setopt_array($ch, $options);
+
+            return $ch;
+        }, 4);
     }
 
     private function companyId(): string
@@ -1075,40 +1080,109 @@ final class ParasutClient
 
     private function postToken(array $fields): array
     {
-        $ch = curl_init($this->baseUrl() . '/oauth/token');
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $fields,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 20,
-            CURLOPT_HTTPHEADER => ['Accept: application/json'],
-        ]);
+        return $this->performJsonRequest(function () use ($fields) {
+            $ch = curl_init($this->baseUrl() . '/oauth/token');
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $fields,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_HTTPHEADER => ['Accept: application/json'],
+            ]);
 
-        return $this->executeJson($ch);
+            return $ch;
+        }, 2);
     }
 
-    private function executeJson($ch): array
+    private function performJsonRequest(callable $createHandle, int $maxAttempts = 3): array
     {
-        $body = curl_exec($ch);
-        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
+        $maxAttempts = max(1, $maxAttempts);
+        $lastMessage = 'Parasut API hata verdi.';
 
-        if ($body === false || $error !== '') {
-            throw new RuntimeException('Parasut API baglantisi basarisiz: ' . $error);
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $headers = [];
+            $ch = $createHandle();
+            curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($curl, string $header) use (&$headers): int {
+                $length = strlen($header);
+                $header = trim($header);
+                if ($header !== '' && str_contains($header, ':')) {
+                    [$name, $value] = explode(':', $header, 2);
+                    $headers[strtolower(trim($name))] = trim($value);
+                }
+
+                return $length;
+            });
+
+            $body = curl_exec($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            if ($body === false || $error !== '') {
+                $lastMessage = 'Parasut API baglantisi basarisiz: ' . $error;
+                if ($attempt < $maxAttempts) {
+                    sleep($this->retryDelaySeconds($headers, $error, $attempt));
+                    continue;
+                }
+
+                throw new RuntimeException($lastMessage);
+            }
+
+            $decoded = json_decode((string) $body, true);
+            if (!is_array($decoded)) {
+                $detail = trim(strip_tags((string) $body));
+                $lastMessage = $status >= 400 && $detail !== ''
+                    ? 'Parasut API hata verdi: ' . $detail
+                    : 'Parasut API gecersiz yanit dondu.';
+                if ($attempt < $maxAttempts && $this->shouldRetryParasutResponse($status, $detail)) {
+                    sleep($this->retryDelaySeconds($headers, $detail, $attempt));
+                    continue;
+                }
+
+                throw new RuntimeException($lastMessage);
+            }
+
+            if ($status >= 400) {
+                $detail = $decoded['error_description'] ?? $decoded['error'] ?? ($decoded['errors'][0]['detail'] ?? 'Bilinmeyen hata');
+                $detail = is_scalar($detail) ? (string) $detail : 'Bilinmeyen hata';
+                $lastMessage = 'Parasut API hata verdi: ' . $detail;
+                if ($attempt < $maxAttempts && $this->shouldRetryParasutResponse($status, $detail)) {
+                    sleep($this->retryDelaySeconds($headers, $detail, $attempt));
+                    continue;
+                }
+
+                throw new RuntimeException($lastMessage);
+            }
+
+            return $decoded;
         }
 
-        $decoded = json_decode((string) $body, true);
-        if (!is_array($decoded)) {
-            throw new RuntimeException('Parasut API gecersiz yanit dondu.');
+        throw new RuntimeException($lastMessage);
+    }
+
+    private function shouldRetryParasutResponse(int $status, string $detail): bool
+    {
+        $detail = mb_strtolower($detail, 'UTF-8');
+
+        return in_array($status, [429, 500, 502, 503, 504], true)
+            || str_contains($detail, 'try again')
+            || str_contains($detail, 'too many')
+            || str_contains($detail, 'rate limit')
+            || str_contains($detail, 'temporarily');
+    }
+
+    private function retryDelaySeconds(array $headers, string $detail, int $attempt): int
+    {
+        $retryAfter = trim((string) ($headers['retry-after'] ?? ''));
+        if (ctype_digit($retryAfter)) {
+            return max(1, min(30, (int) $retryAfter));
         }
 
-        if ($status >= 400) {
-            $detail = $decoded['error_description'] ?? $decoded['error'] ?? ($decoded['errors'][0]['detail'] ?? 'Bilinmeyen hata');
-            throw new RuntimeException('Parasut API hata verdi: ' . $detail);
+        if (preg_match('/try again in\s+(\d+)\s+seconds?/i', $detail, $matches)) {
+            return max(1, min(30, (int) $matches[1]));
         }
 
-        return $decoded;
+        return max(1, min(10, $attempt * 2));
     }
 
     private function normalizeToken(array $token): array

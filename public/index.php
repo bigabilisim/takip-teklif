@@ -60,7 +60,7 @@ if (preg_match('#^/musteri-teklif/([a-f0-9]{64})$#', $path, $matches)) {
 }
 
 if (preg_match('#^/teklif/(\d+)$#', $path, $matches)) {
-    handle_sales_offer_public((int) $matches[1]);
+    handle_sales_offer_public($method, (int) $matches[1]);
     exit;
 }
 
@@ -142,6 +142,9 @@ try {
     } elseif ($path === '/settings/mail-logs') {
         require_permission('logs.view');
         render_logs();
+    } elseif ($path === '/settings/security-logs') {
+        require_permission('logs.view');
+        render_security_logs();
     } elseif ($path === '/api/parasut/contacts' && $method === 'GET') {
         handle_parasut_contacts_api();
     } elseif ($path === '/api/stock-items' && $method === 'GET') {
@@ -179,6 +182,12 @@ try {
     } elseif (preg_match('#^/offers/(\d+)/send-pdf$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_sales_offer_mail($repo, (int) $matches[1], 'pdf');
+    } elseif (preg_match('#^/offers/(\d+)/collect-balance$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_sales_offer_collect_balance($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/offers/(\d+)/parasut-invoice$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_sales_offer_parasut_invoice($repo, (int) $matches[1]);
     } elseif (preg_match('#^/offers/(\d+)/edit$#', $path, $matches)) {
         require_permission('renewals.manage');
         handle_sales_offer_create($repo, $method, (int) $matches[1]);
@@ -684,19 +693,10 @@ function handle_payment_request_mail(int $requestId): void
             throw new RuntimeException('Mail göndermek için geçerli bir e-posta adresi yazın.');
         }
 
-        $paymentUrl = manual_payment_request_url($request);
         $message = trim((string) ($_POST['message'] ?? ''));
-        if ($message === '') {
-            $message = payment_request_default_message($request);
-        }
-
-        $subject = mb_substr('Ödeme talebi: ' . (string) ($request['title'] ?? 'Manuel ödeme'), 0, 240);
-        $body = payment_request_mail_body($request, $message, $paymentUrl);
-        $result = Mailer::sendWithResult($email, $subject, $body, true);
+        $result = send_payment_request_mail_message($repo, $request, $email, $message);
         $ok = !empty($result['ok']);
         $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
-
-        $repo->logDelivery($requestId, 'mail', $email, $subject, $body, $ok ? 'sent' : 'failed', $error);
 
         if ($ok) {
             flash('success', 'Ödeme talebi mail olarak gönderildi.');
@@ -708,6 +708,37 @@ function handle_payment_request_mail(int $requestId): void
     }
 
     redirect('/payment-requests?created=' . $requestId);
+}
+
+function send_payment_request_mail_message(PaymentRequestRepository $repo, array $request, string $email = '', string $message = ''): array
+{
+    $requestId = (int) ($request['id'] ?? 0);
+    $email = trim(mb_strtolower($email !== '' ? $email : (string) ($request['customer_email'] ?? '')));
+    if ($requestId <= 0) {
+        throw new RuntimeException('Ödeme talebi kaydı okunamadı.');
+    }
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        throw new RuntimeException('Mail göndermek için geçerli bir e-posta adresi yazın.');
+    }
+
+    $paymentUrl = manual_payment_request_url($request);
+    $message = trim($message) !== '' ? trim($message) : payment_request_default_message($request);
+    $subject = mb_substr('Ödeme talebi: ' . (string) ($request['title'] ?? 'Manuel ödeme'), 0, 240);
+    $body = payment_request_mail_body($request, $message, $paymentUrl);
+    $result = Mailer::sendWithResult($email, $subject, $body, true);
+    $ok = !empty($result['ok']);
+    $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+
+    $repo->logDelivery($requestId, 'mail', $email, $subject, (string) ($result['body'] ?? $body), $ok ? 'sent' : 'failed', $error);
+
+    return [
+        'ok' => $ok,
+        'error' => $error,
+        'recipient' => $email,
+        'subject' => $subject,
+        'body' => (string) ($result['body'] ?? $body),
+        'payment_url' => $paymentUrl,
+    ];
 }
 
 function handle_manual_renewal_notification(RenewalRepository $repo, int $renewalId): void
@@ -4551,27 +4582,87 @@ function handle_login(string $method): void
 
     $error = null;
     $exchangeRates = ExchangeRates::latest();
+    $showChallenge = !empty($_SESSION['login_challenge_required']);
+    $challengeSettings = login_security_settings();
 
     if ($method === 'POST') {
         verify_csrf();
         $email = trim((string) ($_POST['email'] ?? ''));
         $password = (string) ($_POST['password'] ?? '');
+        $emailKey = normalize_login_email($email);
 
         try {
             $ipAddress = login_client_ip();
-            $lock = login_ip_lock_status($ipAddress);
-            if ($lock !== null) {
-                $error = 'Bu IP adresi geçici olarak kilitlendi. Kalan süre: ' . human_login_lock_remaining($lock) . '.';
+            $ipLock = login_ip_lock_status($ipAddress);
+            $emailLock = $emailKey !== '' ? login_email_lock_status($emailKey) : null;
+
+            if ($ipLock !== null) {
+                $error = 'Bu IP adresi geçici olarak kilitlendi. Kalan süre: ' . human_login_lock_remaining($ipLock) . '.';
+                log_security_event('login_blocked_ip', 'warning', 'Kilitli IP adresinden giriş denemesi engellendi.', [
+                    'ip_address' => $ipAddress,
+                    'email' => $emailKey,
+                    'locked_until' => $ipLock->format('Y-m-d H:i:s'),
+                ], true);
+            } elseif ($emailLock !== null) {
+                $error = 'Bu e-posta adresi için çok fazla hatalı deneme var. Kalan süre: ' . human_login_lock_remaining($emailLock) . '.';
+                log_security_event('login_blocked_email', 'warning', 'Kilitli e-posta adresiyle giriş denemesi engellendi.', [
+                    'ip_address' => $ipAddress,
+                    'email' => $emailKey,
+                    'locked_until' => $emailLock->format('Y-m-d H:i:s'),
+                ], true);
+            } elseif ($showChallenge && login_security_challenge_enabled($challengeSettings) && !verify_login_security_challenge($ipAddress, $challengeSettings)) {
+                $error = 'Güvenlik doğrulamasını doğru tamamlayın.';
+                require_login_security_challenge(true);
+                log_security_event('login_challenge_failed', 'warning', 'Şüpheli girişte güvenlik doğrulaması başarısız oldu.', [
+                    'ip_address' => $ipAddress,
+                    'email' => $emailKey,
+                ], true);
             } elseif (Auth::attempt($email, $password)) {
                 clear_login_ip_attempts($ipAddress);
+                if ($emailKey !== '') {
+                    clear_login_email_attempts($emailKey);
+                }
+                clear_login_security_challenge();
+                log_security_event('login_success', 'info', 'Kullanıcı panele giriş yaptı.', [
+                    'ip_address' => $ipAddress,
+                    'email' => $emailKey,
+                ], false);
                 flash('success', 'Hos geldiniz.');
                 redirect(first_allowed_path() ?? '/');
             } else {
-                $attempt = record_failed_login_ip_attempt($ipAddress, $email);
-                if ($attempt['locked']) {
-                    $error = (int) $attempt['failed_count'] >= 10
+                $ipAttempt = record_failed_login_ip_attempt($ipAddress, $email);
+                $emailAttempt = $emailKey !== ''
+                    ? record_failed_login_email_attempt($emailKey, $ipAddress)
+                    : ['failed_count' => 0, 'locked' => false, 'locked_until' => null];
+                require_login_security_challenge();
+
+                log_security_event('login_failed', 'warning', 'Hatalı kullanıcı girişi denemesi.', [
+                    'ip_address' => $ipAddress,
+                    'email' => $emailKey,
+                    'ip_failed_count' => $ipAttempt['failed_count'],
+                    'email_failed_count' => $emailAttempt['failed_count'],
+                ], false);
+
+                if ($ipAttempt['locked']) {
+                    log_security_event('login_ip_locked', 'critical', 'IP adresi hatalı girişler nedeniyle kilitlendi.', [
+                        'ip_address' => $ipAddress,
+                        'email' => $emailKey,
+                        'failed_count' => $ipAttempt['failed_count'],
+                        'locked_until' => $ipAttempt['locked_until'],
+                    ], true);
+                    $error = (int) $ipAttempt['failed_count'] >= 10
                         ? '10 hatalı giriş nedeniyle bu IP adresi 1 gün kilitlendi.'
                         : '2 hatalı giriş nedeniyle bu IP adresi 10 dakika kilitlendi.';
+                } elseif ($emailAttempt['locked']) {
+                    log_security_event('login_email_locked', 'critical', 'E-posta adresi çoklu hatalı girişler nedeniyle kilitlendi.', [
+                        'ip_address' => $ipAddress,
+                        'email' => $emailKey,
+                        'failed_count' => $emailAttempt['failed_count'],
+                        'locked_until' => $emailAttempt['locked_until'],
+                    ], true);
+                    $error = (int) $emailAttempt['failed_count'] >= 10
+                        ? '10 hatalı giriş nedeniyle bu e-posta adresi 1 gün kilitlendi.'
+                        : '5 hatalı giriş nedeniyle bu e-posta adresi 30 dakika kilitlendi.';
                 } else {
                     $error = 'E-posta veya şifre hatalı.';
                 }
@@ -4579,9 +4670,11 @@ function handle_login(string $method): void
         } catch (Throwable $e) {
             $error = 'Veritabanı bağlantısı kurulamadı. Kurulum adımlarını kontrol edin.';
         }
+
+        $showChallenge = !empty($_SESSION['login_challenge_required']);
     }
 
-    render_public_layout('Giris', static function () use ($error, $exchangeRates): void {
+    render_public_layout('Giris', static function () use ($error, $exchangeRates, $showChallenge, $challengeSettings): void {
         ?>
         <section class="login-panel">
             <div class="login-heading">
@@ -4604,6 +4697,9 @@ function handle_login(string $method): void
                     Şifre
                     <input type="password" name="password" value="" required>
                 </label>
+                <?php if ($showChallenge && login_security_challenge_enabled($challengeSettings)): ?>
+                    <?= render_login_security_challenge($challengeSettings) ?>
+                <?php endif; ?>
                 <button type="submit" class="button primary">Panele giriş yap</button>
                 <a class="login-help-link" href="<?= h(url('/forgot-password')) ?>">
                     <?= login_fish_icon('login-help-icon') ?>
@@ -4627,6 +4723,167 @@ function login_client_ip(): string
     return $ip !== '' ? substr($ip, 0, 45) : '0.0.0.0';
 }
 
+function normalize_login_email(string $email): string
+{
+    $email = strtolower(trim($email));
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return '';
+    }
+
+    return substr($email, 0, 190);
+}
+
+function login_security_settings(): array
+{
+    static $settings = null;
+    if ($settings !== null) {
+        return $settings;
+    }
+
+    try {
+        $settings = (new SettingsRepository())->all();
+    } catch (Throwable) {
+        $settings = SettingsRepository::defaults();
+    }
+
+    return $settings;
+}
+
+function login_security_challenge_enabled(array $settings): bool
+{
+    return (string) ($settings['security.challenge.enabled'] ?? '1') === '1';
+}
+
+function login_turnstile_configured(array $settings): bool
+{
+    return trim((string) ($settings['security.turnstile.site_key'] ?? '')) !== ''
+        && trim((string) ($settings['security.turnstile.secret_key'] ?? '')) !== '';
+}
+
+function require_login_security_challenge(bool $refresh = false): void
+{
+    $_SESSION['login_challenge_required'] = 1;
+    if ($refresh) {
+        unset($_SESSION['login_math_challenge']);
+    }
+}
+
+function clear_login_security_challenge(): void
+{
+    unset($_SESSION['login_challenge_required'], $_SESSION['login_math_challenge']);
+}
+
+function login_math_challenge(): array
+{
+    $challenge = $_SESSION['login_math_challenge'] ?? null;
+    if (
+        !is_array($challenge)
+        || (int) ($challenge['expires_at'] ?? 0) < time()
+        || trim((string) ($challenge['question'] ?? '')) === ''
+        || trim((string) ($challenge['answer'] ?? '')) === ''
+    ) {
+        $a = random_int(4, 14);
+        $b = random_int(3, 12);
+        $challenge = [
+            'question' => $a . ' + ' . $b,
+            'answer' => (string) ($a + $b),
+            'expires_at' => time() + 600,
+        ];
+        $_SESSION['login_math_challenge'] = $challenge;
+    }
+
+    return $challenge;
+}
+
+function render_login_security_challenge(array $settings): string
+{
+    ob_start();
+    ?>
+    <div class="login-security-box">
+        <strong>Güvenlik doğrulaması</strong>
+        <span>Hatalı deneme algılandı. Devam etmek için doğrulamayı tamamlayın.</span>
+        <?php if (login_turnstile_configured($settings)): ?>
+            <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+            <div class="cf-turnstile" data-sitekey="<?= h((string) $settings['security.turnstile.site_key']) ?>"></div>
+        <?php else: ?>
+            <?php $challenge = login_math_challenge(); ?>
+            <label>
+                <?= h((string) $challenge['question']) ?> sonucu
+                <input name="security_answer" inputmode="numeric" autocomplete="off" required>
+            </label>
+        <?php endif; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function verify_login_security_challenge(string $ipAddress, array $settings): bool
+{
+    if (login_turnstile_configured($settings)) {
+        return verify_turnstile_challenge((string) ($_POST['cf-turnstile-response'] ?? ''), $ipAddress, (string) $settings['security.turnstile.secret_key']);
+    }
+
+    $challenge = $_SESSION['login_math_challenge'] ?? [];
+    if (!is_array($challenge) || (int) ($challenge['expires_at'] ?? 0) < time()) {
+        return false;
+    }
+
+    $posted = preg_replace('/\D+/', '', (string) ($_POST['security_answer'] ?? '')) ?? '';
+    $expected = preg_replace('/\D+/', '', (string) ($challenge['answer'] ?? '')) ?? '';
+
+    return $posted !== '' && $expected !== '' && hash_equals($expected, $posted);
+}
+
+function verify_turnstile_challenge(string $token, string $ipAddress, string $secret): bool
+{
+    $token = trim($token);
+    $secret = trim($secret);
+    if ($token === '' || $secret === '') {
+        return false;
+    }
+
+    $payload = http_build_query([
+        'secret' => $secret,
+        'response' => $token,
+        'remoteip' => $ipAddress,
+    ]);
+
+    try {
+        if (function_exists('curl_init')) {
+            $ch = curl_init('https://challenges.cloudflare.com/turnstile/v0/siteverify');
+            if ($ch === false) {
+                return false;
+            }
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $payload,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 8,
+                CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+            ]);
+            $response = curl_exec($ch);
+            curl_close($ch);
+        } else {
+            $context = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/x-www-form-urlencoded\r\n",
+                    'content' => $payload,
+                    'timeout' => 8,
+                ],
+            ]);
+            $response = file_get_contents('https://challenges.cloudflare.com/turnstile/v0/siteverify', false, $context);
+        }
+    } catch (Throwable) {
+        return false;
+    }
+
+    $decoded = json_decode((string) $response, true);
+
+    return is_array($decoded) && !empty($decoded['success']);
+}
+
 function ensure_login_ip_attempts_schema(): void
 {
     static $ensured = false;
@@ -4648,6 +4905,44 @@ function ensure_login_ip_attempts_schema(): void
             UNIQUE KEY uq_login_ip_attempts_ip (ip_address),
             INDEX idx_login_ip_attempts_locked_until (locked_until),
             INDEX idx_login_ip_attempts_last_failed_at (last_failed_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    Database::connection()->exec(
+        "CREATE TABLE IF NOT EXISTS login_email_attempts (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            email_address VARCHAR(190) NOT NULL,
+            last_ip VARCHAR(45) NULL,
+            failed_count INT UNSIGNED NOT NULL DEFAULT 0,
+            locked_until DATETIME NULL,
+            first_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_login_email_attempts_email (email_address),
+            INDEX idx_login_email_attempts_locked_until (locked_until),
+            INDEX idx_login_email_attempts_last_failed_at (last_failed_at),
+            INDEX idx_login_email_attempts_last_ip (last_ip)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    Database::connection()->exec(
+        "CREATE TABLE IF NOT EXISTS security_events (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            event_type VARCHAR(80) NOT NULL,
+            severity VARCHAR(20) NOT NULL DEFAULT 'info',
+            ip_address VARCHAR(45) NULL,
+            email VARCHAR(190) NULL,
+            user_id INT UNSIGNED NULL,
+            message TEXT NOT NULL,
+            context_json MEDIUMTEXT NULL,
+            user_agent VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_security_events_created (created_at),
+            INDEX idx_security_events_type_created (event_type, created_at),
+            INDEX idx_security_events_ip_created (ip_address, created_at),
+            INDEX idx_security_events_email_created (email, created_at),
+            INDEX idx_security_events_severity (severity, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
     );
 
@@ -4710,12 +5005,76 @@ function record_failed_login_ip_attempt(string $ipAddress, string $email): array
     ];
 }
 
+function login_email_lock_status(string $email): ?DateTimeImmutable
+{
+    ensure_login_ip_attempts_schema();
+
+    $stmt = Database::connection()->prepare(
+        'SELECT locked_until FROM login_email_attempts WHERE email_address = :email_address AND locked_until > NOW() LIMIT 1'
+    );
+    $stmt->execute(['email_address' => $email]);
+    $lockedUntil = $stmt->fetchColumn();
+
+    if (!$lockedUntil) {
+        return null;
+    }
+
+    return new DateTimeImmutable((string) $lockedUntil);
+}
+
+function record_failed_login_email_attempt(string $email, string $ipAddress): array
+{
+    ensure_login_ip_attempts_schema();
+
+    $stmt = Database::connection()->prepare(
+        "INSERT INTO login_email_attempts
+            (email_address, last_ip, failed_count, locked_until, first_failed_at, last_failed_at)
+         VALUES
+            (:email_address, :last_ip, 1, NULL, NOW(), NOW())
+         ON DUPLICATE KEY UPDATE
+            last_ip = VALUES(last_ip),
+            failed_count = failed_count + 1,
+            locked_until = CASE
+                WHEN failed_count + 1 >= 10 THEN DATE_ADD(NOW(), INTERVAL 1 DAY)
+                WHEN failed_count + 1 >= 5 THEN DATE_ADD(NOW(), INTERVAL 30 MINUTE)
+                ELSE locked_until
+            END,
+            last_failed_at = NOW(),
+            updated_at = NOW()"
+    );
+    $stmt->execute([
+        'email_address' => $email,
+        'last_ip' => $ipAddress,
+    ]);
+
+    $status = Database::connection()->prepare(
+        'SELECT failed_count, locked_until FROM login_email_attempts WHERE email_address = :email_address LIMIT 1'
+    );
+    $status->execute(['email_address' => $email]);
+    $row = $status->fetch() ?: ['failed_count' => 1, 'locked_until' => null];
+    $lockedUntil = (string) ($row['locked_until'] ?? '');
+
+    return [
+        'failed_count' => (int) ($row['failed_count'] ?? 1),
+        'locked' => $lockedUntil !== '' && new DateTimeImmutable($lockedUntil) > new DateTimeImmutable('now'),
+        'locked_until' => $lockedUntil,
+    ];
+}
+
 function clear_login_ip_attempts(string $ipAddress): void
 {
     ensure_login_ip_attempts_schema();
 
     $stmt = Database::connection()->prepare('DELETE FROM login_ip_attempts WHERE ip_address = :ip_address');
     $stmt->execute(['ip_address' => $ipAddress]);
+}
+
+function clear_login_email_attempts(string $email): void
+{
+    ensure_login_ip_attempts_schema();
+
+    $stmt = Database::connection()->prepare('DELETE FROM login_email_attempts WHERE email_address = :email_address');
+    $stmt->execute(['email_address' => $email]);
 }
 
 function human_login_lock_remaining(DateTimeImmutable $lockedUntil): string
@@ -4729,6 +5088,132 @@ function human_login_lock_remaining(DateTimeImmutable $lockedUntil): string
 
     $minutes = (int) ceil($seconds / 60);
     return $minutes . ' dakika';
+}
+
+function log_security_event(string $eventType, string $severity, string $message, array $context = [], bool $notify = false): void
+{
+    try {
+        ensure_login_ip_attempts_schema();
+
+        $ipAddress = substr(trim((string) ($context['ip_address'] ?? login_client_ip())), 0, 45);
+        $email = normalize_login_email((string) ($context['email'] ?? ''));
+        $userId = isset($context['user_id'])
+            ? (int) $context['user_id']
+            : (!empty($_SESSION['user_id']) ? (int) $_SESSION['user_id'] : null);
+        $contextJson = $context !== []
+            ? json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            : null;
+
+        $stmt = Database::connection()->prepare(
+            'INSERT INTO security_events
+                (event_type, severity, ip_address, email, user_id, message, context_json, user_agent, created_at)
+             VALUES
+                (:event_type, :severity, :ip_address, :email, :user_id, :message, :context_json, :user_agent, NOW())'
+        );
+        $stmt->execute([
+            'event_type' => substr($eventType, 0, 80),
+            'severity' => in_array($severity, ['info', 'warning', 'critical'], true) ? $severity : 'info',
+            'ip_address' => $ipAddress !== '' ? $ipAddress : null,
+            'email' => $email !== '' ? $email : null,
+            'user_id' => $userId,
+            'message' => $message,
+            'context_json' => $contextJson,
+            'user_agent' => substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
+        ]);
+
+        if ($notify && security_notifications_enabled() && security_notification_allowed($eventType, $ipAddress, $email)) {
+            notify_security_event($eventType, $severity, $message, $ipAddress, $email, $context);
+        }
+    } catch (Throwable $e) {
+        error_log('Güvenlik olayı kaydedilemedi: ' . $e->getMessage());
+    }
+}
+
+function security_notifications_enabled(): bool
+{
+    $settings = login_security_settings();
+
+    return (string) ($settings['security.notify.enabled'] ?? '1') === '1';
+}
+
+function security_notification_allowed(string $eventType, string $ipAddress, string $email): bool
+{
+    try {
+        $stmt = Database::connection()->prepare(
+            'SELECT COUNT(*)
+             FROM security_events
+             WHERE event_type = :event_type
+               AND COALESCE(ip_address, "") = :ip_address
+               AND COALESCE(email, "") = :email
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)'
+        );
+        $stmt->execute([
+            'event_type' => $eventType,
+            'ip_address' => $ipAddress,
+            'email' => $email,
+        ]);
+
+        return (int) $stmt->fetchColumn() <= 1;
+    } catch (Throwable) {
+        return true;
+    }
+}
+
+function notify_security_event(string $eventType, string $severity, string $message, string $ipAddress, string $email, array $context): void
+{
+    $label = security_event_label($eventType);
+    $emailLabel = $email !== '' ? $email : 'e-posta yok';
+    $body = $label . ' · ' . $emailLabel . ' · IP: ' . ($ipAddress !== '' ? $ipAddress : '-');
+
+    try {
+        send_internal_push_notification('Şüpheli giriş denemesi', $body, '/settings/security-logs');
+    } catch (Throwable $e) {
+        error_log('Güvenlik push bildirimi gönderilemedi: ' . $e->getMessage());
+    }
+
+    try {
+        send_internal_mail_notification(
+            'Şüpheli giriş denemesi: ' . $label,
+            security_event_mail_body($label, $severity, $message, $ipAddress, $email, $context)
+        );
+    } catch (Throwable $e) {
+        error_log('Güvenlik mail bildirimi gönderilemedi: ' . $e->getMessage());
+    }
+}
+
+function security_event_mail_body(string $label, string $severity, string $message, string $ipAddress, string $email, array $context): string
+{
+    $rows = [
+        'Olay' => $label,
+        'Seviye' => security_severity_label($severity),
+        'E-posta' => $email !== '' ? $email : '-',
+        'IP adresi' => $ipAddress !== '' ? $ipAddress : '-',
+        'Tarih' => date('d.m.Y H:i'),
+        'Mesaj' => $message,
+    ];
+    if (!empty($context['failed_count'])) {
+        $rows['Hatalı deneme'] = (string) $context['failed_count'];
+    }
+    if (!empty($context['locked_until'])) {
+        $rows['Kilit bitişi'] = (string) $context['locked_until'];
+    }
+
+    $htmlRows = '';
+    foreach ($rows as $key => $value) {
+        $htmlRows .= '<tr><td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;">' . h($key) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:800;">' . h((string) $value) . '</td></tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+        . '<table role="presentation" width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="padding:28px;">'
+        . '<p style="margin:0 0 8px;color:#b42318;font-size:13px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">Güvenlik bildirimi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#17201c;">Şüpheli giriş denemesi.</h1>'
+        . '<p style="margin:0 0 20px;color:#607069;font-size:16px;line-height:1.5;">Panel girişinde otomatik güvenlik kuralı tetiklendi.</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 22px;">' . $htmlRows . '</table>'
+        . '<a href="' . h(url('/settings/security-logs')) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;font-weight:800;padding:13px 18px;border-radius:8px;">Güvenlik loglarını aç</a>'
+        . '</td></tr></table></td></tr></table></body></html>';
 }
 
 function handle_forgot_password(string $method): void
@@ -6064,7 +6549,7 @@ function report_amounts_text(array $amounts): string
     ));
 }
 
-function handle_sales_offer_public(int $offerId): void
+function handle_sales_offer_public(string $method, int $offerId): void
 {
     $mode = sales_offer_public_mode($_GET['mode'] ?? 'view');
     $expires = (string) ($_GET['expires'] ?? '');
@@ -6076,6 +6561,10 @@ function handle_sales_offer_public(int $offerId): void
         return;
     }
 
+    if ($method === 'POST') {
+        verify_csrf();
+    }
+
     $repo = new RenewalRepository();
     $offer = $repo->findSalesOffer($offerId);
     if (!$offer) {
@@ -6085,7 +6574,22 @@ function handle_sales_offer_public(int $offerId): void
         return;
     }
 
-    render_sales_offer_document($offer, $mode === 'pdf', true);
+    if ($method === 'POST' && (string) ($_POST['action'] ?? '') === 'approve_sales_offer') {
+        try {
+            $paymentUrl = approve_sales_offer_and_payment_request($repo, $offer);
+            if ($paymentUrl !== '') {
+                redirect($paymentUrl);
+            }
+
+            $offer = $repo->findSalesOffer($offerId) ?: $offer;
+        } catch (Throwable $e) {
+            render_sales_offer_document($offer, false, true, null, $e->getMessage());
+            return;
+        }
+    }
+
+    $paymentRequest = sales_offer_payment_request($offer);
+    render_sales_offer_document($offer, $mode === 'pdf', true, $paymentRequest);
 }
 
 function handle_sales_offer_preview(RenewalRepository $repo, int $offerId, bool $autoPrint): void
@@ -6107,59 +6611,370 @@ function handle_sales_offer_whatsapp(RenewalRepository $repo, int $offerId): voi
         redirect('/');
     }
 
-    $phone = whatsapp_number_from_phone((string) ($offer['customer_phone'] ?? ''));
+    $mode = sales_offer_public_mode($_GET['mode'] ?? 'view');
+    $phone = whatsapp_number_from_phone((string) ($_GET['phone'] ?? ($offer['customer_phone'] ?? '')));
     if ($phone === null) {
-        flash('error', 'WhatsApp göndermek için teklif üzerindeki müşteri telefon numarası eksik veya geçersiz.');
-        redirect('/');
+        flash('error', 'WhatsApp göndermek için seçili yetkilinin telefon numarası eksik veya geçersiz.');
+        redirect(safe_return_path($_GET['return_to'] ?? '/'));
     }
 
     $repo->markSalesOfferSent($offerId);
-    header('Location: ' . whatsapp_web_url($phone, sales_offer_whatsapp_message($offer, sales_offer_public_url($offerId))));
+    header('Location: ' . whatsapp_web_url($phone, sales_offer_whatsapp_message($offer, sales_offer_public_url($offerId, $mode))));
     exit;
 }
 
 function handle_sales_offer_mail(RenewalRepository $repo, int $offerId, string $mode): void
 {
     verify_csrf();
-    $mode = sales_offer_public_mode($mode);
+    $mode = sales_offer_public_mode($_POST['offer_send_mode'] ?? $mode);
     $offer = $repo->findSalesOffer($offerId);
     if (!$offer) {
         flash('error', 'Teklif bulunamadı.');
         redirect('/');
     }
 
-    $email = trim((string) ($offer['customer_email'] ?? ''));
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        flash('error', 'E-posta göndermek için teklif üzerinde geçerli müşteri e-posta adresi olmalı.');
-        redirect('/');
+    $recipients = sales_offer_mail_recipients_from_request($offer);
+    if ($recipients === []) {
+        flash('error', 'E-posta göndermek için en az bir alıcı seçin veya manuel alıcı yazın.');
+        redirect(safe_return_path($_POST['return_to'] ?? '/'));
     }
 
     $url = sales_offer_public_url($offerId, $mode);
     $offerNumber = sales_offer_number($offer);
-    $subject = '[' . $offerNumber . '] ' . ($mode === 'pdf' ? 'PDF teklif çıktınız' : 'Teklifiniz hazır') . ': ' . (string) ($offer['title'] ?? 'Teklif');
-    $body = sales_offer_mail_body($offer, $url, $mode);
-    $result = Mailer::sendWithResult($email, $subject, $body, true);
-    $ok = !empty($result['ok']);
-    $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
+    $defaultSubject = '[' . $offerNumber . '] ' . ($mode === 'pdf' ? 'PDF teklif çıktınız' : 'Teklifiniz hazır') . ': ' . (string) ($offer['title'] ?? 'Teklif');
+    $subject = trim((string) ($_POST['subject'] ?? $defaultSubject));
+    if ($subject === '') {
+        $subject = $defaultSubject;
+    }
+    $subject = mb_substr($subject, 0, 240);
+    $defaultMessage = $mode === 'pdf'
+        ? 'Teklif çıktınızı PDF olarak kaydedebilmeniz için bağlantıyı paylaşıyoruz.'
+        : 'Hazırlanan teklifinizi inceleyebilmeniz için bağlantıyı paylaşıyoruz.';
+    $message = trim((string) ($_POST['message'] ?? $defaultMessage));
+    if ($message === '') {
+        $message = $defaultMessage;
+    }
+    $body = sales_offer_mail_body($offer, $url, $mode, $message);
+    $sent = 0;
+    $failed = [];
 
-    $repo->logMail(
-        null,
-        $email,
-        $subject,
-        (string) ($result['body'] ?? $body),
-        $ok ? 'sent' : 'failed',
-        $error,
-        false
-    );
+    foreach ($recipients as $email) {
+        $result = Mailer::sendWithResult($email, $subject, $body, true);
+        $ok = !empty($result['ok']);
+        $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
 
-    if ($ok) {
+        $repo->logMail(
+            null,
+            $email,
+            $subject,
+            (string) ($result['body'] ?? $body),
+            $ok ? 'sent' : 'failed',
+            $error,
+            false
+        );
+
+        if ($ok) {
+            $sent++;
+        } else {
+            $failed[] = $email . ': ' . ($error ?: 'Alıcı sunucusu kabul etmedi.');
+        }
+    }
+
+    if ($sent > 0) {
         $repo->markSalesOfferSent($offerId);
-        flash('success', $mode === 'pdf' ? 'PDF teklif bağlantısı e-posta ile gönderildi.' : 'Teklif e-posta ile gönderildi.');
+        $message = $mode === 'pdf'
+            ? $sent . ' alıcıya PDF teklif bağlantısı e-posta ile gönderildi.'
+            : $sent . ' alıcıya teklif e-posta ile gönderildi.';
+        if ($failed !== []) {
+            $message .= ' Gönderilemeyen: ' . implode(' | ', $failed);
+        }
+        flash('success', $message);
     } else {
-        flash('error', 'Teklif e-postası gönderilemedi: ' . ($error ?: 'Alıcı sunucusu kabul etmedi.'));
+        flash('error', 'Teklif e-postası gönderilemedi: ' . implode(' | ', $failed));
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function sales_offer_mail_recipients_from_request(array $offer): array
+{
+    $hasExplicitFields = array_key_exists('offer_mail_recipients', $_POST) || array_key_exists('custom_email', $_POST);
+    $selected = array_map('trim', (array) ($_POST['offer_mail_recipients'] ?? []));
+    $custom = trim((string) ($_POST['custom_email'] ?? ''));
+    if ($custom !== '') {
+        $selected[] = $custom;
+    }
+
+    if (!$hasExplicitFields && $selected === []) {
+        $fallback = trim((string) ($offer['customer_email'] ?? ''));
+        if ($fallback !== '') {
+            $selected[] = $fallback;
+        }
+    }
+
+    $unique = [];
+    foreach ($selected as $email) {
+        $email = mb_strtolower(trim($email));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            continue;
+        }
+        $unique[$email] = $email;
+    }
+
+    return array_values($unique);
+}
+
+function handle_sales_offer_collect_balance(RenewalRepository $repo, int $offerId): void
+{
+    verify_csrf();
+    $returnTo = safe_return_path($_POST['return_to'] ?? '/');
+
+    try {
+        $offer = $repo->findSalesOffer($offerId);
+        if (!$offer) {
+            throw new RuntimeException('Teklif bulunamadı.');
+        }
+
+        $paymentRepo = new PaymentRequestRepository();
+        $advanceRequest = sales_offer_payment_request($offer, $paymentRepo);
+        $balanceRequest = sales_offer_balance_payment_request($offer, $paymentRepo);
+        if (!$advanceRequest || (string) ($advanceRequest['status'] ?? 'pending') !== 'paid') {
+            throw new RuntimeException('Kalan bakiye talebi için önce ön ödeme tahsil edilmiş olmalı.');
+        }
+
+        if ($balanceRequest && (string) ($balanceRequest['status'] ?? 'pending') === 'paid') {
+            flash('success', 'Kalan bakiye zaten tahsil edilmiş.');
+            redirect($returnTo);
+        }
+
+        $recipientEmail = trim(mb_strtolower((string) (($balanceRequest['customer_email'] ?? '') ?: ($offer['customer_email'] ?? ''))));
+        if ($recipientEmail === '' || !filter_var($recipientEmail, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Kalan bakiye maili için teklif üzerinde geçerli müşteri e-posta adresi olmalı.');
+        }
+
+        if (!$balanceRequest) {
+            $balanceAmount = sales_offer_remaining_balance_amount($offer, $advanceRequest, null);
+            if ($balanceAmount <= 0) {
+                throw new RuntimeException('Bu teklif için tahsil edilecek kalan bakiye görünmüyor.');
+            }
+
+            $currency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+            $offerNumber = sales_offer_number($offer);
+            $balanceRequest = $paymentRepo->create([
+                'title' => $offerNumber . ' kalan bakiye tahsilatı',
+                'description' => sales_offer_balance_payment_description($offer, $advanceRequest, $balanceAmount),
+                'customer_name' => (string) ($offer['customer_name'] ?? ''),
+                'customer_email' => $recipientEmail,
+                'customer_phone' => (string) ($offer['customer_phone'] ?? ''),
+                'amount' => $balanceAmount,
+                'currency' => $currency,
+                'created_by' => (int) ($_SESSION['user_id'] ?? 0),
+            ]);
+            $repo->markSalesOfferBalancePaymentRequest($offerId, (int) ($balanceRequest['id'] ?? 0));
+            notify_manual_payment_request_created($balanceRequest);
+        }
+
+        $message = sales_offer_balance_payment_message($offer, $advanceRequest, $balanceRequest);
+        $result = send_payment_request_mail_message($paymentRepo, $balanceRequest, $recipientEmail, $message);
+        if (!empty($result['ok'])) {
+            flash('success', 'Kalan bakiye ödeme talebi müşteriye mail olarak gönderildi.');
+        } else {
+            flash('error', 'Kalan bakiye maili gönderilemedi: ' . ((string) ($result['error'] ?? '') ?: 'Alıcı sunucusu kabul etmedi.'));
+        }
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect($returnTo);
+}
+
+function handle_sales_offer_parasut_invoice(RenewalRepository $repo, int $offerId): void
+{
+    verify_csrf();
+    $result = create_parasut_invoice_for_sales_offer($repo, $offerId);
+
+    if (!empty($result['ok'])) {
+        $invoice = (array) ($result['invoice'] ?? []);
+        $label = trim((string) ($invoice['invoice_no'] ?? '')) ?: trim((string) ($invoice['id'] ?? ''));
+        flash('success', $label !== '' ? 'Teklif faturası Paraşüt’te oluşturuldu: ' . $label : 'Teklif faturası Paraşüt’te oluşturuldu.');
+    } else {
+        flash('error', 'Teklif faturası Paraşüt’te oluşturulamadı: ' . (string) ($result['error'] ?? 'Bilinmeyen hata'));
+    }
+
+    redirect(safe_return_path($_POST['return_to'] ?? '/'));
+}
+
+function create_parasut_invoice_for_sales_offer(RenewalRepository $repo, int $offerId): array
+{
+    $offer = $repo->findSalesOffer($offerId);
+    if (!$offer) {
+        return ['ok' => false, 'error' => 'Teklif bulunamadı.'];
+    }
+
+    if ((string) ($offer['status'] ?? '') !== 'approved') {
+        return ['ok' => false, 'error' => 'Sadece onaylanan teklifler Paraşüt faturası oluşturabilir.'];
+    }
+
+    if (trim((string) ($offer['parasut_invoice_id'] ?? '')) !== '') {
+        $noteUpdate = sync_parasut_invoice_note_for_sales_offer($offer);
+
+        return [
+            'ok' => true,
+            'already_created' => true,
+            'invoice' => [
+                'id' => (string) ($offer['parasut_invoice_id'] ?? ''),
+                'invoice_no' => (string) ($offer['parasut_invoice_no'] ?? ''),
+            ],
+            'note_update' => $noteUpdate,
+        ];
+    }
+
+    try {
+        $client = new ParasutClient();
+        $offer = ensure_sales_offer_parasut_contact($repo, $client, $offer);
+        $invoiceOffer = sales_offer_invoice_payload_offer($offer);
+        $invoice = $client->createSalesInvoiceFromOffer(
+            $invoiceOffer,
+            sales_offer_invoice_lines((array) ($offer['items'] ?? [])),
+            sales_offer_latest_paid_payment($offer)
+        );
+        if (trim((string) ($invoice['id'] ?? '')) === '') {
+            throw new RuntimeException('Paraşüt fatura ID dönmedi.');
+        }
+
+        $repo->markSalesOfferParasutInvoice($offerId, $invoice);
+
+        return ['ok' => true, 'invoice' => $invoice];
+    } catch (Throwable $e) {
+        $repo->markSalesOfferParasutInvoiceError($offerId, $e->getMessage());
+
+        return ['ok' => false, 'error' => $e->getMessage()];
+    }
+}
+
+function ensure_sales_offer_parasut_contact(RenewalRepository $repo, ParasutClient $client, array $offer): array
+{
+    $customer = sales_offer_customer_context($repo, $offer);
+    if ($customer) {
+        $offer['customer_id'] = (int) ($customer['id'] ?? 0);
+        $offer['company_name'] = (string) ($customer['company_name'] ?? $offer['customer_name'] ?? '');
+        $offer['customer_tax_number'] = (string) ($customer['tax_number'] ?? '');
+        $offer['customer_email'] = (string) (($offer['customer_email'] ?? '') ?: ($customer['email'] ?? ''));
+        $offer['customer_phone'] = (string) (($offer['customer_phone'] ?? '') ?: ($customer['phone'] ?? ''));
+
+        $contactId = trim((string) ($customer['parasut_contact_id'] ?? ''));
+        if ($contactId !== '') {
+            $offer['parasut_contact_id'] = $contactId;
+
+            return $offer;
+        }
+    }
+
+    $companyName = trim((string) (($offer['company_name'] ?? '') ?: ($offer['customer_name'] ?? '')));
+    if ($companyName === '') {
+        throw new RuntimeException('Teklif müşteri adı boş olduğu için Paraşüt carisi eşleştirilemedi.');
+    }
+
+    $contacts = $client->searchContacts($companyName, 8, 'customer');
+    $matched = parasut_contact_match_for_customer($contacts, $companyName, (string) ($offer['customer_tax_number'] ?? ''));
+    if ($matched === null || trim((string) ($matched['id'] ?? '')) === '') {
+        throw new RuntimeException('Müşterinin Paraşüt cari ID bilgisi yok. Önce müşteriyi Paraşüt carisiyle eşleştirin.');
+    }
+
+    $contactId = trim((string) $matched['id']);
+    if (!empty($offer['customer_id'])) {
+        $repo->setCustomerParasutContactId((int) $offer['customer_id'], $contactId);
+    }
+    $offer['parasut_contact_id'] = $contactId;
+
+    return $offer;
+}
+
+function sales_offer_customer_context(RenewalRepository $repo, array $offer): ?array
+{
+    $customerId = (int) ($offer['customer_id'] ?? 0);
+    if ($customerId > 0) {
+        $customer = $repo->findCustomer($customerId);
+        if ($customer) {
+            return $customer;
+        }
+    }
+
+    $customerName = normalized_match_key((string) ($offer['customer_name'] ?? ''));
+    $customerEmail = trim(mb_strtolower((string) ($offer['customer_email'] ?? '')));
+    if ($customerName === '' && $customerEmail === '') {
+        return null;
+    }
+
+    foreach ($repo->customersWithContacts() as $customer) {
+        if ($customerName !== '' && normalized_match_key((string) ($customer['company_name'] ?? '')) === $customerName) {
+            return $customer;
+        }
+        if ($customerEmail !== '' && trim(mb_strtolower((string) ($customer['email'] ?? ''))) === $customerEmail) {
+            return $customer;
+        }
+    }
+
+    return null;
+}
+
+function sales_offer_invoice_payload_offer(array $offer): array
+{
+    $offer['subject'] = (string) (($offer['title'] ?? '') ?: ('Teklif ' . sales_offer_number($offer)));
+    $offer['payment_method'] = trim((string) ($offer['payment_method'] ?? ''));
+
+    return $offer;
+}
+
+function sales_offer_invoice_lines(array $items): array
+{
+    $lines = [];
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+
+        $lines[] = [
+            'item_title' => (string) (($item['title'] ?? '') ?: 'Ürün / hizmet'),
+            'quantity' => (float) ($item['quantity'] ?? 1),
+            'unit_price' => (float) ($item['unit_price'] ?? 0),
+            'vat_rate' => (float) ($item['vat_rate'] ?? 20),
+        ];
+    }
+
+    return $lines;
+}
+
+function sales_offer_latest_paid_payment(array $offer): ?array
+{
+    $requestIds = [
+        (int) ($offer['payment_request_id'] ?? 0),
+        (int) ($offer['balance_payment_request_id'] ?? 0),
+    ];
+
+    return (new PaymentRequestRepository())->latestPaidTransactionForRequests($requestIds);
+}
+
+function sync_parasut_invoice_note_for_sales_offer(array $offer): ?array
+{
+    $invoiceId = trim((string) ($offer['parasut_invoice_id'] ?? ''));
+    if ($invoiceId === '') {
+        return null;
+    }
+
+    try {
+        $client = new ParasutClient();
+        $note = $client->salesInvoiceNote(sales_offer_invoice_payload_offer($offer), sales_offer_latest_paid_payment($offer));
+
+        return $client->updateSalesInvoiceNote($invoiceId, $note);
+    } catch (Throwable $e) {
+        error_log('Satış teklifi Paraşüt fatura notu güncellenemedi: ' . $e->getMessage());
+
+        return [
+            'ok' => false,
+            'error' => $e->getMessage(),
+        ];
+    }
 }
 
 function sales_offer_public_url(int $offerId, string $mode = 'view', int $ttlDays = 14): string
@@ -6219,10 +7034,146 @@ function app_link_secret(): string
     return $secret;
 }
 
-function render_sales_offer_document(array $offer, bool $autoPrint = false, bool $publicLink = false): void
+function approve_sales_offer_and_payment_request(RenewalRepository $repo, array $offer): string
 {
-    render_public_layout('Teklif', static function () use ($offer, $autoPrint, $publicLink): void {
+    $offerId = (int) ($offer['id'] ?? 0);
+    if ($offerId <= 0) {
+        throw new RuntimeException('Teklif kaydı okunamadı.');
+    }
+
+    if (empty($offer['payment_request_enabled'])) {
+        $repo->markSalesOfferApproved($offerId);
+        return '';
+    }
+
+    $paymentRepo = new PaymentRequestRepository();
+    $paymentRequest = sales_offer_payment_request($offer, $paymentRepo);
+    if (!$paymentRequest) {
+        $percent = sales_offer_payment_percent($offer);
+        $amount = sales_offer_advance_payment_amount($offer);
+        $currency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+        $offerNumber = sales_offer_number($offer);
+        $paymentRequest = $paymentRepo->create([
+            'title' => $offerNumber . ' teklif ön ödemesi',
+            'description' => $offerNumber . ' numaralı teklif onaylandı. KDV dahil toplam '
+                . money_format_local($offer['total'] ?? 0, $currency)
+                . ' üzerinden %' . number_format($percent, 2, ',', '.')
+                . ' ön ödeme talep edildi.',
+            'customer_name' => (string) ($offer['customer_name'] ?? ''),
+            'customer_email' => (string) ($offer['customer_email'] ?? ''),
+            'customer_phone' => (string) ($offer['customer_phone'] ?? ''),
+            'amount' => $amount,
+            'currency' => $currency,
+            'created_by' => null,
+        ]);
+        $repo->markSalesOfferApproved($offerId, (int) ($paymentRequest['id'] ?? 0));
+        notify_manual_payment_request_created($paymentRequest);
+    } else {
+        $repo->markSalesOfferApproved($offerId, (int) ($paymentRequest['id'] ?? 0));
+    }
+
+    if ((string) ($paymentRequest['status'] ?? 'pending') === 'paid') {
+        return manual_payment_request_url($paymentRequest);
+    }
+
+    if (manual_payment_needs_email($paymentRequest)) {
+        $_SESSION['manual_payment_error'] = 'Kredi kartı ödemesine devam etmek için e-posta adresinizi girin.';
+        return manual_payment_request_url($paymentRequest) . '#email-required';
+    }
+
+    try {
+        return create_manual_iyzico_checkout_url($paymentRepo, $paymentRequest, null, 'sales-offer');
+    } catch (Throwable $e) {
+        $_SESSION['manual_payment_error'] = $e->getMessage();
+        return manual_payment_request_url($paymentRequest);
+    }
+}
+
+function sales_offer_payment_request(array $offer, ?PaymentRequestRepository $paymentRepo = null): ?array
+{
+    $requestId = (int) ($offer['payment_request_id'] ?? 0);
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    return ($paymentRepo ?? new PaymentRequestRepository())->find($requestId);
+}
+
+function sales_offer_balance_payment_request(array $offer, ?PaymentRequestRepository $paymentRepo = null): ?array
+{
+    $requestId = (int) ($offer['balance_payment_request_id'] ?? 0);
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    return ($paymentRepo ?? new PaymentRequestRepository())->find($requestId);
+}
+
+function sales_offer_paid_request_amount(?array $request): float
+{
+    if (!$request || (string) ($request['status'] ?? 'pending') !== 'paid') {
+        return 0.0;
+    }
+
+    return max(0.0, (float) ($request['amount'] ?? 0));
+}
+
+function sales_offer_remaining_balance_amount(array $offer, ?array $advanceRequest = null, ?array $balanceRequest = null): float
+{
+    $total = max(0.0, (float) ($offer['total'] ?? 0));
+    $paid = sales_offer_paid_request_amount($advanceRequest) + sales_offer_paid_request_amount($balanceRequest);
+
+    return max(0.0, round($total - $paid, 2));
+}
+
+function sales_offer_balance_payment_description(array $offer, array $advanceRequest, float $balanceAmount): string
+{
+    $currency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+    $offerNumber = sales_offer_number($offer);
+
+    return $offerNumber . ' numaralı teklif için iş tamamlandıktan sonra kalan bakiye tahsilatı. '
+        . 'Teklif toplamı: ' . money_format_local($offer['total'] ?? 0, $currency)
+        . '. Alınan ön ödeme: ' . money_format_local($advanceRequest['amount'] ?? 0, $currency)
+        . '. Kalan bakiye: ' . money_format_local($balanceAmount, $currency) . '.';
+}
+
+function sales_offer_balance_payment_message(array $offer, array $advanceRequest, array $balanceRequest): string
+{
+    $currency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+    $customer = trim((string) ($offer['customer_name'] ?? ''));
+    $greeting = $customer !== '' ? 'Merhaba ' . $customer . ',' : 'Merhaba,';
+    $offerNumber = sales_offer_number($offer);
+
+    return $greeting
+        . "\n\n" . $offerNumber . ' numaralı teklif kapsamındaki işlem tamamlanmıştır.'
+        . "\nTeklif toplamı: " . money_format_local($offer['total'] ?? 0, $currency)
+        . "\nAlınan ön ödeme: " . money_format_local($advanceRequest['amount'] ?? 0, $currency)
+        . "\nKalan bakiye: " . money_format_local($balanceRequest['amount'] ?? 0, $currency)
+        . "\n\nAşağıdaki güvenli bağlantıdan kalan bakiye ödemenizi tamamlayabilirsiniz.";
+}
+
+function sales_offer_payment_percent(array $offer): float
+{
+    $percent = (float) ($offer['payment_request_percent'] ?? 20);
+
+    return max(1.0, min(100.0, $percent > 0 ? $percent : 20.0));
+}
+
+function sales_offer_advance_payment_amount(array $offer): float
+{
+    $total = max(0.0, (float) ($offer['total'] ?? 0));
+
+    return max(0.01, round($total * sales_offer_payment_percent($offer) / 100, 2));
+}
+
+function render_sales_offer_document(array $offer, bool $autoPrint = false, bool $publicLink = false, ?array $paymentRequest = null, string $error = ''): void
+{
+    render_public_layout('Teklif', static function () use ($offer, $autoPrint, $publicLink, $paymentRequest, $error): void {
         $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
+        $isApproved = (string) ($offer['status'] ?? '') === 'approved';
+        $paymentEnabled = !empty($offer['payment_request_enabled']);
+        $paymentAmount = sales_offer_advance_payment_amount($offer);
+        $paymentPercent = sales_offer_payment_percent($offer);
         ?>
         <section class="login-panel customer-offer-public sales-offer-public">
             <div class="summary-print-actions customer-offer-print-actions">
@@ -6249,6 +7200,47 @@ function render_sales_offer_document(array $offer, bool $autoPrint = false, bool
                 <div><span>KDV</span><strong><?= h(money_format_local($offer['vat_total'] ?? 0, $currency)) ?></strong></div>
                 <div><span>KDV dahil toplam</span><strong><?= h(money_format_local($offer['total'] ?? 0, $currency)) ?></strong></div>
             </div>
+
+            <?php if ($publicLink): ?>
+                <?php if ($error !== ''): ?>
+                    <div class="alert error"><?= h($error) ?></div>
+                <?php endif; ?>
+                <div class="sales-offer-approval-box">
+                    <?php if ($isApproved): ?>
+                        <div>
+                            <p class="eyebrow">Onay durumu</p>
+                            <h2>Teklifiniz onaylandı.</h2>
+                            <?php if ($paymentEnabled): ?>
+                                <p>Ön ödeme talebi: <?= h(money_format_local($paymentRequest['amount'] ?? $paymentAmount, $currency)) ?>.</p>
+                            <?php else: ?>
+                                <p>Onayınız alınmıştır. Ekibimiz süreç için sizinle iletişime geçecektir.</p>
+                            <?php endif; ?>
+                        </div>
+                        <?php if ($paymentRequest): ?>
+                            <?php if ((string) ($paymentRequest['status'] ?? 'pending') === 'paid'): ?>
+                                <span class="badge active">Ödeme alındı</span>
+                            <?php else: ?>
+                                <a class="button primary" href="<?= h(manual_payment_request_url($paymentRequest)) ?>">Ödeme ekranına geç</a>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                    <?php else: ?>
+                        <div>
+                            <p class="eyebrow">Teklif onayı</p>
+                            <h2>Teklifi onayla</h2>
+                            <?php if ($paymentEnabled): ?>
+                                <p>Onaydan sonra <?= h('%' . number_format($paymentPercent, 2, ',', '.')) ?> ön ödeme olarak <?= h(money_format_local($paymentAmount, $currency)) ?> kredi kartı ödeme ekranına yönlendirilir.</p>
+                            <?php else: ?>
+                                <p>Onayladığınızda teklif kayda alınır; ödeme talebi oluşturulmaz.</p>
+                            <?php endif; ?>
+                        </div>
+                        <form method="post">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="action" value="approve_sales_offer">
+                            <button type="submit" class="button primary">Teklifi onayla<?= $paymentEnabled ? ' ve ödemeye geç' : '' ?></button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
         </section>
         <?php if ($autoPrint): ?>
             <script>
@@ -6331,7 +7323,7 @@ function sales_offer_whatsapp_message(array $offer, string $url): string
     return implode("\n", $lines);
 }
 
-function sales_offer_mail_body(array $offer, string $url, string $mode): string
+function sales_offer_mail_body(array $offer, string $url, string $mode, string $customIntro = ''): string
 {
     $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
     $rows = [
@@ -6378,9 +7370,12 @@ function sales_offer_mail_body(array $offer, string $url, string $mode): string
         . '</table>';
 
     $buttonLabel = $mode === 'pdf' ? 'PDF / teklif çıktısını aç' : 'Teklifi görüntüle';
-    $intro = $mode === 'pdf'
-        ? 'Teklif çıktınızı PDF olarak kaydedebilmeniz için bağlantıyı paylaşıyoruz.'
-        : 'Hazırlanan teklifinizi inceleyebilmeniz için bağlantıyı paylaşıyoruz.';
+    $intro = trim($customIntro);
+    if ($intro === '') {
+        $intro = $mode === 'pdf'
+            ? 'Teklif çıktınızı PDF olarak kaydedebilmeniz için bağlantıyı paylaşıyoruz.'
+            : 'Hazırlanan teklifinizi inceleyebilmeniz için bağlantıyı paylaşıyoruz.';
+    }
 
     return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
@@ -6413,25 +7408,31 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method, ?int
     $selectedTemplate = $editingOffer === null && $templateId > 0 ? $repo->findOfferTemplate($templateId) : null;
     $errors = [];
     if ($editingOffer !== null) {
-        $formData = [
-            'template_id' => $editingOffer['template_id'] ?? null,
-            'offer_title' => (string) $editingOffer['title'],
-            'customer_name' => (string) $editingOffer['customer_name'],
+            $formData = [
+                'template_id' => $editingOffer['template_id'] ?? null,
+                'customer_id' => (string) ($editingOffer['customer_id'] ?? ''),
+                'offer_title' => (string) $editingOffer['title'],
+                'customer_name' => (string) $editingOffer['customer_name'],
             'customer_email' => (string) ($editingOffer['customer_email'] ?? ''),
             'customer_phone' => (string) ($editingOffer['customer_phone'] ?? ''),
             'currency' => (string) ($editingOffer['currency'] ?? 'TRY'),
             'notes' => (string) ($editingOffer['notes'] ?? ''),
+            'payment_request_enabled' => (int) ($editingOffer['payment_request_enabled'] ?? 0),
+            'payment_request_percent' => (string) ($editingOffer['payment_request_percent'] ?? '20.00'),
             'items' => $editingOffer['items'] ?? [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']],
         ];
     } else {
-        $formData = [
-            'template_id' => $selectedTemplate['id'] ?? null,
-            'offer_title' => $selectedTemplate ? (string) $selectedTemplate['name'] : '',
+            $formData = [
+                'template_id' => $selectedTemplate['id'] ?? null,
+                'customer_id' => '',
+                'offer_title' => $selectedTemplate ? (string) $selectedTemplate['name'] : '',
             'customer_name' => '',
             'customer_email' => '',
             'customer_phone' => '',
             'currency' => $selectedTemplate ? (string) $selectedTemplate['currency'] : 'TRY',
             'notes' => $selectedTemplate ? (string) ($selectedTemplate['description'] ?? '') : '',
+            'payment_request_enabled' => 0,
+            'payment_request_percent' => '20.00',
             'items' => $selectedTemplate['items'] ?? [['title' => '', 'brand' => '', 'description' => '', 'quantity' => '1.00', 'unit_price' => '0.00', 'vat_rate' => '20.00']],
         ];
     }
@@ -6520,6 +7521,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method, ?int
                 <form method="post" class="form-grid offer-builder-form" data-offer-builder-form data-stock-search-url="<?= h(url('/api/stock-items')) ?>">
                     <?= csrf_field() ?>
                     <input type="hidden" name="template_id" value="<?= h((string) ($formData['template_id'] ?? '')) ?>">
+                    <input type="hidden" name="customer_id" value="<?= h((string) ($formData['customer_id'] ?? '')) ?>" data-offer-customer-id>
                     <div class="form-grid three span-2">
                         <label>
                             Teklif başlığı
@@ -6555,6 +7557,30 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method, ?int
                         Not
                         <textarea name="notes" rows="3" placeholder="Teklif özel notu, teslim süresi veya kapsam bilgisi"><?= h((string) ($formData['notes'] ?? '')) ?></textarea>
                     </label>
+
+                    <div class="offer-advance-payment span-2">
+                        <label class="checkline choice-line">
+                            <input
+                                type="checkbox"
+                                name="payment_request_enabled"
+                                value="1"
+                                <?= !empty($formData['payment_request_enabled']) ? 'checked' : '' ?>
+                            >
+                            Teklif onaylanınca ön ödeme talep et
+                        </label>
+                        <label>
+                            Ön ödeme oranı %
+                            <input
+                                type="number"
+                                min="1"
+                                max="100"
+                                step="0.01"
+                                name="payment_request_percent"
+                                value="<?= h(number_format((float) ($formData['payment_request_percent'] ?? 20), 2, '.', '')) ?>"
+                            >
+                        </label>
+                        <p>Standart %20 gelir. Örneğin %50 yazarsanız müşteri teklifi onayladığında toplamın yarısı için kredi kartı ödeme ekranına yönlendirilir.</p>
+                    </div>
 
                     <div class="offer-line-editor span-2">
                         <div class="section-head compact">
@@ -6612,6 +7638,12 @@ function handle_stock_items(RenewalRepository $repo, string $method): void
                 );
                 redirect('/settings/stock-items');
             }
+
+            if ($action === 'create_stock_item') {
+                $repo->createStockItem($_POST);
+                flash('success', 'Manuel stok / teklif kalemi eklendi.');
+                redirect('/settings/stock-items');
+            }
         } catch (Throwable $e) {
             $errors[] = $e->getMessage();
         }
@@ -6629,6 +7661,7 @@ function handle_stock_items(RenewalRepository $repo, string $method): void
                 <h1>Stok / teklif kalemleri</h1>
             </div>
             <div class="page-actions">
+                <button type="button" class="button primary" data-dialog-open="stock-item-create-dialog">Manuel kalem ekle</button>
                 <a href="<?= h(url('/settings/offer-templates')) ?>" class="button secondary">Teklif şablonları</a>
                 <a href="<?= h(url('/settings')) ?>" class="button secondary">Ayarlara dön</a>
             </div>
@@ -6650,6 +7683,69 @@ function handle_stock_items(RenewalRepository $repo, string $method): void
                 <button type="submit" class="button primary">Paraşüt’ten tüm ürünleri içeri al</button>
             </form>
         </section>
+
+        <dialog class="app-dialog definition-dialog" id="stock-item-create-dialog">
+            <form method="post" class="form-grid">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="create_stock_item">
+                <div class="dialog-title field-wide">
+                    <div>
+                        <p class="eyebrow">Manuel kayıt</p>
+                        <h2>Stok / teklif kalemi ekle</h2>
+                    </div>
+                    <button type="button" class="button secondary small" data-dialog-close>Kapat</button>
+                </div>
+                <label>
+                    Ürün / hizmet adı
+                    <input name="name" maxlength="190" placeholder="Örn: Kamera montaj hizmeti" required>
+                </label>
+                <label>
+                    Marka / model
+                    <input name="brand" maxlength="120" placeholder="Örn: Hikvision, Sophos">
+                </label>
+                <label>
+                    Kod
+                    <input name="code" maxlength="120" placeholder="Stok kodu">
+                </label>
+                <label>
+                    Barkod
+                    <input name="barcode" maxlength="120" placeholder="Varsa barkod">
+                </label>
+                <label>
+                    Birim
+                    <input name="unit" maxlength="40" value="Adet">
+                </label>
+                <label>
+                    Para birimi
+                    <select name="currency">
+                        <option value="TRY">TRY</option>
+                        <option value="USD">USD</option>
+                        <option value="EUR">EUR</option>
+                    </select>
+                </label>
+                <label>
+                    Satış fiyatı
+                    <input type="number" min="0" step="0.01" name="list_price" value="0.00">
+                </label>
+                <label>
+                    Alış fiyatı
+                    <input type="number" min="0" step="0.01" name="buying_price" placeholder="Opsiyonel">
+                </label>
+                <label>
+                    KDV %
+                    <input type="number" min="0" max="100" step="0.01" name="vat_rate" value="20.00">
+                </label>
+                <label>
+                    Stok adedi
+                    <input type="number" min="0" step="0.01" name="stock_count" placeholder="Opsiyonel">
+                </label>
+                <label class="checkbox-line field-wide">
+                    <input type="checkbox" name="inventory_tracking" value="1">
+                    <span>Stok takibi yapılsın</span>
+                </label>
+                <button type="submit" class="button primary field-wide">Kalemi kaydet</button>
+            </form>
+        </dialog>
 
         <section class="stock-summary-grid">
             <article>
@@ -6677,7 +7773,7 @@ function handle_stock_items(RenewalRepository $repo, string $method): void
 
         <section class="stock-board">
             <?php if ($items === []): ?>
-                <div class="empty">Stok kalemi bulunamadı. Önce Paraşüt ürünlerini içeri alabilirsiniz.</div>
+                <div class="empty">Stok kalemi bulunamadı. Paraşüt ürünlerini içeri alabilir veya manuel kalem ekleyebilirsiniz.</div>
             <?php else: ?>
                 <?php foreach ($items as $item): ?>
                     <article class="stock-item-card">
@@ -6691,7 +7787,7 @@ function handle_stock_items(RenewalRepository $repo, string $method): void
                             <small>KDV %<?= h(number_format((float) ($item['vat_rate'] ?? 20), 2, ',', '.')) ?></small>
                         </div>
                         <div class="stock-meta">
-                            <span><?= !empty($item['inventory_tracking']) ? 'Stok takipli' : 'Stok takipsiz' ?></span>
+                            <span><?= h((string) ($item['source'] ?? 'manual') === 'parasut' ? 'Paraşüt' : 'Manuel') ?> · <?= !empty($item['inventory_tracking']) ? 'Stok takipli' : 'Stok takipsiz' ?></span>
                             <strong><?= $item['stock_count'] !== null ? h(number_format((float) $item['stock_count'], 2, ',', '.')) : '-' ?></strong>
                         </div>
                     </article>
@@ -6829,11 +7925,31 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
         return '<div class="empty lane-empty">Henüz teklif taslağı yok. Sağ tarafı artık teklif modülü için kullanıyoruz.</div>';
     }
 
+    $paymentRepo = new PaymentRequestRepository();
     ob_start();
     ?>
     <div class="dashboard-card-list">
         <?php foreach ($offers as $offer): ?>
-            <?php $offerId = (int) ($offer['id'] ?? 0); ?>
+            <?php
+            $offerId = (int) ($offer['id'] ?? 0);
+            $offerCurrency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+            $advancePayment = sales_offer_payment_request($offer, $paymentRepo);
+            $balancePayment = sales_offer_balance_payment_request($offer, $paymentRepo);
+            $remainingBalance = sales_offer_remaining_balance_amount($offer, $advancePayment, $balancePayment);
+            $advancePaid = $advancePayment && (string) ($advancePayment['status'] ?? 'pending') === 'paid';
+            $balancePaid = $balancePayment && (string) ($balancePayment['status'] ?? 'pending') === 'paid';
+            $parasutInvoiceId = trim((string) ($offer['parasut_invoice_id'] ?? ''));
+            $parasutInvoiceNo = trim((string) ($offer['parasut_invoice_no'] ?? ''));
+            $parasutInvoiceStatus = trim((string) ($offer['parasut_invoice_status'] ?? ''));
+            $canCollectBalance = $canManage
+                && (string) ($offer['status'] ?? 'draft') === 'approved'
+                && $advancePaid
+                && !$balancePaid
+                && $remainingBalance > 0;
+            $canCreateParasutInvoice = $canManage
+                && (string) ($offer['status'] ?? 'draft') === 'approved'
+                && $parasutInvoiceId === '';
+            ?>
             <details class="dashboard-track-card offers sales-offer-card">
                 <summary class="track-summary">
                     <span class="track-main">
@@ -6870,30 +7986,69 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
                         </div>
                         <div>
                             <span>KDV dahil</span>
-                            <strong><?= h(money_format_local($offer['total'] ?? 0, (string) ($offer['currency'] ?? 'TRY'))) ?></strong>
+                            <strong><?= h(money_format_local($offer['total'] ?? 0, $offerCurrency)) ?></strong>
+                        </div>
+                        <div>
+                            <span>Ön ödeme</span>
+                            <strong>
+                                <?= $advancePayment ? h(money_format_local($advancePayment['amount'] ?? 0, $offerCurrency)) : '-' ?>
+                                <?= $advancePayment ? ' · ' . h(payment_request_status_label((string) ($advancePayment['status'] ?? 'pending'))) : '' ?>
+                            </strong>
+                        </div>
+                        <div>
+                            <span>Kalan bakiye</span>
+                            <strong>
+                                <?php if ($balancePayment): ?>
+                                    <?= h(money_format_local($balancePayment['amount'] ?? 0, $offerCurrency)) ?> · <?= h(payment_request_status_label((string) ($balancePayment['status'] ?? 'pending'))) ?>
+                                <?php else: ?>
+                                    <?= h(money_format_local($remainingBalance, $offerCurrency)) ?>
+                                <?php endif; ?>
+                            </strong>
+                        </div>
+                        <div>
+                            <span>Paraşüt faturası</span>
+                            <strong>
+                                <?php if ($parasutInvoiceId !== ''): ?>
+                                    <?= h($parasutInvoiceNo !== '' ? $parasutInvoiceNo : '#' . $parasutInvoiceId) ?>
+                                <?php elseif ($parasutInvoiceStatus === 'failed'): ?>
+                                    Oluşturulamadı
+                                <?php elseif ((string) ($offer['status'] ?? 'draft') === 'approved'): ?>
+                                    Hazır
+                                <?php else: ?>
+                                    Onay bekliyor
+                                <?php endif; ?>
+                            </strong>
                         </div>
                     </div>
                     <?php if (!empty($offer['notes'])): ?>
                         <div class="settings-note compact"><?= nl2br(h((string) $offer['notes']), false) ?></div>
                     <?php endif; ?>
+                    <?php if ($parasutInvoiceStatus === 'failed' && !empty($offer['parasut_invoice_error'])): ?>
+                        <div class="settings-note compact">Paraşüt fatura hatası: <?= h((string) $offer['parasut_invoice_error']) ?></div>
+                    <?php endif; ?>
                     <?php if ($offerId > 0 && ($canManage || $canDelete)): ?>
                         <div class="track-actions">
                             <?php if ($canManage): ?>
                                 <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/preview')) ?>">Taslak görüntüle</a>
-                                <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h(url('/offers/' . $offerId . '/whatsapp')) ?>">WhatsApp'tan gönder</a>
-                                <form method="post" action="<?= h(url('/offers/' . $offerId . '/send-email')) ?>">
-                                    <?= csrf_field() ?>
-                                    <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
-                                    <button type="submit" class="button small secondary">E-posta gönder</button>
-                                </form>
-                                <form method="post" action="<?= h(url('/offers/' . $offerId . '/send-pdf')) ?>">
-                                    <?= csrf_field() ?>
-                                    <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
-                                    <button type="submit" class="button small secondary">PDF gönder</button>
-                                </form>
-                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/pdf')) ?>">PDF olarak indir</a>
-                                <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
-                            <?php endif; ?>
+                                <button type="button" class="button small primary" data-dialog-open="sales-offer-send-<?= h($offerId) ?>">Müşteriye gönder</button>
+	                                    <?php if ($canCollectBalance): ?>
+	                                        <form method="post" action="<?= h(url('/offers/' . $offerId . '/collect-balance')) ?>" onsubmit="return confirm('Bu teklif için kalan bakiye ödeme talebi mail olarak gönderilsin mi?')">
+	                                            <?= csrf_field() ?>
+	                                            <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
+	                                            <button type="submit" class="button small primary"><?= $balancePayment ? 'Kalan bakiye mailini tekrar gönder' : 'Kalan bakiyeyi tahsil et' ?></button>
+	                                        </form>
+	                                    <?php endif; ?>
+                                        <?php if ($canCreateParasutInvoice): ?>
+                                            <form method="post" action="<?= h(url('/offers/' . $offerId . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu teklif için Paraşüt faturası oluşturulsun mu?')">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
+                                                <button type="submit" class="button small primary">Faturayı Paraşüt’te oluştur</button>
+                                            </form>
+                                        <?php endif; ?>
+		                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/pdf')) ?>">PDF olarak indir</a>
+	                                <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
+                                    <?= render_sales_offer_send_dialog($offer) ?>
+	                            <?php endif; ?>
                             <?php if ($canDelete): ?>
                                 <form method="post" class="inline-delete-form" action="<?= h(url('/offers/' . $offerId . '/delete')) ?>" onsubmit="return confirm('Bu teklif ve kalemleri silinsin mi?')">
                                     <?= csrf_field() ?>
@@ -6909,6 +8064,186 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
     <?php
 
     return (string) ob_get_clean();
+}
+
+function render_sales_offer_send_dialog(array $offer): string
+{
+    $id = (int) ($offer['id'] ?? 0);
+    if ($id <= 0) {
+        return '';
+    }
+
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+    $contacts = sales_offer_contacts($offer);
+    $offerTitle = (string) (($offer['title'] ?? '') ?: 'Teklif');
+    $subject = '[' . sales_offer_number($offer) . '] Teklifiniz hazır: ' . $offerTitle;
+    $defaultMessage = 'Hazırlanan teklifinizi inceleyebilmeniz için bağlantıyı paylaşıyoruz.';
+    $previewUrl = sales_offer_public_url($id, 'view');
+    $pdfUrl = sales_offer_public_url($id, 'pdf');
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog communication-dialog customer-send-dialog" id="sales-offer-send-<?= h($id) ?>">
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <h2>Müşteriye gönder</h2>
+                    <span><?= h((string) ($offer['customer_name'] ?? '-')) ?> için teklif bağlantısını mail veya WhatsApp ile gönderin.</span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+
+            <div class="customer-send-layout">
+                <form method="post" action="<?= h(url('/offers/' . $id . '/send-email')) ?>" class="form-grid customer-send-mail-form">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                    <div class="recipient-picker">
+                        <strong>Mail alıcıları</strong>
+                        <?php $hasMailRecipient = false; ?>
+                        <?php foreach ($contacts as $contact): ?>
+                            <?php
+                            $email = trim((string) ($contact['email'] ?? ''));
+                            if ($email === '') {
+                                continue;
+                            }
+                            $hasMailRecipient = true;
+                            ?>
+                            <label class="recipient-card">
+                                <input type="checkbox" name="offer_mail_recipients[]" value="<?= h($email) ?>" <?= !empty($contact['notify_enabled']) ? 'checked' : '' ?>>
+                                <span>
+                                    <b><?= h((string) (($contact['full_name'] ?? '') ?: $email)) ?></b>
+                                    <em><?= h($email) ?></em>
+                                </span>
+                            </label>
+                        <?php endforeach; ?>
+                        <?php if (!$hasMailRecipient): ?>
+                            <p class="muted compact">Bu teklif için kayıtlı e-posta yetkilisi yok. Aşağıya manuel alıcı yazabilirsiniz.</p>
+                        <?php endif; ?>
+                    </div>
+                    <label>
+                        Gönderim türü
+                        <select name="offer_send_mode">
+                            <option value="view">Teklif görüntüleme bağlantısı</option>
+                            <option value="pdf">PDF / çıktı bağlantısı</option>
+                        </select>
+                    </label>
+                    <label>
+                        Manuel alıcı e-postası
+                        <input type="email" name="custom_email" placeholder="ornek@firma.com">
+                    </label>
+                    <label>
+                        Konu
+                        <input name="subject" value="<?= h($subject) ?>" required maxlength="240">
+                    </label>
+                    <label>
+                        Mail metni
+                        <textarea name="message" rows="7" required><?= h($defaultMessage) ?></textarea>
+                    </label>
+                    <div class="inline-actions">
+                        <a class="button secondary" target="_blank" rel="noopener" href="<?= h($previewUrl) ?>">Teklif sayfasını aç</a>
+                        <a class="button secondary" target="_blank" rel="noopener" href="<?= h($pdfUrl) ?>">PDF çıktısını aç</a>
+                        <button type="submit" class="button primary">Müşteriye mail gönder</button>
+                    </div>
+                </form>
+
+                <div class="customer-whatsapp-panel">
+                    <div class="section-head compact">
+                        <div>
+                            <h3>WhatsApp ile gönder</h3>
+                            <span class="muted compact">Yetkili seçildiğinde teklif bağlantılı hazır mesaj WhatsApp'ta açılır.</span>
+                        </div>
+                    </div>
+                    <div class="whatsapp-recipient-list">
+                        <?php $hasWhatsappRecipient = false; ?>
+                        <?php foreach ($contacts as $contact): ?>
+                            <?php
+                            $phone = trim((string) ($contact['phone'] ?? ''));
+                            $waNumber = whatsapp_number_from_phone($phone);
+                            if ($waNumber === null) {
+                                continue;
+                            }
+                            $hasWhatsappRecipient = true;
+                            $baseQuery = [
+                                'phone' => $phone,
+                                'return_to' => $returnTo,
+                            ];
+                            ?>
+                            <div class="whatsapp-contact-card">
+                                <div>
+                                    <strong><?= h((string) (($contact['full_name'] ?? '') ?: $phone)) ?></strong>
+                                    <span><?= h($phone) ?><?= !empty($contact['email']) ? ' - ' . h((string) $contact['email']) : '' ?></span>
+                                </div>
+                                <div class="inline-actions compact">
+                                    <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h(url('/offers/' . $id . '/whatsapp') . '?' . http_build_query($baseQuery + ['mode' => 'view'])) ?>">Teklif</a>
+                                    <a class="button small secondary" target="takip_whatsapp_web" href="<?= h(url('/offers/' . $id . '/whatsapp') . '?' . http_build_query($baseQuery + ['mode' => 'pdf'])) ?>">PDF</a>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                        <?php if (!$hasWhatsappRecipient): ?>
+                            <div class="empty">Bu cari için WhatsApp'a uygun telefon numarası bulunamadı.</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function sales_offer_contacts(array $offer): array
+{
+    $contacts = [];
+    try {
+        $customerId = (int) ($offer['customer_id'] ?? 0);
+        if ($customerId > 0) {
+            $customer = (new RenewalRepository())->findCustomer($customerId);
+            if ($customer && !empty($customer['contacts']) && is_array($customer['contacts'])) {
+                $contacts = $customer['contacts'];
+            }
+        }
+    } catch (Throwable) {
+        $contacts = [];
+    }
+
+    $fallback = [
+        'full_name' => (string) (($offer['customer_name'] ?? '') ?: 'Cari yetkilisi'),
+        'email' => (string) ($offer['customer_email'] ?? ''),
+        'phone' => (string) ($offer['customer_phone'] ?? ''),
+        'notify_enabled' => 1,
+    ];
+    if (trim($fallback['email']) !== '' || trim($fallback['phone']) !== '') {
+        $contacts[] = $fallback;
+    }
+
+    $unique = [];
+    foreach ($contacts as $contact) {
+        if (!is_array($contact)) {
+            continue;
+        }
+
+        $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+        $phone = normalize_phone_number($contact['phone'] ?? '');
+        $name = trim((string) ($contact['full_name'] ?? $contact['contact_name'] ?? $contact['name'] ?? ''));
+        if ($email === '' && $phone === '' && $name === '') {
+            continue;
+        }
+
+        $key = $email !== '' ? 'email:' . $email : 'phone:' . preg_replace('/\D+/', '', $phone);
+        if (isset($unique[$key])) {
+            continue;
+        }
+
+        $unique[$key] = [
+            'full_name' => $name !== '' ? $name : ($email !== '' ? $email : $phone),
+            'email' => $email,
+            'phone' => $phone,
+            'notify_enabled' => !empty($contact['notify_enabled']) ? 1 : 0,
+        ];
+    }
+
+    return array_values($unique);
 }
 
 function sales_offer_status_label(string $status): string
@@ -10461,6 +11796,172 @@ function render_logs(): void
     });
 }
 
+function render_security_logs(): void
+{
+    $events = recent_security_events();
+    $stats = security_log_stats($events);
+
+    render_layout('Güvenlik logları', static function () use ($events, $stats): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Ayarlar</p>
+                <h1>Güvenlik logları</h1>
+            </div>
+            <div class="customer-actions">
+                <a href="<?= h(url('/settings/security-logs')) ?>" class="button secondary">Yenile</a>
+                <a href="<?= h(url('/settings')) ?>" class="button secondary">Ayarlara dön</a>
+            </div>
+        </div>
+
+        <section class="grid-3 compact-stats">
+            <div class="stat"><span>Toplam olay</span><strong><?= h((string) $stats['total']) ?></strong></div>
+            <div class="stat warning"><span>Uyarı</span><strong><?= h((string) $stats['warning']) ?></strong></div>
+            <div class="stat danger"><span>Kritik</span><strong><?= h((string) $stats['critical']) ?></strong></div>
+        </section>
+
+        <section class="panel">
+            <div class="section-head">
+                <h2>Giriş denemeleri ve güvenlik olayları</h2>
+                <span class="badge <?= $events === [] ? 'cancelled' : 'active' ?>"><?= h((string) count($events)) ?> kayıt</span>
+            </div>
+
+            <?php if ($events === []): ?>
+                <div class="empty">Güvenlik log kaydı bulunmuyor.</div>
+            <?php else: ?>
+                <div class="table-wrap settings-form">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Tarih</th>
+                                <th>Seviye</th>
+                                <th>Olay</th>
+                                <th>E-posta</th>
+                                <th>IP</th>
+                                <th>Mesaj</th>
+                                <th>Detay</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($events as $event): ?>
+                                <?php $context = security_context_pretty((string) ($event['context_json'] ?? '')); ?>
+                                <tr>
+                                    <td><?= h(date('d.m.Y H:i', strtotime((string) $event['created_at']))) ?></td>
+                                    <td>
+                                        <span class="badge <?= h(security_severity_badge((string) $event['severity'])) ?>">
+                                            <?= h(security_severity_label((string) $event['severity'])) ?>
+                                        </span>
+                                    </td>
+                                    <td><strong><?= h(security_event_label((string) $event['event_type'])) ?></strong></td>
+                                    <td><?= h((string) ($event['email'] ?: '-')) ?></td>
+                                    <td><?= h((string) ($event['ip_address'] ?: '-')) ?></td>
+                                    <td><?= h((string) $event['message']) ?></td>
+                                    <td>
+                                        <details class="mail-log-detail">
+                                            <summary>Detay</summary>
+                                            <div class="mail-log-detail-card security-log-detail-card">
+                                                <div class="mail-log-detail-grid">
+                                                    <span><small>Olay tipi</small><strong><?= h((string) $event['event_type']) ?></strong></span>
+                                                    <span><small>Kullanıcı</small><strong><?= h((string) ($event['user_name'] ?: '-')) ?></strong></span>
+                                                    <span><small>Tarayıcı</small><strong><?= h((string) ($event['user_agent'] ?: '-')) ?></strong></span>
+                                                    <span><small>Kayıt no</small><strong>#<?= h((string) $event['id']) ?></strong></span>
+                                                </div>
+                                                <?php if ($context !== ''): ?>
+                                                    <pre class="log-lines security-context"><?= h($context) ?></pre>
+                                                <?php else: ?>
+                                                    <div class="empty compact">Bu kayıtta ek detay yok.</div>
+                                                <?php endif; ?>
+                                            </div>
+                                        </details>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </section>
+        <?php
+    });
+}
+
+function recent_security_events(int $limit = 200): array
+{
+    try {
+        ensure_login_ip_attempts_schema();
+        $stmt = Database::connection()->prepare(
+            'SELECT se.*, u.name AS user_name
+             FROM security_events se
+             LEFT JOIN users u ON u.id = se.user_id
+             ORDER BY se.created_at DESC, se.id DESC
+             LIMIT :limit_count'
+        );
+        $stmt->bindValue('limit_count', $limit, \PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    } catch (Throwable) {
+        return [];
+    }
+}
+
+function security_log_stats(array $events): array
+{
+    $stats = ['total' => count($events), 'warning' => 0, 'critical' => 0];
+    foreach ($events as $event) {
+        $severity = (string) ($event['severity'] ?? '');
+        if ($severity === 'warning') {
+            $stats['warning']++;
+        } elseif ($severity === 'critical') {
+            $stats['critical']++;
+        }
+    }
+
+    return $stats;
+}
+
+function security_context_pretty(string $json): string
+{
+    $decoded = json_decode($json, true);
+    if (!is_array($decoded)) {
+        return trim($json);
+    }
+
+    return (string) json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+}
+
+function security_event_label(string $eventType): string
+{
+    return match ($eventType) {
+        'login_success' => 'Başarılı giriş',
+        'login_failed' => 'Hatalı giriş',
+        'login_challenge_failed' => 'Doğrulama başarısız',
+        'login_ip_locked' => 'IP kilitlendi',
+        'login_email_locked' => 'E-posta kilitlendi',
+        'login_blocked_ip' => 'Kilitli IP engellendi',
+        'login_blocked_email' => 'Kilitli e-posta engellendi',
+        default => $eventType,
+    };
+}
+
+function security_severity_label(string $severity): string
+{
+    return match ($severity) {
+        'critical' => 'Kritik',
+        'warning' => 'Uyarı',
+        default => 'Bilgi',
+    };
+}
+
+function security_severity_badge(string $severity): string
+{
+    return match ($severity) {
+        'critical' => 'overdue',
+        'warning' => 'due_soon',
+        default => 'active',
+    };
+}
+
 function mail_log_preview_html(string $body): string
 {
     $body = trim($body);
@@ -11092,6 +12593,18 @@ function handle_settings(RenewalRepository $repo, string $method): void
                 redirect('/settings#notification-settings');
             }
 
+            if ($action === 'save_security') {
+                $current = $settingsRepo->all();
+                $settingsRepo->setMany([
+                    'security.challenge.enabled' => !empty($_POST['security_challenge_enabled']) ? '1' : '0',
+                    'security.notify.enabled' => !empty($_POST['security_notify_enabled']) ? '1' : '0',
+                    'security.turnstile.site_key' => trim((string) ($_POST['security_turnstile_site_key'] ?? '')),
+                    'security.turnstile.secret_key' => (string) ((string) ($_POST['security_turnstile_secret_key'] ?? '') !== '' ? $_POST['security_turnstile_secret_key'] : ($current['security.turnstile.secret_key'] ?? '')),
+                ]);
+                flash('success', 'Güvenlik ayarları kaydedildi.');
+                redirect('/settings#security-settings');
+            }
+
             if ($action === 'save_backup') {
                 $settingsRepo->setMany([
                     'backup.enabled' => !empty($_POST['backup_enabled']) ? '1' : '0',
@@ -11202,6 +12715,7 @@ function handle_settings(RenewalRepository $repo, string $method): void
                 <?php endif; ?>
                 <?php if ($canLogs): ?>
                     <a href="<?= h(url('/settings/mail-logs')) ?>" class="button secondary">Mail logları</a>
+                    <a href="<?= h(url('/settings/security-logs')) ?>" class="button secondary">Güvenlik logları</a>
                 <?php endif; ?>
                 <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
             </div>
@@ -11467,6 +12981,47 @@ function handle_settings(RenewalRepository $repo, string $method): void
                     </div>
                 </div>
 
+                <div class="settings-card" id="security-settings" data-settings-card data-settings-key="security" data-settings-group="system">
+                    <div class="section-head">
+                        <h2>Güvenlik</h2>
+                        <span class="badge <?= ($settings['security.challenge.enabled'] ?? '1') === '1' ? 'active' : 'cancelled' ?>">
+                            <?= ($settings['security.challenge.enabled'] ?? '1') === '1' ? 'Aktif' : 'Kapalı' ?>
+                        </span>
+                    </div>
+                    <form method="post" class="form-grid settings-form">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="action" value="save_security">
+                        <label class="checkline">
+                            <input type="checkbox" name="security_challenge_enabled" value="1" <?= ($settings['security.challenge.enabled'] ?? '1') === '1' ? 'checked' : '' ?>>
+                            Hatalı girişten sonra güvenlik doğrulaması iste
+                        </label>
+                        <label class="checkline">
+                            <input type="checkbox" name="security_notify_enabled" value="1" <?= ($settings['security.notify.enabled'] ?? '1') === '1' ? 'checked' : '' ?>>
+                            Kilit ve şüpheli girişlerde yöneticiye mail / push bildirimi gönder
+                        </label>
+                        <div class="settings-note">
+                            <strong>Mevcut kilit kuralları</strong>
+                            <span>IP: 2 hatada 10 dakika, 10 hatada 1 gün. E-posta: 5 hatada 30 dakika, 10 hatada 1 gün.</span>
+                        </div>
+                        <div class="form-grid two">
+                            <label>
+                                Cloudflare Turnstile Site Key
+                                <input name="security_turnstile_site_key" value="<?= h($settings['security.turnstile.site_key'] ?? '') ?>" placeholder="Boşsa matematik doğrulaması kullanılır">
+                            </label>
+                            <label>
+                                Cloudflare Turnstile Secret Key
+                                <input type="password" name="security_turnstile_secret_key" value="" placeholder="<?= ($settings['security.turnstile.secret_key'] ?? '') !== '' ? '********' : 'Opsiyonel secret key' ?>" autocomplete="new-password">
+                            </label>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="button primary">Güvenlik ayarlarını kaydet</button>
+                            <?php if ($canLogs): ?>
+                                <a href="<?= h(url('/settings/security-logs')) ?>" class="button secondary">Güvenlik loglarını aç</a>
+                            <?php endif; ?>
+                        </div>
+                    </form>
+                </div>
+
                 <div class="settings-card" id="backup-settings" data-settings-card data-settings-key="backup" data-settings-group="system">
                     <div class="section-head">
                         <h2>Yedekleme</h2>
@@ -11536,6 +13091,18 @@ function handle_settings(RenewalRepository $repo, string $method): void
                             <span>Mail gönderimlerini, hata mesajlarını ve gönderilen içerik detaylarını buradan inceleyebilirsiniz.</span>
                         </div>
                         <a href="<?= h(url('/settings/mail-logs')) ?>" class="button secondary full settings-form">Mail loglarını aç</a>
+                    </div>
+
+                    <div class="settings-card" data-settings-card data-settings-key="security-logs" data-settings-group="system">
+                        <div class="section-head">
+                            <h2>Güvenlik logları</h2>
+                            <span class="badge active">Girişler</span>
+                        </div>
+                        <div class="settings-note">
+                            <strong>Bot ve şifre denemeleri</strong>
+                            <span>Hatalı girişleri, IP/e-posta kilitlerini ve güvenlik doğrulama olaylarını buradan izleyebilirsiniz.</span>
+                        </div>
+                        <a href="<?= h(url('/settings/security-logs')) ?>" class="button secondary full settings-form">Güvenlik loglarını aç</a>
                     </div>
                 <?php endif; ?>
 
@@ -11956,9 +13523,13 @@ function company_letterhead_data(?array $settings = null): array
 {
     $settings ??= branding_settings();
     $email = trim((string) (($settings['company.email'] ?? '') ?: ($settings['mail.from_email'] ?? '')));
+    if ($email === '' || mb_strtolower($email, 'UTF-8') === 'yenileme@example.com') {
+        $email = 'satis@bigabilisim.com';
+    }
+
     $website = trim((string) ($settings['company.website'] ?? ''));
-    if ($website === '') {
-        $website = url('/');
+    if ($website === '' || str_contains(mb_strtolower($website, 'UTF-8'), 'takip.bigabilisim.com')) {
+        $website = 'https://www.antalyabigabilisim.com';
     }
 
     return [
@@ -11990,11 +13561,16 @@ function website_display_label(string $url): string
 function render_company_letterhead(string $contextLabel = 'Teklifi hazırlayan firma'): string
 {
     $company = company_letterhead_data();
-    $details = array_values(array_filter([
-        $company['email'],
-        $company['phone'],
-        $company['website_label'],
-    ], static fn (string $value): bool => trim($value) !== ''));
+    $details = [];
+    if ($company['email'] !== '') {
+        $details[] = '<a href="mailto:' . h((string) $company['email']) . '">' . h((string) $company['email']) . '</a>';
+    }
+    if ($company['phone'] !== '') {
+        $details[] = '<span>' . h((string) $company['phone']) . '</span>';
+    }
+    if ($company['website_label'] !== '') {
+        $details[] = '<a href="' . h((string) $company['website']) . '" target="_blank" rel="noopener">' . h((string) $company['website_label']) . '</a>';
+    }
 
     ob_start();
     ?>
@@ -12003,7 +13579,7 @@ function render_company_letterhead(string $contextLabel = 'Teklifi hazırlayan f
             <span><?= h($contextLabel) ?></span>
             <strong><?= h((string) $company['name']) ?></strong>
             <?php if ($details !== []): ?>
-                <p><?= h(implode(' • ', $details)) ?></p>
+                <p class="company-letterhead-links"><?= implode(' - ', $details) ?></p>
             <?php endif; ?>
             <?php if ($company['address'] !== ''): ?>
                 <em><?= h((string) $company['address']) ?></em>

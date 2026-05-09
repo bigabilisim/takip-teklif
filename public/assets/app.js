@@ -1052,6 +1052,7 @@
 
     document.querySelectorAll('[data-offer-builder-form]').forEach((form) => {
         const input = form.querySelector('[data-offer-customer-input]');
+        const customerId = form.querySelector('[data-offer-customer-id]');
         const email = form.querySelector('[data-offer-customer-email]');
         const phone = form.querySelector('[data-offer-customer-phone]');
         const results = form.querySelector('[data-offer-customer-results]');
@@ -1090,6 +1091,9 @@
 
             input.value = customerName;
             input.dataset.selectedCustomerId = String(customer.id || '');
+            if (customerId) {
+                customerId.value = String(customer.id || '');
+            }
             if (email) {
                 email.value = nextEmail;
             }
@@ -1149,6 +1153,9 @@
 
         input.addEventListener('input', () => {
             input.dataset.selectedCustomerId = '';
+            if (customerId) {
+                customerId.value = '';
+            }
             renderResults();
         });
         input.addEventListener('focus', renderResults);

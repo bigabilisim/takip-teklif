@@ -706,6 +706,39 @@ final class RenewalRepository
         ];
     }
 
+    public function createStockItem(array $data): int
+    {
+        $name = trim((string) ($data['name'] ?? ''));
+        if ($name === '') {
+            throw new \RuntimeException('Stok / teklif kalemi adı zorunlu.');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO stock_items
+                (parasut_product_id, name, code, barcode, brand, unit, currency, list_price, buying_price, vat_rate,
+                 inventory_tracking, stock_count, is_active, is_archived, source, raw_payload, last_synced_at)
+             VALUES
+                (NULL, :name, :code, :barcode, :brand, :unit, :currency, :list_price, :buying_price, :vat_rate,
+                 :inventory_tracking, :stock_count, 1, 0, :source, NULL, NULL)'
+        );
+        $stmt->execute([
+            'name' => $name,
+            'code' => $this->nullableString($data['code'] ?? ''),
+            'barcode' => $this->nullableString($data['barcode'] ?? ''),
+            'brand' => $this->nullableString($data['brand'] ?? ''),
+            'unit' => $this->nullableString($data['unit'] ?? 'Adet') ?? 'Adet',
+            'currency' => self::normalizeCurrency($data['currency'] ?? 'TRY'),
+            'list_price' => max(0.0, $this->decimalValue($data['list_price'] ?? 0, 0.0)),
+            'buying_price' => $this->nullableDecimalValue($data['buying_price'] ?? null),
+            'vat_rate' => max(0.0, min(100.0, $this->decimalValue($data['vat_rate'] ?? 20, 20.0))),
+            'inventory_tracking' => !empty($data['inventory_tracking']) ? 1 : 0,
+            'stock_count' => $this->nullableDecimalValue($data['stock_count'] ?? null),
+            'source' => 'manual',
+        ]);
+
+        return (int) $this->db->lastInsertId();
+    }
+
     public function syncStockItemsFromParasut(array $products): array
     {
         $created = 0;
@@ -1099,18 +1132,24 @@ final class RenewalRepository
             throw new \RuntimeException('Teklif için en az bir kalem girin.');
         }
 
+        $customerId = $this->resolveSalesOfferCustomerId($data);
         $currency = self::normalizeCurrency($data['currency'] ?? 'TRY');
         $totals = $this->salesOfferTotals($items);
+        $paymentRequestEnabled = !empty($data['payment_request_enabled']) ? 1 : 0;
+        $paymentRequestPercent = $this->salesOfferPaymentPercent($data['payment_request_percent'] ?? 20);
         $this->db->beginTransaction();
         try {
             $stmt = $this->db->prepare(
                 'INSERT INTO sales_offers
-                    (template_id, title, customer_name, customer_email, customer_phone, currency, status, subtotal, vat_total, total, notes, created_by)
+                    (template_id, customer_id, title, customer_name, customer_email, customer_phone, currency, status, subtotal, vat_total, total, notes,
+                     payment_request_enabled, payment_request_percent, created_by)
                  VALUES
-                    (:template_id, :title, :customer_name, :customer_email, :customer_phone, :currency, :status, :subtotal, :vat_total, :total, :notes, :created_by)'
+                    (:template_id, :customer_id, :title, :customer_name, :customer_email, :customer_phone, :currency, :status, :subtotal, :vat_total, :total, :notes,
+                     :payment_request_enabled, :payment_request_percent, :created_by)'
             );
             $stmt->execute([
                 'template_id' => empty($data['template_id']) ? null : (int) $data['template_id'],
+                'customer_id' => $customerId,
                 'title' => $title,
                 'customer_name' => $customerName,
                 'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
@@ -1121,6 +1160,8 @@ final class RenewalRepository
                 'vat_total' => $totals['vat_total'],
                 'total' => $totals['total'],
                 'notes' => $this->nullableString($data['notes'] ?? ''),
+                'payment_request_enabled' => $paymentRequestEnabled,
+                'payment_request_percent' => $paymentRequestPercent,
                 'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
             ]);
             $id = (int) $this->db->lastInsertId();
@@ -1155,13 +1196,17 @@ final class RenewalRepository
             throw new \RuntimeException('Teklif için en az bir kalem girin.');
         }
 
+        $customerId = $this->resolveSalesOfferCustomerId($data);
         $currency = self::normalizeCurrency($data['currency'] ?? 'TRY');
         $totals = $this->salesOfferTotals($items);
+        $paymentRequestEnabled = !empty($data['payment_request_enabled']) ? 1 : 0;
+        $paymentRequestPercent = $this->salesOfferPaymentPercent($data['payment_request_percent'] ?? 20);
         $this->db->beginTransaction();
         try {
             $stmt = $this->db->prepare(
                 'UPDATE sales_offers
                  SET template_id = :template_id,
+                     customer_id = :customer_id,
                      title = :title,
                      customer_name = :customer_name,
                      customer_email = :customer_email,
@@ -1171,12 +1216,15 @@ final class RenewalRepository
                      vat_total = :vat_total,
                      total = :total,
                      notes = :notes,
+                     payment_request_enabled = :payment_request_enabled,
+                     payment_request_percent = :payment_request_percent,
                      updated_at = NOW()
                  WHERE id = :id'
             );
             $stmt->execute([
                 'id' => $id,
                 'template_id' => empty($data['template_id']) ? null : (int) $data['template_id'],
+                'customer_id' => $customerId,
                 'title' => $title,
                 'customer_name' => $customerName,
                 'customer_email' => $this->nullableString($data['customer_email'] ?? ''),
@@ -1186,6 +1234,8 @@ final class RenewalRepository
                 'vat_total' => $totals['vat_total'],
                 'total' => $totals['total'],
                 'notes' => $this->nullableString($data['notes'] ?? ''),
+                'payment_request_enabled' => $paymentRequestEnabled,
+                'payment_request_percent' => $paymentRequestPercent,
             ]);
             $this->replaceSalesOfferItems($id, $items, $currency);
             $this->db->commit();
@@ -1216,8 +1266,67 @@ final class RenewalRepository
             "UPDATE sales_offers
              SET status = CASE WHEN status = 'draft' THEN 'sent' ELSE status END,
                  updated_at = NOW()
-             WHERE id = :id"
+            WHERE id = :id"
         )->execute(['id' => $id]);
+    }
+
+    public function markSalesOfferApproved(int $id, ?int $paymentRequestId = null): void
+    {
+        $this->db->prepare(
+            'UPDATE sales_offers
+             SET status = \'approved\',
+                 payment_request_id = COALESCE(:payment_request_id, payment_request_id),
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'payment_request_id' => $paymentRequestId,
+        ]);
+    }
+
+    public function markSalesOfferBalancePaymentRequest(int $id, int $paymentRequestId): void
+    {
+        $this->db->prepare(
+            'UPDATE sales_offers
+             SET balance_payment_request_id = :payment_request_id,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'payment_request_id' => $paymentRequestId,
+        ]);
+    }
+
+    public function markSalesOfferParasutInvoice(int $id, array $invoice): void
+    {
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET parasut_invoice_id = :invoice_id,
+                 parasut_invoice_no = :invoice_no,
+                 parasut_invoice_status = 'created',
+                 parasut_invoice_error = NULL,
+                 parasut_invoice_created_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = :id"
+        )->execute([
+            'id' => $id,
+            'invoice_id' => trim((string) ($invoice['id'] ?? '')),
+            'invoice_no' => $this->nullableString($invoice['invoice_no'] ?? ''),
+        ]);
+    }
+
+    public function markSalesOfferParasutInvoiceError(int $id, string $error): void
+    {
+        $this->db->prepare(
+            "UPDATE sales_offers
+             SET parasut_invoice_status = 'failed',
+                 parasut_invoice_error = :error,
+                 updated_at = NOW()
+             WHERE id = :id"
+        )->execute([
+            'id' => $id,
+            'error' => mb_substr(trim($error), 0, 2000),
+        ]);
     }
 
     public function findPaymentMethodByName(string $name): ?array
@@ -3954,6 +4063,7 @@ final class RenewalRepository
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 offer_number VARCHAR(30) NULL,
                 template_id INT UNSIGNED NULL,
+                customer_id INT UNSIGNED NULL,
                 title VARCHAR(190) NOT NULL,
                 customer_name VARCHAR(190) NOT NULL,
                 customer_email VARCHAR(190) NULL,
@@ -3964,10 +4074,20 @@ final class RenewalRepository
                 vat_total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
                 total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
                 notes TEXT NULL,
+                payment_request_enabled TINYINT(1) NOT NULL DEFAULT 0,
+                payment_request_percent DECIMAL(5,2) NOT NULL DEFAULT 20.00,
+                payment_request_id INT UNSIGNED NULL,
+                balance_payment_request_id INT UNSIGNED NULL,
+                parasut_invoice_id VARCHAR(64) NULL,
+                parasut_invoice_no VARCHAR(120) NULL,
+                parasut_invoice_status VARCHAR(30) NULL,
+                parasut_invoice_error TEXT NULL,
+                parasut_invoice_created_at DATETIME NULL,
                 created_by INT UNSIGNED NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 CONSTRAINT fk_sales_offers_template FOREIGN KEY (template_id) REFERENCES offer_templates(id) ON DELETE SET NULL,
+                CONSTRAINT fk_sales_offers_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
                 CONSTRAINT fk_sales_offers_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
                 UNIQUE KEY uq_sales_offers_number (offer_number),
                 INDEX idx_sales_offers_status (status, updated_at),
@@ -3976,8 +4096,22 @@ final class RenewalRepository
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
         $this->ensureColumn('sales_offers', 'offer_number', 'VARCHAR(30) NULL AFTER id');
+        $this->ensureColumn('sales_offers', 'customer_id', 'INT UNSIGNED NULL AFTER template_id');
+        $this->ensureColumn('sales_offers', 'payment_request_enabled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER notes');
+        $this->ensureColumn('sales_offers', 'payment_request_percent', 'DECIMAL(5,2) NOT NULL DEFAULT 20.00 AFTER payment_request_enabled');
+        $this->ensureColumn('sales_offers', 'payment_request_id', 'INT UNSIGNED NULL AFTER payment_request_percent');
+        $this->ensureColumn('sales_offers', 'balance_payment_request_id', 'INT UNSIGNED NULL AFTER payment_request_id');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_id', 'VARCHAR(64) NULL AFTER balance_payment_request_id');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_no', 'VARCHAR(120) NULL AFTER parasut_invoice_id');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_status', 'VARCHAR(30) NULL AFTER parasut_invoice_no');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_error', 'TEXT NULL AFTER parasut_invoice_status');
+        $this->ensureColumn('sales_offers', 'parasut_invoice_created_at', 'DATETIME NULL AFTER parasut_invoice_error');
         $this->backfillGeneratedOfferNumbers('sales_offers', 'offer_number', 'TK');
         $this->ensureIndex('sales_offers', 'uq_sales_offers_number', 'UNIQUE KEY uq_sales_offers_number (offer_number)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_customer_id', 'INDEX idx_sales_offers_customer_id (customer_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_payment_request', 'INDEX idx_sales_offers_payment_request (payment_request_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_balance_payment_request', 'INDEX idx_sales_offers_balance_payment_request (balance_payment_request_id)');
+        $this->ensureIndex('sales_offers', 'idx_sales_offers_parasut_invoice', 'INDEX idx_sales_offers_parasut_invoice (parasut_invoice_id)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS sales_offer_items (
@@ -5186,6 +5320,13 @@ final class RenewalRepository
         return in_array($currency, ['TRY', 'USD', 'EUR'], true) ? $currency : 'TRY';
     }
 
+    private function salesOfferPaymentPercent(mixed $value): float
+    {
+        $percent = $this->decimalValue($value, 20.0);
+
+        return max(1.0, min(100.0, $percent));
+    }
+
     private function nullableDecimalValue(mixed $value): ?float
     {
         if ($value === null || trim((string) $value) === '') {
@@ -5542,6 +5683,48 @@ final class RenewalRepository
         }
 
         return $items;
+    }
+
+    private function resolveSalesOfferCustomerId(array $data): ?int
+    {
+        $customerId = (int) ($data['customer_id'] ?? 0);
+        if ($customerId > 0 && $this->findCustomer($customerId) !== null) {
+            return $customerId;
+        }
+
+        $customerName = trim((string) ($data['customer_name'] ?? ''));
+        $email = trim(mb_strtolower((string) ($data['customer_email'] ?? '')));
+        if ($customerName === '' && $email === '') {
+            return null;
+        }
+
+        $conditions = [];
+        $params = [];
+        if ($customerName !== '') {
+            $conditions[] = 'company_name = :company_name';
+            $params['company_name'] = $customerName;
+        }
+        if ($email !== '') {
+            $conditions[] = 'LOWER(email) = :email';
+            $params['email'] = $email;
+        }
+        if ($conditions === []) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT id
+             FROM customers
+             WHERE deleted_at IS NULL
+               AND (' . implode(' OR ', $conditions) . ')
+             ORDER BY CASE WHEN company_name = :order_company_name THEN 0 ELSE 1 END, id ASC
+             LIMIT 1'
+        );
+        $params['order_company_name'] = $customerName;
+        $stmt->execute($params);
+        $resolved = (int) $stmt->fetchColumn();
+
+        return $resolved > 0 ? $resolved : null;
     }
 
     private function salesOfferItems(int $offerId): array

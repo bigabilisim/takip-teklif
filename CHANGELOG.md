@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.0.28] - 2026-05-09
+
+- Dashboard teklif kartlarında ayrı WhatsApp, e-posta ve PDF gönderim aksiyonları tek “Müşteriye gönder” penceresinde toplandı.
+- Teklif gönderiminde cari yetkilileri seçilebilir hale getirildi; manuel e-posta alıcısı ve teklif/PDF bağlantısı seçimi eklendi.
+- Teklif WhatsApp gönderiminde seçili yetkili telefonuyla teklif veya PDF bağlantısı gönderme akışı eklendi.
+
+## [2.0.27] - 2026-05-09
+
+- Giriş güvenliği e-posta bazlı kilitleme ile güçlendirildi.
+- Hatalı girişten sonra güvenlik doğrulaması eklendi; Cloudflare Turnstile anahtarı yoksa yerleşik matematik doğrulaması kullanılır.
+- Şüpheli girişler, IP/e-posta kilitleri ve doğrulama hataları için güvenlik logları ekranı eklendi.
+- Kritik giriş güvenliği olaylarında yöneticiye mail ve web push bildirimi gönderimi eklendi.
+- Ayarlar bölümüne güvenlik kartı ve Turnstile anahtar alanları eklendi.
+
+## [2.0.26] - 2026-05-08
+
+- Dashboard teklif kartlarına onaylı teklif için “Faturayı Paraşüt’te oluştur” aksiyonu eklendi.
+- Satış tekliflerinde Paraşüt fatura ID/no/durum bilgileri ve müşteri cari eşleşmesi saklanmaya başlandı.
+
+## [2.0.25] - 2026-05-08
+
+- Satış tekliflerinde ön ödeme tahsil edildikten sonra kalan bakiye için ayrı ödeme talebi oluşturma ve müşteriye mail gönderme eklendi.
+- Dashboard teklif kartlarında ön ödeme ve kalan bakiye durumu görünür hale getirildi.
+
+## [2.0.24] - 2026-05-08
+
+- Teklif antetindeki iletişim satırı `satis@bigabilisim.com - www.antalyabigabilisim.com` olarak güncellendi.
+- Teklif antetindeki e-posta ve web adresi tıklanabilir hale getirildi.
+
+## [2.0.23] - 2026-05-08
+
+- Satış tekliflerine “Teklif onaylanınca ön ödeme talep et” seçeneği ve varsayılan %20 oran alanı eklendi.
+- Müşteri teklif bağlantısında onay sonrası ön ödeme talebi oluşturulup kredi kartı ödeme akışına yönlendirme eklendi.
+
+## [2.0.22] - 2026-05-08
+
+- Stok / teklif kalemleri Paraşüt senkronuna hız limiti için otomatik bekleme ve tekrar deneme eklendi.
+- Stok / teklif kalemleri ekranına manuel kalem ekleme penceresi eklendi.
+
 ## [2.0.21] - 2026-05-08
 
 - Dashboard teklif kartı detayına taslak görüntüleme, WhatsApp gönderimi, e-posta gönderimi, PDF bağlantısı gönderimi ve PDF çıktısı açma aksiyonları eklendi.

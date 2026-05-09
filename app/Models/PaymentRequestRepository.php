@@ -247,6 +247,29 @@ final class PaymentRequestRepository
         return $row ?: null;
     }
 
+    public function latestPaidTransactionForRequests(array $requestIds): ?array
+    {
+        $requestIds = array_values(array_unique(array_filter(array_map('intval', $requestIds), static fn (int $id): bool => $id > 0)));
+        if ($requestIds === []) {
+            return null;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($requestIds), '?'));
+        $stmt = $this->db->prepare(
+            'SELECT mpt.*, mpr.public_token, mpr.title, mpr.description, mpr.customer_name, mpr.customer_email, mpr.customer_phone, mpr.customer_tax_number
+             FROM manual_payment_transactions mpt
+             INNER JOIN manual_payment_requests mpr ON mpr.id = mpt.request_id
+             WHERE mpt.request_id IN (' . $placeholders . ')
+               AND mpt.status = \'paid\'
+             ORDER BY COALESCE(mpt.paid_at, mpt.updated_at, mpt.created_at) DESC, mpt.id DESC
+             LIMIT 1'
+        );
+        $stmt->execute($requestIds);
+        $row = $stmt->fetch();
+
+        return $row ?: null;
+    }
+
     public function updateIyzicoPaymentResult(int $paymentId, array $request, array $response, string $status): void
     {
         $this->db->beginTransaction();

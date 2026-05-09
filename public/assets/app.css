@@ -1298,6 +1298,31 @@ h3 {
     font-size: 11px;
 }
 
+.offer-advance-payment {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+    gap: 10px 14px;
+    align-items: end;
+    padding: 14px;
+    border: 1px solid #d9e4e0;
+    border-radius: 10px;
+    background: #f6faf8;
+}
+
+.offer-advance-payment .checkline {
+    align-self: center;
+    margin: 0;
+}
+
+.offer-advance-payment p {
+    grid-column: 1 / -1;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 750;
+    line-height: 1.35;
+}
+
 .stock-sync-panel {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -3337,6 +3362,18 @@ td.actions {
     gap: 8px;
 }
 
+.inline-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.inline-actions.compact {
+    gap: 6px;
+    justify-content: flex-end;
+}
+
 .recipient-picker {
     display: grid;
     gap: 8px;
@@ -4063,6 +4100,15 @@ td.actions {
     background: #f4f6f5;
 }
 
+.security-log-detail-card {
+    min-width: min(620px, 70vw);
+}
+
+.security-context {
+    max-height: 260px;
+    margin-top: 0;
+}
+
 .contact-editor {
     display: grid;
     gap: 12px;
@@ -4477,24 +4523,28 @@ td.actions {
     grid-row: 2;
 }
 
-.settings-card[data-settings-key="bank-transfer"] {
+.settings-card[data-settings-key="security"] {
     grid-row: 3;
 }
 
-.settings-card[data-settings-key="parasut"] {
+.settings-card[data-settings-key="bank-transfer"] {
     grid-row: 4;
 }
 
-.settings-card[data-settings-key="iyzico"] {
+.settings-card[data-settings-key="parasut"] {
     grid-row: 5;
 }
 
-.settings-card[data-settings-key="stock-items"] {
+.settings-card[data-settings-key="iyzico"] {
     grid-row: 6;
 }
 
-.settings-card[data-settings-key="offer-templates"] {
+.settings-card[data-settings-key="stock-items"] {
     grid-row: 7;
+}
+
+.settings-card[data-settings-key="offer-templates"] {
+    grid-row: 8;
 }
 
 .settings-card[data-settings-key="database"] {
@@ -4507,6 +4557,10 @@ td.actions {
 
 .settings-card[data-settings-key="mail-logs"] {
     grid-row: 4;
+}
+
+.settings-card[data-settings-key="security-logs"] {
+    grid-row: 5;
 }
 
 .settings-card-brand {
@@ -5295,6 +5349,33 @@ td.actions {
 
 .login-panel .form-grid {
     gap: 12px;
+}
+
+.login-security-box {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid rgba(180, 35, 24, 0.22);
+    border-radius: 8px;
+    background: #fff6f4;
+}
+
+.login-security-box strong {
+    color: #9f1d14;
+    font-size: 13px;
+}
+
+.login-security-box span,
+.login-security-box label {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+    line-height: 1.35;
+}
+
+.login-security-box input {
+    margin-top: 6px;
+    background: #fff;
 }
 
 .login-rates {
@@ -6336,6 +6417,15 @@ label {
     line-height: 1.35;
 }
 
+.company-letterhead-copy a {
+    color: var(--primary);
+    text-decoration: none;
+}
+
+.company-letterhead-copy a:hover {
+    text-decoration: underline;
+}
+
 .company-letterhead img {
     display: block;
     width: auto;
@@ -6422,6 +6512,32 @@ label {
 
 .customer-offer-print-actions {
     margin-bottom: 4px;
+}
+
+.sales-offer-approval-box {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 16px;
+    align-items: center;
+    margin-top: 18px;
+    padding: 16px;
+    border: 1px solid #b8d8d1;
+    border-radius: 14px;
+    background: #eef9f6;
+}
+
+.sales-offer-approval-box h2 {
+    margin: 0 0 6px;
+    font-size: clamp(20px, 2.3vw, 28px);
+    line-height: 1.08;
+}
+
+.sales-offer-approval-box p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 15px;
+    font-weight: 750;
+    line-height: 1.45;
 }
 
 .customer-offer-history {
@@ -6818,6 +6934,8 @@ label {
     .manual-price-form,
     .manual-price-line,
     .customer-offer-line,
+    .offer-advance-payment,
+    .sales-offer-approval-box,
     .company-letterhead,
     .customer-offer-form,
     .customer-offer-line-fields,
