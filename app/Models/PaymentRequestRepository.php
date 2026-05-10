@@ -83,8 +83,8 @@ final class PaymentRequestRepository
             return false;
         }
 
-        if ((string) ($current['status'] ?? '') === 'paid') {
-            throw new \RuntimeException('Ödenmiş ödeme talebi silinemez; tahsilat geçmişi için kayıt korunmalı.');
+        if (in_array((string) ($current['status'] ?? ''), ['paid', 'refunded'], true)) {
+            throw new \RuntimeException('Tahsilat geçmişi olan ödeme talebi silinemez; gerekiyorsa iade edildi olarak işaretleyin.');
         }
 
         $stmt = $this->db->prepare(
@@ -94,11 +94,75 @@ final class PaymentRequestRepository
                  reminder_until_paid = 0,
                  updated_at = NOW()
              WHERE id = :id
-               AND status <> \'paid\''
+               AND status NOT IN (\'paid\', \'refunded\')'
         );
         $stmt->execute(['id' => $id]);
 
         return $stmt->rowCount() > 0;
+    }
+
+    public function refund(int $id, string $note = ''): bool
+    {
+        $current = $this->find($id);
+        if (!$current) {
+            return false;
+        }
+
+        $status = (string) ($current['status'] ?? 'pending');
+        if ($status === 'refunded') {
+            return true;
+        }
+
+        if ($status !== 'paid') {
+            throw new \RuntimeException('Sadece ödenmiş ödeme talepleri iade edildi olarak işaretlenebilir.');
+        }
+
+        $note = trim($note);
+        $this->db->beginTransaction();
+
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE manual_payment_requests
+                 SET status = \'refunded\',
+                     refunded_at = NOW(),
+                     refund_note = :refund_note,
+                     reminder_repeat_daily = 0,
+                     reminder_until_paid = 0,
+                     updated_at = NOW()
+                 WHERE id = :id
+                   AND status = \'paid\''
+            );
+            $stmt->execute([
+                'id' => $id,
+                'refund_note' => $this->nullableString($note),
+            ]);
+
+            $this->db->prepare(
+                'UPDATE manual_payment_transactions
+                 SET status = \'refunded\',
+                     payment_status = COALESCE(NULLIF(payment_status, \'\'), \'REFUNDED\'),
+                     updated_at = NOW()
+                 WHERE request_id = :request_id
+                   AND status = \'paid\''
+            )->execute(['request_id' => $id]);
+
+            $this->db->prepare(
+                'INSERT INTO manual_payment_request_logs
+                    (request_id, channel, recipient, subject, body, status, error_message)
+                 VALUES
+                    (:request_id, \'system\', \'internal\', \'Ödeme iade edildi\', :body, \'refunded\', NULL)'
+            )->execute([
+                'request_id' => $id,
+                'body' => $note !== '' ? $note : 'Ödeme iade edildi olarak işaretlendi.',
+            ]);
+
+            $this->db->commit();
+
+            return $stmt->rowCount() > 0;
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
     }
 
     public function paidCardPaymentRows(int $limit = 100): array
@@ -175,11 +239,11 @@ final class PaymentRequestRepository
             return null;
         }
 
-        $isPaid = (string) ($current['status'] ?? '') === 'paid';
-        $amount = $isPaid
+        $isFinalized = in_array((string) ($current['status'] ?? ''), ['paid', 'refunded'], true);
+        $amount = $isFinalized
             ? (float) ($current['amount'] ?? 0)
             : max(0.01, (float) ($data['amount'] ?? $current['amount'] ?? 0));
-        $currency = $isPaid
+        $currency = $isFinalized
             ? (string) ($current['currency'] ?? 'TRY')
             : self::normalizeCurrency((string) ($data['currency'] ?? $current['currency'] ?? 'TRY'));
         $customerId = (int) ($current['customer_id'] ?? 0);
@@ -328,7 +392,7 @@ final class PaymentRequestRepository
     public function findIyzicoPaymentByToken(string $token): ?array
     {
         $stmt = $this->db->prepare(
-            'SELECT mpt.*, mpr.public_token, mpr.title, mpr.description, mpr.customer_name, mpr.customer_email, mpr.customer_phone, mpr.customer_tax_number
+            'SELECT mpt.*, mpr.public_token, mpr.customer_id, mpr.title, mpr.description, mpr.customer_name, mpr.customer_email, mpr.customer_phone, mpr.customer_tax_number, mpr.recipients_json
              FROM manual_payment_transactions mpt
              INNER JOIN manual_payment_requests mpr ON mpr.id = mpt.request_id
              WHERE mpt.provider = :provider
@@ -353,7 +417,7 @@ final class PaymentRequestRepository
 
         $placeholders = implode(',', array_fill(0, count($requestIds), '?'));
         $stmt = $this->db->prepare(
-            'SELECT mpt.*, mpr.public_token, mpr.title, mpr.description, mpr.customer_name, mpr.customer_email, mpr.customer_phone, mpr.customer_tax_number
+            'SELECT mpt.*, mpr.public_token, mpr.customer_id, mpr.title, mpr.description, mpr.customer_name, mpr.customer_email, mpr.customer_phone, mpr.customer_tax_number, mpr.recipients_json
              FROM manual_payment_transactions mpt
              INNER JOIN manual_payment_requests mpr ON mpr.id = mpt.request_id
              WHERE mpt.request_id IN (' . $placeholders . ')
@@ -370,6 +434,9 @@ final class PaymentRequestRepository
     public function updateIyzicoPaymentResult(int $paymentId, array $request, array $response, string $status): void
     {
         $currentStatus = (string) $this->db->query('SELECT status FROM manual_payment_transactions WHERE id = ' . (int) $paymentId)->fetchColumn();
+        if ($currentStatus === 'refunded') {
+            return;
+        }
         if ($currentStatus === 'paid' && $status !== 'paid') {
             return;
         }
@@ -540,8 +607,10 @@ final class PaymentRequestRepository
                 reminder_repeat_daily TINYINT(1) NOT NULL DEFAULT 0,
                 reminder_until_paid TINYINT(1) NOT NULL DEFAULT 0,
                 last_reminder_sent_at DATETIME NULL,
-                status ENUM('pending','paid','cancelled') NOT NULL DEFAULT 'pending',
+                status ENUM('pending','paid','refunded','cancelled') NOT NULL DEFAULT 'pending',
                 paid_at DATETIME NULL,
+                refunded_at DATETIME NULL,
+                refund_note TEXT NULL,
                 created_by INT UNSIGNED NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -560,6 +629,9 @@ final class PaymentRequestRepository
         $this->ensureColumn('manual_payment_requests', 'reminder_repeat_daily', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER reminder_start_days_before');
         $this->ensureColumn('manual_payment_requests', 'reminder_until_paid', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER reminder_repeat_daily');
         $this->ensureColumn('manual_payment_requests', 'last_reminder_sent_at', 'DATETIME NULL AFTER reminder_until_paid');
+        $this->ensureColumn('manual_payment_requests', 'refunded_at', 'DATETIME NULL AFTER paid_at');
+        $this->ensureColumn('manual_payment_requests', 'refund_note', 'TEXT NULL AFTER refunded_at');
+        $this->ensureManualPaymentStatusEnum();
         $this->ensureIndex('manual_payment_requests', 'idx_manual_payment_requests_customer', 'INDEX idx_manual_payment_requests_customer (customer_id)');
         $this->ensureIndex('manual_payment_requests', 'idx_manual_payment_requests_due_reminders', 'INDEX idx_manual_payment_requests_due_reminders (status, payment_due_date, reminder_time, last_reminder_sent_at)');
 
@@ -630,6 +702,32 @@ final class PaymentRequestRepository
                 $definition
             ));
         }
+    }
+
+    private function ensureManualPaymentStatusEnum(): void
+    {
+        $stmt = $this->db->prepare(
+            'SELECT COLUMN_TYPE
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = :table
+               AND COLUMN_NAME = :column
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'table' => 'manual_payment_requests',
+            'column' => 'status',
+        ]);
+        $columnType = (string) $stmt->fetchColumn();
+
+        if ($columnType !== '' && str_contains($columnType, "'refunded'")) {
+            return;
+        }
+
+        $this->db->exec(
+            "ALTER TABLE manual_payment_requests
+             MODIFY status ENUM('pending','paid','refunded','cancelled') NOT NULL DEFAULT 'pending'"
+        );
     }
 
     private function ensureIndex(string $table, string $index, string $definition): void

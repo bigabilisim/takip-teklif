@@ -3287,7 +3287,7 @@ final class RenewalRepository
     public function findIyzicoPaymentByToken(string $token): ?array
     {
         $stmt = $this->db->prepare(
-            'SELECT rp.*, r.title, r.brand, c.company_name, c.email AS customer_email
+            'SELECT rp.*, r.customer_id, r.title, r.brand, c.company_name, c.contact_name, c.email AS customer_email, c.phone AS customer_phone
              FROM renewal_payments rp
              INNER JOIN renewals r ON r.id = rp.renewal_id
              INNER JOIN customers c ON c.id = r.customer_id

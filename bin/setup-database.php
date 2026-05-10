@@ -30,7 +30,10 @@ $pdo->exec(sprintf(
 ));
 $pdo->exec(sprintf('USE `%s`', $database));
 
-run_sql_file($pdo, dirname(__DIR__) . '/database/schema.sql');
+$schemaExists = table_exists($pdo, 'users');
+if (!$schemaExists) {
+    run_sql_file($pdo, dirname(__DIR__) . '/database/schema.sql');
+}
 
 $exists = (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 if ($exists === 0) {
@@ -38,7 +41,21 @@ if ($exists === 0) {
 }
 
 echo "Veritabani hazir: {$db['database']}\n";
+echo $schemaExists ? "Mevcut sema korundu.\n" : "Sema olusturuldu.\n";
 echo $exists === 0 ? "Demo veriler yuklendi.\n" : "Mevcut veriler korundu, seed atlandi.\n";
+
+function table_exists(PDO $pdo, string $table): bool
+{
+    $stmt = $pdo->prepare(
+        'SELECT COUNT(*)
+         FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = :table_name'
+    );
+    $stmt->execute(['table_name' => $table]);
+
+    return (int) $stmt->fetchColumn() > 0;
+}
 
 function run_sql_file(PDO $pdo, string $path): void
 {

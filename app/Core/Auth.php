@@ -18,7 +18,7 @@ final class Auth
         $stmt->execute(['email' => $email]);
         $user = $stmt->fetch();
 
-        if (!$user || !self::verifyPassword($password, (string) $user['password_hash'])) {
+        if (!$user || !PasswordHasher::verify($password, (string) $user['password_hash'])) {
             return false;
         }
 
@@ -30,12 +30,12 @@ final class Auth
         self::$cachedPermissions = null;
 
         $passwordHash = (string) $user['password_hash'];
-        if (!self::isSha256Hash($passwordHash)) {
+        if (PasswordHasher::needsRehash($passwordHash)) {
             Database::connection()
                 ->prepare('UPDATE users SET password_hash = :password_hash, last_login_at = NOW() WHERE id = :id')
                 ->execute([
                     'id' => $user['id'],
-                    'password_hash' => self::sha256PasswordHash($password),
+                    'password_hash' => PasswordHasher::hash($password),
                 ]);
         } else {
             Database::connection()
@@ -44,30 +44,6 @@ final class Auth
         }
 
         return true;
-    }
-
-    private static function verifyPassword(string $password, string $storedHash): bool
-    {
-        if (self::isSha256Hash($storedHash)) {
-            return hash_equals(substr($storedHash, 7), hash('sha256', $password));
-        }
-
-        if (preg_match('/^[a-f0-9]{64}$/i', $storedHash) === 1) {
-            return hash_equals(strtolower($storedHash), hash('sha256', $password));
-        }
-
-        return password_verify($password, $storedHash);
-    }
-
-    private static function isSha256Hash(string $storedHash): bool
-    {
-        return str_starts_with($storedHash, 'sha256$')
-            && preg_match('/^[a-f0-9]{64}$/i', substr($storedHash, 7)) === 1;
-    }
-
-    private static function sha256PasswordHash(string $password): string
-    {
-        return 'sha256$' . hash('sha256', $password);
     }
 
     public static function user(): ?array
@@ -313,11 +289,11 @@ final class Auth
 
     private static function maxActiveSessions(): int
     {
-        return max(1, (int) \app_config('auth.max_active_sessions', 2));
+        return max(3, (int) \app_config('auth.max_active_sessions', 3));
     }
 
     private static function sessionLifetimeSeconds(): int
     {
-        return max(3600, (int) \app_config('auth.session_lifetime', 86400));
+        return max(604800, (int) \app_config('auth.session_lifetime', 604800));
     }
 }

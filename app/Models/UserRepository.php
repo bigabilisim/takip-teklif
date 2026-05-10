@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Core\Database;
+use App\Core\PasswordHasher;
 use PDO;
 
 final class UserRepository
@@ -169,7 +170,7 @@ final class UserRepository
 
     public function updatePassword(int $id, string $password): void
     {
-        $this->setPasswordHash($id, self::sha256PasswordHash($password));
+        $this->setPasswordHash($id, PasswordHasher::hash($password));
     }
 
     public function setPasswordHash(int $id, string $passwordHash): void
@@ -236,15 +237,10 @@ final class UserRepository
         return [
             'name' => trim((string) ($data['name'] ?? '')),
             'email' => strtolower(trim((string) ($data['email'] ?? ''))),
-            'password_hash' => $password !== '' ? self::sha256PasswordHash($password) : ($creating ? '' : null),
+            'password_hash' => $password !== '' ? PasswordHasher::hash($password) : ($creating ? '' : null),
             'role' => $role,
             'is_active' => !empty($data['is_active']) ? 1 : 0,
         ];
-    }
-
-    private static function sha256PasswordHash(string $password): string
-    {
-        return 'sha256$' . hash('sha256', $password);
     }
 
     private function withPermissionList(array $row): array

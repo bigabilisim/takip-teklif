@@ -31,8 +31,8 @@ return [
     ],
 
     'auth' => [
-        'session_lifetime' => 86400,
-        'max_active_sessions' => 2,
+        'session_lifetime' => 604800,
+        'max_active_sessions' => 3,
     ],
 
     'parasut' => [

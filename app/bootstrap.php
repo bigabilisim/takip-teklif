@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
-define('ROOT_PATH', dirname(__DIR__));
+if (!defined('ROOT_PATH')) {
+    define('ROOT_PATH', dirname(__DIR__));
+}
 
 error_reporting(E_ALL);
+ini_set('expose_php', '0');
 
 $configName = getenv('APP_CONFIG') ?: 'config.php';
 if (!preg_match('/^[A-Za-z0-9_.-]+\.php$/', $configName)) {
@@ -53,10 +56,26 @@ spl_autoload_register(static function (string $class): void {
     }
 });
 
-require ROOT_PATH . '/app/Core/helpers.php';
+require_once ROOT_PATH . '/app/Core/helpers.php';
+
+if (PHP_SAPI !== 'cli' && !headers_sent()) {
+    header_remove('X-Powered-By');
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+    if (
+        strtolower((string) ($_SERVER['HTTPS'] ?? '')) === 'on'
+        || strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https'
+        || (string) ($_SERVER['SERVER_PORT'] ?? '') === '443'
+    ) {
+        header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+    }
+}
 
 if (session_status() === PHP_SESSION_NONE) {
-    $sessionLifetime = max(3600, (int) ($appConfig['auth']['session_lifetime'] ?? 86400));
+    $sessionLifetime = max(604800, (int) ($appConfig['auth']['session_lifetime'] ?? 604800));
+    ini_set('session.use_strict_mode', '1');
     ini_set('session.gc_maxlifetime', (string) $sessionLifetime);
     ini_set('session.cookie_lifetime', (string) $sessionLifetime);
     $httpsSignals = [

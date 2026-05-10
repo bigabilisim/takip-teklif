@@ -1,5 +1,49 @@
 # Changelog
 
+## [2.0.59] - 2026-05-10
+
+- Ödeme Talep Et ekranında manuel ödeme talebi formu ilk açılışta kapalı gelecek şekilde düzenlendi.
+- “Manuel ödeme talebi oluştur” butonu eklendi; butona basınca form sayfa içi açılır panel olarak görüntülenir hale getirildi.
+- Manuel ödeme talebi alanı daha kompakt ve odaklı kullanılacak şekilde sadeleştirildi.
+
+## [2.0.58] - 2026-05-10
+
+- Manuel ödeme taleplerine “İade edildi” durumu eklendi.
+- Ödenmiş manuel ödeme talepleri silinmek yerine iade edildi olarak işaretlenebilir hale getirildi.
+- İade edilen ödeme talepleri tahsilat toplamlarından düşecek, ödeme linki tekrar tahsilata izin vermeyecek ve geçmiş kayıt olarak korunacak şekilde güncellendi.
+
+## [2.0.57] - 2026-05-10
+
+- Başarılı iyzico ödemelerinden sonra müşteri cari kartındaki yetkililere ödeme alındı bilgilendirmesi gönderilir hale getirildi.
+- Manuel ödeme taleplerinde seçilen alıcılar ve bağlı cari yetkilileri ödeme sonrası bilgilendirme listesine dahil edildi.
+- Ödeme sonrası müşteri bilgilendirme mailleri mail loglarına yazılacak şekilde kayıt altına alındı.
+
+## [2.0.56] - 2026-05-10
+
+- Teklif kartındaki Paraşüt aktarımı seçimli hale getirildi.
+- Onaylı tekliflerde “Paraşüt’e aktar” ve “Paraşüt’e tahsilatlı aktar” seçenekleri ayrıldı.
+- Sadece fatura aktarımında ödeme/tahsilat bilgisi Paraşüt fatura notuna eklenmeyecek şekilde düzenlendi.
+
+## [2.0.55] - 2026-05-10
+
+- Kullanıcı oturum süresi 1 hafta olacak şekilde güncellendi.
+- Kullanıcı başına aktif cihaz/oturum limiti 3 cihaza çıkarıldı.
+- Eski canlı config değerleri daha düşük olsa bile uygulama içi minimum oturum süresi ve cihaz limiti korunur hale getirildi.
+
+## [2.0.54] - 2026-05-10
+
+- Uygulamaya merkezi hata yakalama katmanı eklendi.
+- Beklenmeyen hatalar teknik SQLSTATE/stack trace yerine kullanıcı dostu açıklama ve referans koduyla gösterilir hale getirildi.
+- Yakalanan sistem hatalarında yöneticiye web push ve e-posta bildirimi gönderilecek şekilde bildirim akışı eklendi.
+- Manuel ödeme ve teklif ödeme hataları da kullanıcı dostu hata metinlerine bağlandı.
+
+## [2.0.53] - 2026-05-09
+
+- Bootstrap tekrar çağrıldığında oluşabilecek sabit/fonksiyon tekrar tanımı hataları engellendi.
+- Kullanıcı şifreleri yeni kayıtlarda modern `password_hash` algoritmasıyla saklanır hale getirildi; eski SHA-256 kayıtlar başarılı girişte otomatik yükseltiliyor.
+- Kurulum script’i mevcut veritabanı şemasını koruyacak şekilde güvenli ve tekrar çalıştırılabilir hale getirildi.
+- Yanıtlara temel güvenlik başlıkları, HSTS, PHP versiyon gizleme ve strict session modu eklendi.
+
 ## [2.0.52] - 2026-05-09
 
 - Onaylanan satış teklifleri için operasyon takip alanları eklendi.

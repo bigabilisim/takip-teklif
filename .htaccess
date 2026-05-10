@@ -2,6 +2,16 @@ Options -Indexes
 DirectoryIndex public/index.php
 AddType application/manifest+json .webmanifest
 AddType image/svg+xml .svg
+
+<IfModule mod_headers.c>
+    Header always unset X-Powered-By
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+</IfModule>
+
 RewriteEngine On
 
 RewriteCond %{HTTPS} !=on

@@ -22,6 +22,40 @@ use App\Models\UserRepository;
 
 require dirname(__DIR__) . '/app/bootstrap.php';
 
+set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+    if ((error_reporting() & $severity) === 0) {
+        return false;
+    }
+
+    if (in_array($severity, [E_DEPRECATED, E_USER_DEPRECATED], true)) {
+        error_log($message . ' in ' . $file . ':' . $line);
+        return true;
+    }
+
+    throw new ErrorException($message, 0, $severity, $file, $line);
+});
+
+set_exception_handler(static function (Throwable $e): void {
+    http_response_code(500);
+    render_error($e);
+});
+
+register_shutdown_function(static function (): void {
+    $error = error_get_last();
+    if (!is_array($error) || !in_array((int) ($error['type'] ?? 0), [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        return;
+    }
+
+    $exception = new ErrorException(
+        (string) ($error['message'] ?? 'Fatal error'),
+        0,
+        (int) ($error['type'] ?? 0),
+        (string) ($error['file'] ?? ''),
+        (int) ($error['line'] ?? 0)
+    );
+    report_application_error($exception, 'shutdown');
+});
+
 $path = route_path();
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
@@ -260,6 +294,9 @@ try {
     } elseif (preg_match('#^/payment-requests/(\d+)/delete$#', $path, $matches) && $method === 'POST') {
         require_permission('collections.manage');
         handle_payment_request_delete((int) $matches[1]);
+    } elseif (preg_match('#^/payment-requests/(\d+)/refund$#', $path, $matches) && $method === 'POST') {
+        require_permission('collections.manage');
+        handle_payment_request_refund((int) $matches[1]);
     } elseif (preg_match('#^/payment-requests/(\d+)/mail$#', $path, $matches) && $method === 'POST') {
         require_permission('collections.manage');
         handle_payment_request_mail((int) $matches[1]);
@@ -785,7 +822,7 @@ function handle_payment_request_update(int $requestId): void
         if ($title === '') {
             throw new RuntimeException('Ödeme talebi başlığı yazın.');
         }
-        if ((string) ($request['status'] ?? '') !== 'paid' && $amount <= 0) {
+        if (!in_array((string) ($request['status'] ?? ''), ['paid', 'refunded'], true) && $amount <= 0) {
             throw new RuntimeException('Tahsil edilecek tutar sıfırdan büyük olmalı.');
         }
 
@@ -827,6 +864,22 @@ function handle_payment_request_delete(int $requestId): void
     }
 
     redirect('/payment-requests');
+}
+
+function handle_payment_request_refund(int $requestId): void
+{
+    verify_csrf();
+
+    try {
+        $repo = new PaymentRequestRepository();
+        $note = trim((string) ($_POST['refund_note'] ?? ''));
+        $refunded = $repo->refund($requestId, $note);
+        flash($refunded ? 'success' : 'error', $refunded ? 'Ödeme talebi iade edildi olarak işaretlendi.' : 'Ödeme talebi bulunamadı.');
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect('/payment-requests?created=' . $requestId);
 }
 
 function handle_payment_request_mail(int $requestId): void
@@ -2233,6 +2286,7 @@ function payment_request_status_label(string $status): string
 {
     return match ($status) {
         'paid' => 'Ödendi',
+        'refunded' => 'İade edildi',
         'cancelled' => 'İptal',
         default => 'Bekliyor',
     };
@@ -2242,6 +2296,7 @@ function payment_request_status_class(string $status): string
 {
     return match ($status) {
         'paid' => 'active',
+        'refunded' => 'cancelled',
         'cancelled' => 'cancelled',
         default => 'warning',
     };
@@ -4289,7 +4344,7 @@ function handle_manual_payment_card_create(string $token): void
     }
 
     try {
-        if ((string) ($request['status'] ?? 'pending') === 'paid') {
+        if (in_array((string) ($request['status'] ?? 'pending'), ['paid', 'refunded'], true)) {
             redirect('/pay/' . rawurlencode($token));
         }
         if ((string) ($request['status'] ?? 'pending') === 'cancelled') {
@@ -4310,7 +4365,7 @@ function handle_manual_payment_card_create(string $token): void
         $checkoutUrl = create_manual_iyzico_checkout_url($repo, $request, null, 'manual-public');
         redirect($checkoutUrl);
     } catch (Throwable $e) {
-        $_SESSION['manual_payment_error'] = $e->getMessage();
+        $_SESSION['manual_payment_error'] = handle_caught_error($e, 'manual_payment_card_create');
         redirect('/pay/' . rawurlencode($token));
     }
 }
@@ -4336,7 +4391,7 @@ function handle_manual_payment_public_email(string $token): void
     }
 
     try {
-        if ((string) ($request['status'] ?? 'pending') === 'paid') {
+        if (in_array((string) ($request['status'] ?? 'pending'), ['paid', 'refunded'], true)) {
             redirect('/pay/' . rawurlencode($token));
         }
         if ((string) ($request['status'] ?? 'pending') === 'cancelled') {
@@ -4358,7 +4413,7 @@ function handle_manual_payment_public_email(string $token): void
         $checkoutUrl = create_manual_iyzico_checkout_url($repo, $request, null, 'manual-public');
         redirect($checkoutUrl);
     } catch (Throwable $e) {
-        $_SESSION['manual_payment_error'] = $e->getMessage();
+        $_SESSION['manual_payment_error'] = handle_caught_error($e, 'manual_payment_email');
         redirect('/pay/' . rawurlencode($token) . '#email-required');
     }
 }
@@ -4384,7 +4439,7 @@ function handle_manual_payment_public_tax(string $token): void
     }
 
     try {
-        if ((string) ($request['status'] ?? 'pending') === 'paid') {
+        if (in_array((string) ($request['status'] ?? 'pending'), ['paid', 'refunded'], true)) {
             redirect('/pay/' . rawurlencode($token));
         }
         if ((string) ($request['status'] ?? 'pending') === 'cancelled') {
@@ -4405,7 +4460,7 @@ function handle_manual_payment_public_tax(string $token): void
         $checkoutUrl = create_manual_iyzico_checkout_url($repo, $request, null, 'manual-public');
         redirect($checkoutUrl);
     } catch (Throwable $e) {
-        $_SESSION['manual_payment_error'] = $e->getMessage();
+        $_SESSION['manual_payment_error'] = handle_caught_error($e, 'manual_payment_tax');
         redirect('/pay/' . rawurlencode($token) . '#tax-required');
     }
 }
@@ -4436,6 +4491,35 @@ function handle_manual_payment_public(string $method, string $token): void
                 <p class="eyebrow">Ödeme talebi</p>
                 <h1>Bu ödeme bağlantısı iptal edildi.</h1>
                 <p class="muted">Yeni ödeme linki için firma yetkilisiyle iletişime geçebilirsiniz.</p>
+            </section>
+            <?php
+        });
+        return;
+    }
+
+    if ((string) ($request['status'] ?? 'pending') === 'refunded') {
+        render_public_layout('Ödeme talebi', static function () use ($request): void {
+            ?>
+            <section class="public-card payment-result-card warning">
+                <p class="eyebrow">Ödeme talebi</p>
+                <h1>Bu ödeme iade edildi.</h1>
+                <p class="muted"><?= h((string) ($request['title'] ?? 'Manuel ödeme talebi')) ?></p>
+                <div class="payment-choice-summary">
+                    <div>
+                        <span>Talep no</span>
+                        <strong><?= h(manual_payment_request_number($request)) ?></strong>
+                    </div>
+                    <div>
+                        <span>İade edilen tutar</span>
+                        <strong><?= h(money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'))) ?></strong>
+                    </div>
+                </div>
+                <?php if (trim((string) ($request['refund_note'] ?? '')) !== ''): ?>
+                    <div class="settings-note">
+                        <strong>İade notu</strong>
+                        <span><?= nl2br(h((string) $request['refund_note']), false) ?></span>
+                    </div>
+                <?php endif; ?>
             </section>
             <?php
         });
@@ -4655,6 +4739,7 @@ function handle_iyzico_callback(string $method): void
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
         if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
             notify_payment_received($payment, $response, 'renewal');
+            notify_customer_payment_received($payment, $response, 'renewal');
         } elseif ($localStatus !== 'paid') {
             notify_payment_failed($payment, $response, 'renewal', $message, $localStatus);
         }
@@ -4718,6 +4803,7 @@ function handle_manual_iyzico_callback_result(PaymentRequestRepository $repo, ar
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
         if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
             notify_payment_received($payment, $response, 'manual');
+            notify_customer_payment_received($payment, $response, 'manual');
         } elseif ($localStatus !== 'paid') {
             notify_payment_failed($payment, $response, 'manual', $message, $localStatus);
         }
@@ -4879,6 +4965,180 @@ function notify_payment_received(array $payment, array $response, string $source
         );
     } catch (Throwable $e) {
         error_log('Ödeme alındı bildirimi gönderilemedi: ' . $e->getMessage());
+    }
+}
+
+function notify_customer_payment_received(array $payment, array $response, string $source): void
+{
+    try {
+        $context = payment_received_notification_context($payment, $response, $source);
+        $recipients = payment_customer_confirmation_recipients($payment, $source);
+        if ($recipients === []) {
+            return;
+        }
+
+        $subject = 'Ödeme alındı: ' . $context['title'];
+        foreach ($recipients as $recipient) {
+            $email = trim((string) ($recipient['email'] ?? ''));
+            if ($email === '') {
+                continue;
+            }
+
+            $body = customer_payment_received_mail_body($context, $recipient, $payment, $response);
+            $result = Mailer::sendWithResult($email, $subject, $body, true);
+            log_customer_payment_confirmation(
+                $source,
+                $payment,
+                $email,
+                $subject,
+                (string) ($result['body'] ?? $body),
+                $result
+            );
+        }
+    } catch (Throwable $e) {
+        error_log('Müşteri ödeme alındı bilgilendirmesi gönderilemedi: ' . $e->getMessage());
+    }
+}
+
+function payment_customer_confirmation_recipients(array $payment, string $source): array
+{
+    $recipients = [];
+
+    if ($source === 'renewal') {
+        try {
+            $renewalId = (int) ($payment['renewal_id'] ?? 0);
+            $renewal = $renewalId > 0 ? (new RenewalRepository())->find($renewalId) : null;
+            if ($renewal) {
+                foreach (renewal_customer_contacts($renewal) as $contact) {
+                    payment_add_customer_confirmation_recipient(
+                        $recipients,
+                        (string) ($contact['email'] ?? ''),
+                        (string) ($contact['full_name'] ?? $contact['name'] ?? '')
+                    );
+                }
+            }
+        } catch (Throwable) {
+            // Fallback e-posta aşağıda yine değerlendirilecek.
+        }
+    } else {
+        try {
+            $customerId = (int) ($payment['customer_id'] ?? 0);
+            $customer = $customerId > 0 ? (new RenewalRepository())->findCustomer($customerId) : null;
+            if ($customer) {
+                payment_add_customer_confirmation_recipient(
+                    $recipients,
+                    (string) ($customer['email'] ?? ''),
+                    (string) (($customer['contact_name'] ?? '') ?: ($customer['company_name'] ?? ''))
+                );
+                foreach (($customer['contacts'] ?? []) as $contact) {
+                    if (!is_array($contact)) {
+                        continue;
+                    }
+                    payment_add_customer_confirmation_recipient(
+                        $recipients,
+                        (string) ($contact['email'] ?? ''),
+                        (string) ($contact['full_name'] ?? '')
+                    );
+                }
+            }
+        } catch (Throwable) {
+            // Manuel talebin kendi alıcıları aşağıda kullanılmaya devam eder.
+        }
+
+        foreach (manual_payment_request_recipients($payment) as $recipient) {
+            payment_add_customer_confirmation_recipient(
+                $recipients,
+                (string) ($recipient['email'] ?? ''),
+                (string) ($recipient['name'] ?? '')
+            );
+        }
+    }
+
+    payment_add_customer_confirmation_recipient(
+        $recipients,
+        (string) ($payment['customer_email'] ?? ''),
+        (string) (($payment['contact_name'] ?? '') ?: ($payment['customer_name'] ?? $payment['company_name'] ?? ''))
+    );
+
+    return array_values($recipients);
+}
+
+function payment_add_customer_confirmation_recipient(array &$recipients, string $email, string $name = ''): void
+{
+    $email = trim(mb_strtolower($email));
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return;
+    }
+
+    $name = trim($name);
+    if (isset($recipients[$email])) {
+        if ($name !== '' && (string) ($recipients[$email]['name'] ?? '') === $email) {
+            $recipients[$email]['name'] = $name;
+        }
+        return;
+    }
+
+    $recipients[$email] = [
+        'name' => $name !== '' ? $name : $email,
+        'email' => $email,
+    ];
+}
+
+function customer_payment_received_mail_body(array $context, array $recipient, array $payment, array $response): string
+{
+    $recipientName = trim((string) ($recipient['name'] ?? ''));
+    $greeting = $recipientName !== '' && !str_contains($recipientName, '@')
+        ? 'Merhaba ' . $recipientName . ','
+        : 'Merhaba,';
+    $paymentId = trim((string) (($response['paymentId'] ?? '') ?: ($payment['payment_id'] ?? '')));
+    $paidAt = !empty($payment['paid_at']) ? strtotime((string) $payment['paid_at']) : time();
+    $referenceLabel = $context['source'] === 'manual' ? 'Talep no' : 'Kayıt no';
+    $referenceValue = $context['source'] === 'manual'
+        ? manual_payment_request_number(['id' => $context['record_id'] ?? 0, 'created_at' => $payment['created_at'] ?? ''])
+        : '#' . (string) ($context['record_id'] ?? 0);
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;font-family:Arial,sans-serif;color:#17201c;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:24px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;">Ödeme bilgilendirmesi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:26px;line-height:1.18;color:#17201c;">Ödemeniz başarıyla alındı.</h1>'
+        . '<p style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . h($greeting) . '<br>'
+        . h($context['customer']) . ' adına yapılan ödeme sistemimize başarılı olarak ulaşmıştır. Bu bilgilendirme, cari kartında kayıtlı yetkililerin süreci aynı anda takip edebilmesi için gönderilmiştir.</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . manual_mail_row('Durum', 'Ödeme alındı')
+        . manual_mail_row($referenceLabel, $referenceValue)
+        . manual_mail_row('Müşteri', (string) $context['customer'])
+        . manual_mail_row('Kayıt', (string) $context['title'])
+        . manual_mail_row('Tutar', (string) $context['amount'])
+        . manual_mail_row('Ödeme tarihi', date('d.m.Y H:i', $paidAt ?: time()))
+        . manual_mail_row('Ödeme referansı', $paymentId !== '' ? $paymentId : '-')
+        . '</table>'
+        . '<p style="margin:18px 0 0;color:#61726c;font-size:13px;line-height:1.5;">Bu mail bilgi amaçlıdır; ayrıca işlem yapmanız gerekmez.</p>'
+        . '</td></tr></table></td></tr></table></body></html>';
+}
+
+function log_customer_payment_confirmation(string $source, array $payment, string $email, string $subject, string $body, array $result): void
+{
+    try {
+        $status = !empty($result['ok']) ? 'sent' : 'failed';
+        $error = !empty($result['ok']) ? null : (string) ($result['error'] ?? 'Mail gönderilemedi.');
+
+        if ($source === 'manual') {
+            $requestId = (int) ($payment['request_id'] ?? 0);
+            if ($requestId > 0) {
+                (new PaymentRequestRepository())->logDelivery($requestId, 'payment-confirmation', $email, $subject, $body, $status, $error);
+            }
+            return;
+        }
+
+        $renewalId = (int) ($payment['renewal_id'] ?? 0);
+        if ($renewalId > 0) {
+            (new RenewalRepository())->logMail($renewalId, $email, $subject, $body, $status, $error, false);
+        }
+    } catch (Throwable $e) {
+        error_log('Müşteri ödeme bilgilendirme logu yazılamadı: ' . $e->getMessage());
     }
 }
 
@@ -7614,12 +7874,15 @@ function handle_sales_offer_collect_balance(RenewalRepository $repo, int $offerI
 function handle_sales_offer_parasut_invoice(RenewalRepository $repo, int $offerId): void
 {
     verify_csrf();
-    $result = create_parasut_invoice_for_sales_offer($repo, $offerId);
+    $transferMode = (string) ($_POST['parasut_transfer_mode'] ?? 'with_collection');
+    $includePayment = $transferMode !== 'invoice_only';
+    $result = create_parasut_invoice_for_sales_offer($repo, $offerId, $includePayment);
 
     if (!empty($result['ok'])) {
         $invoice = (array) ($result['invoice'] ?? []);
         $label = trim((string) ($invoice['invoice_no'] ?? '')) ?: trim((string) ($invoice['id'] ?? ''));
-        flash('success', $label !== '' ? 'Teklif faturası Paraşüt’te oluşturuldu: ' . $label : 'Teklif faturası Paraşüt’te oluşturuldu.');
+        $modeLabel = $includePayment ? 'tahsilat bilgisiyle' : 'sadece fatura olarak';
+        flash('success', $label !== '' ? 'Teklif faturası Paraşüt’e ' . $modeLabel . ' aktarıldı: ' . $label : 'Teklif faturası Paraşüt’e ' . $modeLabel . ' aktarıldı.');
     } else {
         flash('error', 'Teklif faturası Paraşüt’te oluşturulamadı: ' . (string) ($result['error'] ?? 'Bilinmeyen hata'));
     }
@@ -7644,7 +7907,7 @@ function handle_sales_offer_operation(RenewalRepository $repo, int $offerId): vo
     redirect($returnTo);
 }
 
-function create_parasut_invoice_for_sales_offer(RenewalRepository $repo, int $offerId): array
+function create_parasut_invoice_for_sales_offer(RenewalRepository $repo, int $offerId, bool $includePayment = true): array
 {
     $offer = $repo->findSalesOffer($offerId);
     if (!$offer) {
@@ -7656,7 +7919,7 @@ function create_parasut_invoice_for_sales_offer(RenewalRepository $repo, int $of
     }
 
     if (trim((string) ($offer['parasut_invoice_id'] ?? '')) !== '') {
-        $noteUpdate = sync_parasut_invoice_note_for_sales_offer($offer);
+        $noteUpdate = sync_parasut_invoice_note_for_sales_offer($offer, $includePayment);
 
         return [
             'ok' => true,
@@ -7672,11 +7935,11 @@ function create_parasut_invoice_for_sales_offer(RenewalRepository $repo, int $of
     try {
         $client = new ParasutClient();
         $offer = ensure_sales_offer_parasut_contact($repo, $client, $offer);
-        $invoiceOffer = sales_offer_invoice_payload_offer($offer);
+        $invoiceOffer = sales_offer_invoice_payload_offer($offer, $includePayment);
         $invoice = $client->createSalesInvoiceFromOffer(
             $invoiceOffer,
             sales_offer_invoice_lines((array) ($offer['items'] ?? [])),
-            sales_offer_latest_paid_payment($offer)
+            $includePayment ? sales_offer_latest_paid_payment($offer) : null
         );
         if (trim((string) ($invoice['id'] ?? '')) === '') {
             throw new RuntimeException('Paraşüt fatura ID dönmedi.');
@@ -7758,10 +8021,14 @@ function sales_offer_customer_context(RenewalRepository $repo, array $offer): ?a
     return null;
 }
 
-function sales_offer_invoice_payload_offer(array $offer): array
+function sales_offer_invoice_payload_offer(array $offer, bool $includePaymentInfo = true): array
 {
     $offer['subject'] = (string) (($offer['title'] ?? '') ?: ('Teklif ' . sales_offer_number($offer)));
     $offer['payment_method'] = trim((string) ($offer['payment_method'] ?? ''));
+    if (!$includePaymentInfo) {
+        $offer['payment_method'] = '';
+        $offer['renewal_payment_method'] = '';
+    }
 
     return $offer;
 }
@@ -7795,7 +8062,7 @@ function sales_offer_latest_paid_payment(array $offer): ?array
     return (new PaymentRequestRepository())->latestPaidTransactionForRequests($requestIds);
 }
 
-function sync_parasut_invoice_note_for_sales_offer(array $offer): ?array
+function sync_parasut_invoice_note_for_sales_offer(array $offer, bool $includePayment = true): ?array
 {
     $invoiceId = trim((string) ($offer['parasut_invoice_id'] ?? ''));
     if ($invoiceId === '') {
@@ -7804,7 +8071,10 @@ function sync_parasut_invoice_note_for_sales_offer(array $offer): ?array
 
     try {
         $client = new ParasutClient();
-        $note = $client->salesInvoiceNote(sales_offer_invoice_payload_offer($offer), sales_offer_latest_paid_payment($offer));
+        $note = $client->salesInvoiceNote(
+            sales_offer_invoice_payload_offer($offer, $includePayment),
+            $includePayment ? sales_offer_latest_paid_payment($offer) : null
+        );
 
         return $client->updateSalesInvoiceNote($invoiceId, $note);
     } catch (Throwable $e) {
@@ -7939,7 +8209,7 @@ function approve_sales_offer_and_payment_request(RenewalRepository $repo, array 
     try {
         return create_manual_iyzico_checkout_url($paymentRepo, $paymentRequest, null, 'sales-offer');
     } catch (Throwable $e) {
-        $_SESSION['manual_payment_error'] = $e->getMessage();
+        $_SESSION['manual_payment_error'] = handle_caught_error($e, 'sales_offer_payment');
         return manual_payment_request_url($paymentRequest);
     }
 }
@@ -8993,16 +9263,15 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
 	                                        </form>
 	                                    <?php endif; ?>
                                         <?php if ($canCreateParasutInvoice): ?>
-                                            <form method="post" action="<?= h(url('/offers/' . $offerId . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu teklif için Paraşüt faturası oluşturulsun mu?')">
-                                                <?= csrf_field() ?>
-                                                <input type="hidden" name="return_to" value="<?= h(route_path()) ?>">
-                                                <button type="submit" class="button small primary">Faturayı Paraşüt’te oluştur</button>
-                                            </form>
+                                            <button type="button" class="button small primary" data-dialog-open="sales-offer-parasut-<?= h($offerId) ?>">Paraşüt’e aktar</button>
+	                                        <?php endif; ?>
+			                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/pdf')) ?>">PDF olarak indir</a>
+		                                <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
+	                                    <?= render_sales_offer_send_dialog($offer) ?>
+                                        <?php if ($canCreateParasutInvoice): ?>
+                                            <?= render_sales_offer_parasut_transfer_dialog($offer, $advancePayment, $balancePayment) ?>
                                         <?php endif; ?>
-		                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/pdf')) ?>">PDF olarak indir</a>
-	                                <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
-                                    <?= render_sales_offer_send_dialog($offer) ?>
-	                            <?php endif; ?>
+		                            <?php endif; ?>
                             <?php if ($canDelete): ?>
                                 <form method="post" class="inline-delete-form" action="<?= h(url('/offers/' . $offerId . '/delete')) ?>" onsubmit="return confirm('Bu teklif ve kalemleri silinsin mi?')">
                                     <?= csrf_field() ?>
@@ -9015,6 +9284,65 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
             </details>
         <?php endforeach; ?>
     </div>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_sales_offer_parasut_transfer_dialog(array $offer, ?array $advancePayment = null, ?array $balancePayment = null): string
+{
+    $offerId = (int) ($offer['id'] ?? 0);
+    if ($offerId < 1) {
+        return '';
+    }
+
+    $currency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+    $total = money_format_local($offer['total'] ?? 0, $currency);
+    $offerNumber = sales_offer_number($offer);
+    $hasPaidCollection = ($advancePayment && (string) ($advancePayment['status'] ?? 'pending') === 'paid')
+        || ($balancePayment && (string) ($balancePayment['status'] ?? 'pending') === 'paid');
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog communication-dialog parasut-transfer-dialog" id="sales-offer-parasut-<?= h((string) $offerId) ?>">
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <p class="eyebrow">Paraşüt aktarımı</p>
+                    <h2>Aktarım tipini seçin</h2>
+                    <span><?= h($offerNumber) ?> teklifini <?= h($total) ?> tutarıyla Paraşüt’e aktarın.</span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+
+            <div class="settings-note compact">
+                <strong>Paraşüt’e aktar</strong> sadece faturayı oluşturur; sistemdeki ödeme/tahsilat kaydı fatura notuna eklenmez.
+                <br>
+                <strong>Paraşüt’e tahsilatlı aktar</strong> faturayı oluşturur ve varsa ödenmiş ödeme kaydının ID, tarih, tutar bilgisini fatura notuna ekler.
+            </div>
+
+            <?php if (!$hasPaidCollection): ?>
+                <div class="alert warning compact">Bu teklif için sistemde ödenmiş tahsilat görünmüyor. Tahsilatlı aktar seçeneği fatura oluşturur; ödeme ID/tutar detayı yoksa notlara eklenmez.</div>
+            <?php endif; ?>
+
+            <div class="form-actions parasut-transfer-actions">
+                <form method="post" action="<?= h(url('/offers/' . $offerId . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu teklifi sadece fatura olarak Paraşüt’e aktaralım mı?')">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                    <input type="hidden" name="parasut_transfer_mode" value="invoice_only">
+                    <button type="submit" class="button secondary">Paraşüt’e aktar</button>
+                </form>
+
+                <form method="post" action="<?= h(url('/offers/' . $offerId . '/parasut-invoice')) ?>" onsubmit="return confirm('Bu teklifi tahsilat bilgisiyle Paraşüt’e aktaralım mı?')">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                    <input type="hidden" name="parasut_transfer_mode" value="with_collection">
+                    <button type="submit" class="button primary">Paraşüt’e tahsilatlı aktar</button>
+                </form>
+            </div>
+        </div>
+    </dialog>
     <?php
 
     return (string) ob_get_clean();
@@ -10335,18 +10663,22 @@ function render_payment_requests(): void
                 <p class="eyebrow">Manuel tahsilat</p>
                 <h1>Ödeme Talep Et</h1>
             </div>
+            <div class="page-actions">
+                <button type="button" class="button primary" data-toggle-details="manual-payment-create">Manuel ödeme talebi oluştur</button>
+            </div>
         </div>
 
         <section class="payment-request-layout manual-payment-request-layout">
-            <article class="panel payment-request-panel">
-                <div class="section-head">
+            <details class="panel payment-request-panel manual-payment-create-panel" id="manual-payment-create">
+                <summary class="manual-payment-create-summary">
                     <div>
                         <p class="eyebrow">Yeni case</p>
                         <h2>Manuel ödeme talebi oluştur</h2>
                         <p>Dükkanda, telefonda veya tek seferlik satışlarda tutarı ve açıklamayı yazıp müşteriye ödeme linki gönderin.</p>
                     </div>
-                    <span class="badge active">Bağımsız talep</span>
-                </div>
+                    <span class="button small primary" data-open-label>Formu aç</span>
+                    <span class="button small secondary" data-close-label>Formu kapat</span>
+                </summary>
 
                 <form method="post" class="payment-request-form" data-manual-payment-form>
                     <?= csrf_field() ?>
@@ -10431,7 +10763,7 @@ function render_payment_requests(): void
                         <button class="button primary" type="submit" <?= $canManage ? '' : 'disabled' ?>>Ödeme talebi oluştur</button>
                     </div>
                 </form>
-            </article>
+            </details>
 
             <aside class="panel payment-request-preview">
                 <?php if ($created): ?>
@@ -10478,7 +10810,13 @@ function render_payment_requests(): void
                                 <input type="hidden" name="message" value="<?= h($message) ?>">
                                 <button class="button secondary" type="submit" <?= manual_payment_request_email_recipients($created) === [] ? 'disabled' : '' ?>>Tüm alıcılara mail at</button>
                             </form>
-                            <?php if ((string) ($created['status'] ?? 'pending') !== 'paid'): ?>
+                            <?php if ((string) ($created['status'] ?? 'pending') === 'paid'): ?>
+                                <form method="post" action="<?= h(url('/payment-requests/' . (int) $created['id'] . '/refund')) ?>" onsubmit="return confirm('Bu ödeme iade edildi olarak işaretlensin mi? Bu işlem tahsilat toplamlarından düşer, kayıt geçmişte kalır.')">
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="refund_note" value="Manuel iade kaydı">
+                                    <button class="button danger" type="submit">İade edildi</button>
+                                </form>
+                            <?php elseif ((string) ($created['status'] ?? 'pending') !== 'refunded'): ?>
                                 <form method="post" action="<?= h(url('/payment-requests/' . (int) $created['id'] . '/delete')) ?>" onsubmit="return confirm('Bu ödeme talebi silinsin mi? Link iptal edilecek ve hatırlatma gönderilmeyecek.')">
                                     <?= csrf_field() ?>
                                     <button class="button danger" type="submit">Talebi sil</button>
@@ -10542,7 +10880,10 @@ function render_payment_requests(): void
                 <div class="manual-payment-list">
                     <?php foreach ($requests as $request): ?>
                         <?php $requestUrl = manual_payment_request_url($request); ?>
-                        <?php $isPaidRequest = (string) ($request['status'] ?? 'pending') === 'paid'; ?>
+                        <?php $requestStatus = (string) ($request['status'] ?? 'pending'); ?>
+                        <?php $isPaidRequest = $requestStatus === 'paid'; ?>
+                        <?php $isRefundedRequest = $requestStatus === 'refunded'; ?>
+                        <?php $isFinalizedRequest = $isPaidRequest || $isRefundedRequest; ?>
                         <details class="manual-payment-case">
                             <summary class="manual-payment-row">
                                 <div>
@@ -10561,7 +10902,14 @@ function render_payment_requests(): void
                                     <?php if (manual_payment_request_email_recipients($request) === []): ?>
                                         <span class="badge warning">E-posta eksik</span>
                                     <?php endif; ?>
-                                    <?php if ($canManage && !$isPaidRequest): ?>
+                                    <?php if ($canManage && $isPaidRequest): ?>
+                                        <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/refund')) ?>" onsubmit="return confirm('Bu ödeme iade edildi olarak işaretlensin mi? Bu işlem tahsilat toplamlarından düşer, kayıt geçmişte kalır.')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="refund_note" value="Manuel iade kaydı">
+                                            <button class="button small danger" type="submit">İade edildi</button>
+                                        </form>
+                                    <?php endif; ?>
+                                    <?php if ($canManage && !$isFinalizedRequest): ?>
                                         <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/delete')) ?>" onsubmit="return confirm('Bu ödeme talebi silinsin mi? Link iptal edilecek ve hatırlatma gönderilmeyecek.')">
                                             <?= csrf_field() ?>
                                             <button class="button small danger" type="submit">Sil</button>
@@ -10577,11 +10925,11 @@ function render_payment_requests(): void
                                         </label>
                                         <label>
                                             Tutar
-                                            <input type="number" min="0.01" step="0.01" name="amount" value="<?= h(number_format((float) ($request['amount'] ?? 0), 2, '.', '')) ?>" <?= $isPaidRequest ? 'readonly' : '' ?> required>
+                                            <input type="number" min="0.01" step="0.01" name="amount" value="<?= h(number_format((float) ($request['amount'] ?? 0), 2, '.', '')) ?>" <?= $isFinalizedRequest ? 'readonly' : '' ?> required>
                                         </label>
                                         <label>
                                             Para birimi
-                                            <select name="currency" <?= $isPaidRequest ? 'disabled' : '' ?>>
+                                            <select name="currency" <?= $isFinalizedRequest ? 'disabled' : '' ?>>
                                                 <?php foreach (allowed_currency_options() as $currency): ?>
                                                     <?= option($currency, $currency, (string) ($request['currency'] ?? 'TRY')) ?>
                                                 <?php endforeach; ?>
@@ -10634,8 +10982,8 @@ function render_payment_requests(): void
                                             <textarea name="description" rows="3"><?= h((string) ($request['description'] ?? '')) ?></textarea>
                                         </label>
                                         <div class="field-wide manual-payment-edit-footer">
-                                            <?php if ($isPaidRequest): ?>
-                                                <span>Ödenmiş case için tutar ve para birimi korunur; iletişim ve açıklama güncellenir.</span>
+                                            <?php if ($isFinalizedRequest): ?>
+                                                <span><?= $isRefundedRequest ? 'İade edilmiş' : 'Ödenmiş' ?> case için tutar ve para birimi korunur; iletişim ve açıklama güncellenir.</span>
                                             <?php endif; ?>
                                             <button type="submit" class="button small primary">Kaydet</button>
                                         </div>
@@ -15690,15 +16038,177 @@ function render_public_layout(string $title, callable $content): void
 
 function render_error(Throwable $e): void
 {
-    error_log((string) $e);
+    $reference = report_application_error($e, 'render_error');
+    $message = friendly_error_message($e);
+    $debug = (bool) app_config('app.debug', false);
 
-    render_layout('Hata', static function () use ($e): void {
+    $content = static function () use ($message, $reference, $debug, $e): void {
         ?>
-        <div class="alert error">
-            İşlem tamamlanamadı: <?= h($e->getMessage()) ?>
-        </div>
+        <section class="public-card payment-result-card error">
+            <p class="eyebrow">İşlem tamamlanamadı</p>
+            <h1>Bir sorun oluştu.</h1>
+            <p><?= h($message) ?></p>
+            <div class="payment-result-summary">
+                <span>Hata referansı</span>
+                <strong><?= h($reference) ?></strong>
+                <span>Ne yapabilirsiniz?</span>
+                <strong>Sayfayı yenileyip tekrar deneyin. Sorun devam ederse bu referans kodunu bize iletin.</strong>
+            </div>
+            <?php if ($debug): ?>
+                <details class="settings-note">
+                    <summary>Teknik detay</summary>
+                    <pre><?= h($e->getMessage()) ?></pre>
+                </details>
+            <?php endif; ?>
+        </section>
         <?php
-    });
+    };
+
+    try {
+        if (Auth::check()) {
+            render_layout('Hata', $content);
+            return;
+        }
+    } catch (Throwable) {
+        // DB kaynaklı hatalarda panel layout'u da çalışmayabilir; public layout ile devam et.
+    }
+
+    try {
+        render_public_layout('Hata', $content);
+    } catch (Throwable) {
+        echo '<!doctype html><meta charset="utf-8"><title>Hata</title><div style="font-family:Arial,sans-serif;padding:24px">'
+            . '<h1>Bir sorun oluştu.</h1><p>' . h($message) . '</p><p>Hata referansı: ' . h($reference) . '</p></div>';
+    }
+}
+
+function handle_caught_error(Throwable $e, string $context = ''): string
+{
+    report_application_error($e, $context !== '' ? $context : 'caught');
+
+    return friendly_error_message($e);
+}
+
+function report_application_error(Throwable $e, string $context = ''): string
+{
+    $reference = application_error_reference($e);
+    error_log('[' . $reference . '] ' . (string) $e);
+
+    try {
+        $path = route_path();
+        $message = friendly_error_message($e);
+        $technical = mb_substr($e->getMessage(), 0, 160);
+        send_internal_push_notification(
+            'Sistem hatası',
+            $reference . ' · ' . $message,
+            $path !== '' ? $path : '/',
+            'app-error-' . $reference
+        );
+        send_internal_mail_notification(
+            'Sistem hatası: ' . $reference,
+            application_error_mail_body($e, $reference, $message, $technical, $context)
+        );
+    } catch (Throwable $notifyError) {
+        error_log('[' . $reference . '] Hata bildirimi gönderilemedi: ' . $notifyError->getMessage());
+    }
+
+    return $reference;
+}
+
+function application_error_reference(Throwable $e): string
+{
+    return 'ERR-' . strtoupper(substr(hash('sha1', $e::class . '|' . $e->getFile() . '|' . $e->getLine() . '|' . $e->getMessage()), 0, 10));
+}
+
+function friendly_error_message(Throwable|string $error): string
+{
+    $message = $error instanceof Throwable ? $error->getMessage() : (string) $error;
+    $normalized = mb_strtolower($message, 'UTF-8');
+
+    if (str_contains($normalized, 'sqlstate') || str_contains($normalized, 'pdoexception') || str_contains($normalized, 'database')) {
+        if (str_contains($normalized, 'access denied')) {
+            return 'Veritabanı kullanıcı adı veya şifresi hatalı görünüyor. Ayarlar > Veritabanı bölümünden bağlantı bilgilerini kontrol edin.';
+        }
+        if (str_contains($normalized, 'unknown column') || str_contains($normalized, 'base table') || str_contains($normalized, 'table') && str_contains($normalized, 'exist')) {
+            return 'Veritabanı yapısı uygulama sürümüyle uyumlu değil. Migration çalıştırılıp tekrar denenmeli.';
+        }
+        if (str_contains($normalized, 'duplicate')) {
+            return 'Aynı kayıt daha önce oluşturulmuş görünüyor. Mevcut kaydı kontrol edip tekrar deneyin.';
+        }
+        if (str_contains($normalized, 'foreign key')) {
+            return 'Bu kayıt başka işlemlerle bağlantılı olduğu için işlem tamamlanamadı. Önce bağlı kayıtları kontrol edin.';
+        }
+
+        return 'Veritabanı işlemi tamamlanamadı. Bağlantı ve tablo yapısı kontrol edilmeli.';
+    }
+
+    if (str_contains($normalized, 'iyzico')) {
+        return payment_failure_public_reason($message, ['errorMessage' => $message]);
+    }
+
+    if (str_contains($normalized, 'parasut') || str_contains($normalized, 'paraşüt')) {
+        if (str_contains($normalized, 'try again') || str_contains($normalized, 'rate')) {
+            return 'Paraşüt geçici yoğunluk nedeniyle isteği bekletiyor. Birkaç saniye sonra tekrar deneyin.';
+        }
+
+        return 'Paraşüt entegrasyon işlemi tamamlanamadı. Yetki, firma ID ve bağlantı ayarlarını kontrol edin.';
+    }
+
+    if (str_contains($normalized, 'smtp') || str_contains($normalized, 'mail') || str_contains($normalized, 'e-posta')) {
+        return 'E-posta gönderimi tamamlanamadı. Mail ayarlarını, kullanıcı şifresini ve alıcı adresini kontrol edin.';
+    }
+
+    if (str_contains($normalized, 'curl') || str_contains($normalized, 'timeout') || str_contains($normalized, 'connection') || str_contains($normalized, 'baglant') || str_contains($normalized, 'bağlant')) {
+        return 'Dış servis bağlantısı zamanında cevap vermedi. İnternet bağlantısı veya servis tarafı geçici olarak kontrol edilmeli.';
+    }
+
+    if (str_contains($normalized, 'csrf') || str_contains($normalized, 'oturum dogrulamasi') || str_contains($normalized, 'oturum doğrulaması')) {
+        return 'Oturum doğrulaması süresi doldu. Sayfayı yenileyip işlemi tekrar gönderin.';
+    }
+
+    if (str_contains($normalized, 'permission') || str_contains($normalized, 'yetki')) {
+        return 'Bu işlem için yetkiniz bulunmuyor. Kullanıcı yetkilerini kontrol edin.';
+    }
+
+    if (str_contains($normalized, 'upload') || str_contains($normalized, 'dosya')) {
+        return 'Dosya işlemi tamamlanamadı. Dosya türünü, boyutunu ve yükleme izinlerini kontrol edin.';
+    }
+
+    $clean = trim(preg_replace('/\s+/', ' ', $message) ?? '');
+    if ($clean !== '' && !str_contains($clean, '/') && !str_contains($clean, '\\') && !str_contains(mb_strtolower($clean), 'stack trace')) {
+        return mb_substr($clean, 0, 220);
+    }
+
+    return 'İşlem tamamlanamadı. Sistem yöneticisine hata referans koduyla birlikte bilgi verildi.';
+}
+
+function application_error_mail_body(Throwable $e, string $reference, string $message, string $technical, string $context = ''): string
+{
+    $rows = [
+        'Referans' => $reference,
+        'Kullanıcı mesajı' => $message,
+        'Teknik mesaj' => $technical,
+        'Konum' => $e->getFile() . ':' . $e->getLine(),
+        'Sayfa' => (string) ($_SERVER['REQUEST_URI'] ?? route_path()),
+        'Bağlam' => $context !== '' ? $context : '-',
+        'Tarih' => date('d.m.Y H:i:s'),
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $key => $value) {
+        $htmlRows .= '<tr><td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;">' . h($key) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:800;">' . h((string) $value) . '</td></tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+        . '<table role="presentation" width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="height:6px;background:#b42318;font-size:0;line-height:0;">&nbsp;</td></tr>'
+        . '<tr><td style="padding:28px;">'
+        . '<p style="margin:0 0 8px;color:#b42318;font-size:13px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">Sistem hatası</p>'
+        . '<h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#17201c;">Uygulamada hata yakalandı.</h1>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 22px;">' . $htmlRows . '</table>'
+        . '<a href="' . h(url('/settings/security-logs')) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;font-weight:800;padding:13px 18px;border-radius:8px;">Paneli aç</a>'
+        . '</td></tr></table></td></tr></table></body></html>';
 }
 
 function stat_card(string $label, int $value, string $tone = ''): string

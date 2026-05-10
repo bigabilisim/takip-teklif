@@ -1970,10 +1970,62 @@ h3 {
     padding: 18px;
 }
 
+.manual-payment-create-panel {
+    overflow: hidden;
+}
+
+.manual-payment-create-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    list-style: none;
+    cursor: pointer;
+}
+
+.manual-payment-create-summary::-webkit-details-marker {
+    display: none;
+}
+
+.manual-payment-create-summary > div {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.manual-payment-create-summary h2 {
+    margin: 0;
+    font-size: 22px;
+    line-height: 1.15;
+}
+
+.manual-payment-create-summary p:not(.eyebrow) {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 650;
+    line-height: 1.35;
+}
+
+.manual-payment-create-summary .button {
+    flex: 0 0 auto;
+}
+
+.manual-payment-create-panel:not([open]) [data-close-label],
+.manual-payment-create-panel[open] [data-open-label] {
+    display: none;
+}
+
+.manual-payment-create-panel[open] .manual-payment-create-summary {
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+}
+
 .payment-request-form {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
+    margin-top: 14px;
 }
 
 .payment-request-form .field-wide,

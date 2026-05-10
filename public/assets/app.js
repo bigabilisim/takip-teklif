@@ -1645,6 +1645,16 @@
             return;
         }
 
+        const detailsToggle = event.target.closest('[data-toggle-details]');
+        if (detailsToggle) {
+            const target = document.getElementById(detailsToggle.dataset.toggleDetails || '');
+            if (target?.tagName === 'DETAILS') {
+                target.open = true;
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+            return;
+        }
+
         if (event.target.matches('[data-dialog-close]')) {
             event.target.closest('dialog')?.close();
             return;
