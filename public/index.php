@@ -7613,6 +7613,11 @@ function handle_sales_offer_public(string $method, int $offerId): void
 
     if ($method === 'POST' && (string) ($_POST['action'] ?? '') === 'approve_sales_offer') {
         try {
+            if (sales_offer_has_recorded_approval($offer)) {
+                render_sales_offer_document($offer, false, true, sales_offer_payment_request($offer), '', $reader);
+                return;
+            }
+
             $approval = sales_offer_approval_payload($reader, $readerToken);
             $paymentUrl = approve_sales_offer_and_payment_request($repo, $offer, $approval);
             $offer = $repo->findSalesOffer($offerId) ?: $offer;
@@ -8318,15 +8323,18 @@ function sales_offer_advance_payment_amount(array $offer): float
 
 function sales_offer_approval_payload(?array $reader, string $readerToken): array
 {
-    $name = trim((string) ($_POST['approval_name'] ?? ($reader['recipient_name'] ?? '')));
-    $email = mb_strtolower(trim((string) ($_POST['approval_email'] ?? ($reader['recipient_email'] ?? ''))));
-    $phone = trim((string) ($_POST['approval_phone'] ?? ($reader['recipient_phone'] ?? '')));
+    $name = trim((string) ($reader['recipient_name'] ?? ''));
+    $email = mb_strtolower(trim((string) ($reader['recipient_email'] ?? '')));
+    $phone = trim((string) ($reader['recipient_phone'] ?? ''));
 
-    if ($name === '') {
-        throw new RuntimeException('Teklifi onaylayan kişinin adını yazın.');
-    }
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        throw new RuntimeException('Onaylayan kişi için geçerli bir e-posta adresi yazın.');
+        $email = '';
+    }
+    if ($name === '' && $email !== '') {
+        $name = $email;
+    }
+    if ($name === '') {
+        $name = 'Genel bağlantı';
     }
 
     return [
@@ -8339,13 +8347,44 @@ function sales_offer_approval_payload(?array $reader, string $readerToken): arra
     ];
 }
 
-function sales_offer_approval_prefill(array $offer, ?array $reader): array
+function sales_offer_reader_identity_label(?array $reader): string
 {
-    return [
-        'name' => trim((string) (($offer['approved_name'] ?? '') ?: ($reader['recipient_name'] ?? ''))),
-        'email' => trim((string) (($offer['approved_email'] ?? '') ?: ($reader['recipient_email'] ?? ''))),
-        'phone' => trim((string) (($offer['approved_phone'] ?? '') ?: ($reader['recipient_phone'] ?? ''))),
-    ];
+    if (!$reader) {
+        return 'Bu teklif bağlantısı';
+    }
+
+    $parts = array_values(array_filter([
+        trim((string) ($reader['recipient_name'] ?? '')),
+        trim((string) ($reader['recipient_email'] ?? '')),
+        trim((string) ($reader['recipient_phone'] ?? '')),
+    ], static fn (string $value): bool => $value !== ''));
+
+    return $parts !== [] ? implode(' · ', $parts) : 'Bu teklif bağlantısı';
+}
+
+function sales_offer_has_recorded_approval(array $offer): bool
+{
+    if ((string) ($offer['status'] ?? '') === 'approved') {
+        return true;
+    }
+
+    foreach (['approved_at', 'approved_name', 'approved_email', 'approved_phone'] as $field) {
+        if (trim((string) ($offer[$field] ?? '')) !== '') {
+            return true;
+        }
+    }
+
+    if ((int) ($offer['approved_delivery_id'] ?? 0) > 0) {
+        return true;
+    }
+
+    foreach ((array) ($offer['deliveries'] ?? []) as $delivery) {
+        if (!empty($delivery['approved_at'])) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function sales_offer_approval_label(array $offer): string
@@ -8391,11 +8430,11 @@ function render_sales_offer_document(array $offer, bool $autoPrint = false, bool
 {
     render_public_layout('Teklif', static function () use ($offer, $autoPrint, $publicLink, $paymentRequest, $error, $reader): void {
         $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
-        $isApproved = (string) ($offer['status'] ?? '') === 'approved';
+        $isApproved = sales_offer_has_recorded_approval($offer);
         $paymentEnabled = !empty($offer['payment_request_enabled']);
         $paymentAmount = sales_offer_advance_payment_amount($offer);
         $paymentPercent = sales_offer_payment_percent($offer);
-        $approvalPrefill = sales_offer_approval_prefill($offer, $reader);
+        $readerIdentityLabel = sales_offer_reader_identity_label($reader);
         $approvalLabel = sales_offer_approval_label($offer);
         ?>
         <section class="login-panel customer-offer-public sales-offer-public">
@@ -8432,14 +8471,14 @@ function render_sales_offer_document(array $offer, bool $autoPrint = false, bool
                     <?php if ($isApproved): ?>
                         <div>
                             <p class="eyebrow">Onay durumu</p>
-                            <h2>Teklifiniz onaylandı.</h2>
+                            <h2>Bu teklif onaylandı.</h2>
+                            <?php if ($approvalLabel !== ''): ?>
+                                <p>Bu teklif <?= h($approvalLabel) ?> tarafından onaylandı.</p>
+                            <?php endif; ?>
                             <?php if ($paymentEnabled): ?>
                                 <p>Ön ödeme talebi: <?= h(money_format_local($paymentRequest['amount'] ?? $paymentAmount, $currency)) ?>.</p>
                             <?php else: ?>
                                 <p>Onayınız alınmıştır. Ekibimiz süreç için sizinle iletişime geçecektir.</p>
-                            <?php endif; ?>
-                            <?php if ($approvalLabel !== ''): ?>
-                                <p class="sales-offer-approval-person">Onaylayan: <?= h($approvalLabel) ?></p>
                             <?php endif; ?>
                         </div>
                         <?php if ($paymentRequest): ?>
@@ -8462,16 +8501,9 @@ function render_sales_offer_document(array $offer, bool $autoPrint = false, bool
                         <form method="post" class="sales-offer-approval-form">
                             <?= csrf_field() ?>
                             <input type="hidden" name="action" value="approve_sales_offer">
-                            <input type="hidden" name="approval_phone" value="<?= h($approvalPrefill['phone']) ?>">
-                            <div class="form-grid two">
-                                <label>
-                                    Onaylayan kişi
-                                    <input name="approval_name" value="<?= h($approvalPrefill['name']) ?>" placeholder="Ad soyad" required maxlength="190">
-                                </label>
-                                <label>
-                                    E-posta
-                                    <input type="email" name="approval_email" value="<?= h($approvalPrefill['email']) ?>" placeholder="ornek@firma.com" maxlength="190">
-                                </label>
+                            <div class="sales-offer-approval-person-card">
+                                <span>Onay bu alıcı adına kaydedilecek</span>
+                                <strong><?= h($readerIdentityLabel) ?></strong>
                             </div>
                             <button type="submit" class="button primary">Teklifi onayla<?= $paymentEnabled ? ' ve ödemeye geç' : '' ?></button>
                         </form>

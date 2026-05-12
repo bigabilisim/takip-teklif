@@ -7464,6 +7464,30 @@ label {
     font-weight: 850;
 }
 
+.sales-offer-approval-person-card {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid #d7e6e2;
+    border-radius: 10px;
+    background: #ffffff;
+    box-shadow: 0 10px 22px rgba(25, 87, 77, 0.08);
+}
+
+.sales-offer-approval-person-card span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 850;
+}
+
+.sales-offer-approval-person-card strong {
+    color: var(--primary-strong);
+    font-size: 14px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
 .sales-offer-approval-person {
     margin-top: 8px !important;
     color: var(--primary-strong) !important;

@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.62] - 2026-05-12
+
+- Müşteri teklif onayı artık ad, soyad ve e-posta formu istemeden gönderilen alıcı linkindeki kişi adına kaydedilir.
+- Bir teklif onaylandıktan sonra diğer alıcılar tekrar onay formu görmez; teklifin kim tarafından onaylandığı gösterilir.
+- Ödeme adımına yönlenen tekliflerde de ilk onay bilgisi korunarak ikinci onayın aynı teklifi ezmesi engellendi.
+
 ## [2.0.61] - 2026-05-12
 
 - Teklif kartlarına “Ödeme eşleştir” butonu eklendi.
