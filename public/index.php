@@ -7950,8 +7950,8 @@ function create_parasut_invoice_for_sales_offer(RenewalRepository $repo, int $of
         return ['ok' => false, 'error' => 'Teklif bulunamadı.'];
     }
 
-    if ((string) ($offer['status'] ?? '') !== 'approved') {
-        return ['ok' => false, 'error' => 'Sadece onaylanan teklifler Paraşüt faturası oluşturabilir.'];
+    if (!sales_offer_can_create_parasut_invoice($offer)) {
+        return ['ok' => false, 'error' => 'Reddedilen, revize bekleyen veya süresi dolan teklifler için Paraşüt faturası oluşturulamaz.'];
     }
 
     if (trim((string) ($offer['parasut_invoice_id'] ?? '')) !== '') {
@@ -8121,6 +8121,15 @@ function sync_parasut_invoice_note_for_sales_offer(array $offer, bool $includePa
             'error' => $e->getMessage(),
         ];
     }
+}
+
+function sales_offer_can_create_parasut_invoice(array $offer): bool
+{
+    if (trim((string) ($offer['parasut_invoice_id'] ?? '')) !== '') {
+        return false;
+    }
+
+    return in_array((string) ($offer['status'] ?? 'draft'), ['draft', 'sent', 'approved'], true);
 }
 
 function sales_offer_public_url(int $offerId, string $mode = 'view', int $ttlDays = 14, string $readerToken = ''): string
@@ -9222,9 +9231,7 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
                 && $advancePaid
                 && !$balancePaid
                 && $remainingBalance > 0;
-            $canCreateParasutInvoice = $canManage
-                && (string) ($offer['status'] ?? 'draft') === 'approved'
-                && $parasutInvoiceId === '';
+            $canCreateParasutInvoice = $canManage && sales_offer_can_create_parasut_invoice($offer);
             $statusLabel = sales_offer_dashboard_status_label($offer, $advancePayment);
             $statusBadge = sales_offer_dashboard_status_badge($offer, $advancePayment);
             ?>
@@ -9290,10 +9297,10 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
                                     <?= h($parasutInvoiceNo !== '' ? $parasutInvoiceNo : '#' . $parasutInvoiceId) ?>
                                 <?php elseif ($parasutInvoiceStatus === 'failed'): ?>
                                     Oluşturulamadı
-                                <?php elseif ((string) ($offer['status'] ?? 'draft') === 'approved'): ?>
-                                    Hazır
+                                <?php elseif (sales_offer_can_create_parasut_invoice($offer)): ?>
+                                    Fatura kesilebilir
                                 <?php else: ?>
-                                    Onay bekliyor
+                                    Fatura kapalı
                                 <?php endif; ?>
                             </strong>
                         </div>
@@ -9386,6 +9393,8 @@ function render_sales_offer_parasut_transfer_dialog(array $offer, ?array $advanc
                 <strong>Paraşüt’e aktar</strong> sadece faturayı oluşturur; sistemdeki ödeme/tahsilat kaydı fatura notuna eklenmez.
                 <br>
                 <strong>Paraşüt’e tahsilatlı aktar</strong> faturayı oluşturur ve varsa ödenmiş ödeme kaydının ID, tarih, tutar bilgisini fatura notuna ekler.
+                <br>
+                Teklif müşteri tarafından onaylanmamış olsa bile fatura oluşturabilirsiniz; bu işlem teklif durumunu değiştirmez.
             </div>
 
             <?php if (!$hasPaidCollection): ?>

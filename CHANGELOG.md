@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.64] - 2026-05-12
+
+- Teklif müşteri tarafından onaylanmadan da Paraşüt faturası oluşturulabilir hale getirildi.
+- Taslak ve gönderilmiş teklif kartlarında “Paraşüt’e aktar” butonu gösterilir; reddedilen, revize bekleyen veya süresi dolan tekliflerde kapalı kalır.
+- Paraşüt aktarım penceresine, fatura oluşturmanın teklif durumunu değiştirmediğini belirten açıklama eklendi.
+
 ## [2.0.63] - 2026-05-12
 
 - Teklif güncellendiğinde kayıt otomatik taslak durumuna alınır ve eski mail/WhatsApp takip linkleri silinir.
