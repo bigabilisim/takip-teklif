@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Core\Mailer;
 use App\Core\MailTemplate;
 use App\Core\DatabaseBackup;
+use App\Core\InternalNotifier;
 use App\Core\WebPush;
 use App\Models\CustomerInfoRequestRepository;
 use App\Models\PaymentRequestRepository;
@@ -16,12 +17,15 @@ require dirname(__DIR__) . '/app/bootstrap.php';
 $settings = (new SettingsRepository())->all();
 $force = in_array('--force', $argv ?? [], true);
 $renewalWindowOpen = notification_window_is_open((string) ($settings['notifications.send_time'] ?? '09:00'));
+$repo = new RenewalRepository();
 $paymentRequestRepo = new PaymentRequestRepository();
 $paymentReminderRows = $paymentRequestRepo->dueForDailyReminders($force);
 $customerInfoRequestRepo = new CustomerInfoRequestRepository();
 $customerInfoReminderRows = $customerInfoRequestRepo->dueForReminders(3, 50, $force);
+$renewalPaymentNotificationRows = $repo->paidCardPaymentsPendingInternalNotifications(50);
+$manualPaymentNotificationRows = $paymentRequestRepo->paidCardPaymentsPendingInternalNotifications(50);
 
-if (!$force && !$renewalWindowOpen && $paymentReminderRows === [] && $customerInfoReminderRows === []) {
+if (!$force && !$renewalWindowOpen && $paymentReminderRows === [] && $customerInfoReminderRows === [] && $renewalPaymentNotificationRows === [] && $manualPaymentNotificationRows === []) {
     echo sprintf(
         "Bildirim saati bekleniyor. Ayar: %s, simdi: %s\n",
         notification_send_time((string) ($settings['notifications.send_time'] ?? '09:00')),
@@ -30,7 +34,6 @@ if (!$force && !$renewalWindowOpen && $paymentReminderRows === [] && $customerIn
     exit(0);
 }
 
-$repo = new RenewalRepository();
 $rows = ($force || $renewalWindowOpen) ? $repo->dueForReminder() : [];
 $sent = 0;
 $failed = 0;
@@ -40,6 +43,10 @@ $paymentReminderSent = 0;
 $paymentReminderFailed = 0;
 $customerInfoReminderSent = 0;
 $customerInfoReminderFailed = 0;
+$paymentNotificationPushSent = 0;
+$paymentNotificationPushFailed = 0;
+$paymentNotificationMailSent = 0;
+$paymentNotificationMailFailed = 0;
 $pushSent = 0;
 $pushFailed = 0;
 $backupMessage = 'yedek kontrol edilmedi';
@@ -244,6 +251,30 @@ foreach ($customerInfoReminderRows as $request) {
     $ok ? $customerInfoReminderSent++ : $customerInfoReminderFailed++;
 }
 
+foreach ($renewalPaymentNotificationRows as $payment) {
+    $result = send_pending_payment_internal_notification($payment, 'renewal');
+    $repo->markPaymentInternalNotification(
+        (int) ($payment['id'] ?? 0),
+        (int) ($result['push_sent'] ?? 0) > 0,
+        !empty($result['mail_ok']),
+        payment_internal_notification_error_text($result)
+    );
+    (int) ($result['push_sent'] ?? 0) > 0 ? $paymentNotificationPushSent++ : $paymentNotificationPushFailed++;
+    !empty($result['mail_ok']) ? $paymentNotificationMailSent++ : $paymentNotificationMailFailed++;
+}
+
+foreach ($manualPaymentNotificationRows as $payment) {
+    $result = send_pending_payment_internal_notification($payment, 'manual');
+    $paymentRequestRepo->markPaymentInternalNotification(
+        (int) ($payment['id'] ?? 0),
+        (int) ($result['push_sent'] ?? 0) > 0,
+        !empty($result['mail_ok']),
+        payment_internal_notification_error_text($result)
+    );
+    (int) ($result['push_sent'] ?? 0) > 0 ? $paymentNotificationPushSent++ : $paymentNotificationPushFailed++;
+    !empty($result['mail_ok']) ? $paymentNotificationMailSent++ : $paymentNotificationMailFailed++;
+}
+
 $pushNeeded = $rows !== [] || $priceRequestRows !== [] || $paymentReminderRows !== [] || $customerInfoReminderRows !== [];
 if ($pushNeeded) {
     try {
@@ -283,7 +314,7 @@ try {
 }
 
 echo sprintf(
-    "Hatirlatma tamamlandi. Musteri gonderilen: %d, musteri basarisiz: %d, tedarikci fiyat talebi gonderilen: %d, tedarikci basarisiz: %d, odeme talebi hatirlatma gonderilen: %d, odeme talebi basarisiz: %d, cari bilgi hatirlatma gonderilen: %d, cari bilgi hatirlatma basarisiz: %d, web push gonderilen: %d, web push basarisiz: %d, yedek: %s\n",
+    "Hatirlatma tamamlandi. Musteri gonderilen: %d, musteri basarisiz: %d, tedarikci fiyat talebi gonderilen: %d, tedarikci basarisiz: %d, odeme talebi hatirlatma gonderilen: %d, odeme talebi basarisiz: %d, cari bilgi hatirlatma gonderilen: %d, cari bilgi hatirlatma basarisiz: %d, odeme ic bildirim push gonderilen: %d, odeme ic bildirim push basarisiz: %d, odeme ic bildirim mail gonderilen: %d, odeme ic bildirim mail basarisiz: %d, web push gonderilen: %d, web push basarisiz: %d, yedek: %s\n",
     $sent,
     $failed,
     $supplierSent,
@@ -292,10 +323,128 @@ echo sprintf(
     $paymentReminderFailed,
     $customerInfoReminderSent,
     $customerInfoReminderFailed,
+    $paymentNotificationPushSent,
+    $paymentNotificationPushFailed,
+    $paymentNotificationMailSent,
+    $paymentNotificationMailFailed,
     $pushSent,
     $pushFailed,
     $backupMessage
 );
+
+function send_pending_payment_internal_notification(array $payment, string $source): array
+{
+    $context = payment_internal_notification_context($payment, $source);
+    $result = [
+        'push_sent' => 0,
+        'push_failed' => 0,
+        'push_total' => 0,
+        'push_error' => '',
+        'mail_ok' => false,
+        'mail_error' => '',
+    ];
+
+    if (empty($payment['internal_push_sent_at'])) {
+        $pushResult = InternalNotifier::push(
+            'Ödeme geldi',
+            $context['customer'] . ' · ' . $context['amount'],
+            $context['url'],
+            'payment-received-' . $context['source'] . '-' . $context['record_id'] . '-' . hash('sha1', (string) ($context['payment_id'] ?? '') . '|' . (string) ($payment['id'] ?? ''))
+        );
+        $result['push_sent'] = (int) ($pushResult['sent'] ?? 0);
+        $result['push_failed'] = (int) ($pushResult['failed'] ?? 0);
+        $result['push_total'] = (int) ($pushResult['total'] ?? 0);
+        $result['push_error'] = (string) ($pushResult['last_error'] ?? '');
+    } else {
+        $result['push_sent'] = 1;
+    }
+
+    if (empty($payment['internal_mail_sent_at'])) {
+        $mailResult = InternalNotifier::mail(
+            'Ödeme geldi: ' . $context['title'],
+            payment_internal_notification_mail_body($context)
+        );
+        $result['mail_ok'] = !empty($mailResult['ok']);
+        $result['mail_error'] = (string) ($mailResult['error'] ?? '');
+    } else {
+        $result['mail_ok'] = true;
+    }
+
+    return $result;
+}
+
+function payment_internal_notification_context(array $payment, string $source): array
+{
+    $isManual = $source === 'manual';
+    $recordId = (int) ($isManual ? ($payment['request_id'] ?? 0) : ($payment['renewal_id'] ?? 0));
+    $title = trim((string) ($payment['title'] ?? ($isManual ? 'Manuel ödeme talebi' : 'Yenileme')));
+    $customer = trim((string) (
+        $isManual
+            ? (($payment['customer_name'] ?? '') ?: ($payment['customer_email'] ?? ''))
+            : ($payment['company_name'] ?? '')
+    ));
+    $currency = strtoupper(trim((string) ($payment['currency'] ?? 'TRY')));
+    if (!in_array($currency, ['TRY', 'USD', 'EUR'], true)) {
+        $currency = 'TRY';
+    }
+
+    return [
+        'source' => $isManual ? 'manual' : 'renewal',
+        'source_label' => $isManual ? 'Manuel ödeme talebi' : 'Yenileme kaydı',
+        'record_id' => $recordId,
+        'title' => $title !== '' ? $title : ($isManual ? 'Manuel ödeme talebi' : 'Yenileme'),
+        'customer' => $customer !== '' ? $customer : 'Müşteri bilgisi yok',
+        'amount' => money_format_local($payment['amount'] ?? null, $currency),
+        'payment_id' => trim((string) ($payment['payment_id'] ?? '')) ?: '-',
+        'conversation_id' => trim((string) ($payment['conversation_id'] ?? '')) ?: '-',
+        'url' => $isManual ? '/payment-requests?created=' . $recordId : '/renewals/' . $recordId . '/edit#card-payment',
+    ];
+}
+
+function payment_internal_notification_mail_body(array $context): string
+{
+    $rows = [
+        'Kaynak' => $context['source_label'],
+        'Müşteri' => $context['customer'],
+        'Kayıt' => $context['title'],
+        'Tutar' => $context['amount'],
+        'iyzico ödeme no' => $context['payment_id'],
+        'Conversation ID' => $context['conversation_id'],
+    ];
+
+    $htmlRows = '';
+    foreach ($rows as $label => $value) {
+        $htmlRows .= '<tr>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-weight:700;">' . h($label) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:800;">' . h((string) $value) . '</td>'
+            . '</tr>';
+    }
+
+    return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
+        . '<table role="presentation" width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
+        . '<tr><td style="padding:28px;">'
+        . '<p style="margin:0 0 8px;color:#147c72;font-size:13px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">Ödeme bildirimi</p>'
+        . '<h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#17201c;">Ödeme geldi.</h1>'
+        . '<p style="margin:0 0 20px;color:#607069;font-size:16px;line-height:1.5;">Sistemde başarılı kredi kartı ödemesi kaydedildi. Bu bildirim, önceki denemede eksik kaldığı için otomatik kontrol tarafından gönderildi.</p>'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 22px;">' . $htmlRows . '</table>'
+        . '<a href="' . h(url((string) $context['url'])) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;font-weight:800;padding:13px 18px;border-radius:8px;">Panelde görüntüle</a>'
+        . '</td></tr></table>'
+        . '</td></tr></table></body></html>';
+}
+
+function payment_internal_notification_error_text(array $result): string
+{
+    $errors = [];
+    if ((int) ($result['push_sent'] ?? 0) < 1) {
+        $errors[] = 'push: ' . ((string) ($result['push_error'] ?? '') ?: (((int) ($result['push_total'] ?? 0) < 1) ? 'aktif abonelik yok' : 'gönderilemedi'));
+    }
+    if (empty($result['mail_ok'])) {
+        $errors[] = 'mail: ' . ((string) ($result['mail_error'] ?? '') ?: 'gönderilemedi');
+    }
+
+    return mb_substr(implode(' | ', $errors), 0, 1000);
+}
 
 function notification_send_time(string $time): string
 {

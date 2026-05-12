@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.66] - 2026-05-12
+
+- Başarılı iyzico tahsilatlarında iç push/mail bildirim durumu ödeme kaydı üzerinde takip edilir hale getirildi.
+- Push veya iç mail bildirimi eksik kalan başarılı ödemeler `bin/reminders.php` tarafından otomatik tekrar denenecek şekilde güvenceye alındı.
+- Müşteri teklifleri ve satış teklifleri her görüntülendiğinde yöneticiye web push bildirimi düşecek şekilde güncellendi.
+
 ## [2.0.65] - 2026-05-12
 
 - Cari bilgi talepleri için 3 saatte bir otomatik hatırlatma maili eklendi.

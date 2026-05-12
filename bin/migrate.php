@@ -264,6 +264,10 @@ ensure_table($pdo, 'renewal_payments', "
         raw_request MEDIUMTEXT NULL,
         raw_response MEDIUMTEXT NULL,
         paid_at DATETIME NULL,
+        internal_push_sent_at DATETIME NULL,
+        internal_mail_sent_at DATETIME NULL,
+        internal_notification_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+        internal_notification_error TEXT NULL,
         created_by INT UNSIGNED NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -271,9 +275,15 @@ ensure_table($pdo, 'renewal_payments', "
         UNIQUE KEY uq_renewal_payments_conversation (conversation_id),
         INDEX idx_renewal_payments_renewal (renewal_id, created_at),
         INDEX idx_renewal_payments_token (token),
-        INDEX idx_renewal_payments_status (status)
+        INDEX idx_renewal_payments_status (status),
+        INDEX idx_renewal_payments_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'renewal_payments', 'internal_push_sent_at', 'DATETIME NULL AFTER paid_at');
+ensure_column($pdo, 'renewal_payments', 'internal_mail_sent_at', 'DATETIME NULL AFTER internal_push_sent_at');
+ensure_column($pdo, 'renewal_payments', 'internal_notification_attempts', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER internal_mail_sent_at');
+ensure_column($pdo, 'renewal_payments', 'internal_notification_error', 'TEXT NULL AFTER internal_notification_attempts');
+ensure_index($pdo, 'renewal_payments', 'idx_renewal_payments_internal_notice', 'INDEX idx_renewal_payments_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)');
 ensure_table($pdo, 'renewal_payment_receipts', "
     CREATE TABLE renewal_payment_receipts (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -356,6 +366,10 @@ ensure_table($pdo, 'manual_payment_transactions', "
         raw_request MEDIUMTEXT NULL,
         raw_response MEDIUMTEXT NULL,
         paid_at DATETIME NULL,
+        internal_push_sent_at DATETIME NULL,
+        internal_mail_sent_at DATETIME NULL,
+        internal_notification_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+        internal_notification_error TEXT NULL,
         created_by INT UNSIGNED NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -363,9 +377,15 @@ ensure_table($pdo, 'manual_payment_transactions', "
         UNIQUE KEY uq_manual_payment_transactions_conversation (conversation_id),
         INDEX idx_manual_payment_transactions_token (token),
         INDEX idx_manual_payment_transactions_status (status),
-        INDEX idx_manual_payment_transactions_request (request_id, created_at)
+        INDEX idx_manual_payment_transactions_request (request_id, created_at),
+        INDEX idx_manual_payment_transactions_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'manual_payment_transactions', 'internal_push_sent_at', 'DATETIME NULL AFTER paid_at');
+ensure_column($pdo, 'manual_payment_transactions', 'internal_mail_sent_at', 'DATETIME NULL AFTER internal_push_sent_at');
+ensure_column($pdo, 'manual_payment_transactions', 'internal_notification_attempts', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER internal_mail_sent_at');
+ensure_column($pdo, 'manual_payment_transactions', 'internal_notification_error', 'TEXT NULL AFTER internal_notification_attempts');
+ensure_index($pdo, 'manual_payment_transactions', 'idx_manual_payment_transactions_internal_notice', 'INDEX idx_manual_payment_transactions_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)');
 ensure_table($pdo, 'manual_payment_request_logs', "
     CREATE TABLE manual_payment_request_logs (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

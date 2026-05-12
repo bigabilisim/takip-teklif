@@ -7,6 +7,7 @@ use App\Core\Database;
 use App\Core\DatabaseBackup;
 use App\Core\ExchangeRates;
 use App\Core\IyzicoClient;
+use App\Core\InternalNotifier;
 use App\Core\Mailer;
 use App\Core\MailTemplate;
 use App\Core\ParasutClient;
@@ -4745,8 +4746,22 @@ function handle_iyzico_callback(string $method): void
         $localStatus = iyzico_local_status($response, (float) ($payment['amount'] ?? 0));
         $message = iyzico_result_message($localStatus, $response);
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
+        if ($localStatus === 'paid') {
+            $notificationResult = notify_payment_received(
+                $payment,
+                $response,
+                'renewal',
+                empty($payment['internal_push_sent_at']),
+                empty($payment['internal_mail_sent_at'])
+            );
+            $repo->markPaymentInternalNotification(
+                (int) $payment['id'],
+                (int) ($notificationResult['push_sent'] ?? 0) > 0,
+                !empty($notificationResult['mail_ok']),
+                payment_internal_notification_error($notificationResult)
+            );
+        }
         if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
-            notify_payment_received($payment, $response, 'renewal');
             notify_customer_payment_received($payment, $response, 'renewal');
         } elseif ($localStatus !== 'paid') {
             notify_payment_failed($payment, $response, 'renewal', $message, $localStatus);
@@ -4809,8 +4824,22 @@ function handle_manual_iyzico_callback_result(PaymentRequestRepository $repo, ar
         $localStatus = iyzico_local_status($response, (float) ($payment['amount'] ?? 0));
         $message = iyzico_result_message($localStatus, $response);
         $repo->updateIyzicoPaymentResult((int) $payment['id'], $request, $response, $localStatus);
+        if ($localStatus === 'paid') {
+            $notificationResult = notify_payment_received(
+                $payment,
+                $response,
+                'manual',
+                empty($payment['internal_push_sent_at']),
+                empty($payment['internal_mail_sent_at'])
+            );
+            $repo->markPaymentInternalNotification(
+                (int) $payment['id'],
+                (int) ($notificationResult['push_sent'] ?? 0) > 0,
+                !empty($notificationResult['mail_ok']),
+                payment_internal_notification_error($notificationResult)
+            );
+        }
         if ($localStatus === 'paid' && (string) ($payment['status'] ?? '') !== 'paid') {
-            notify_payment_received($payment, $response, 'manual');
             notify_customer_payment_received($payment, $response, 'manual');
         } elseif ($localStatus !== 'paid') {
             notify_payment_failed($payment, $response, 'manual', $message, $localStatus);
@@ -4957,23 +4986,50 @@ function notify_manual_payment_request_created(array $request): void
     }
 }
 
-function notify_payment_received(array $payment, array $response, string $source): void
+function notify_payment_received(array $payment, array $response, string $source, bool $sendPush = true, bool $sendMail = true): array
 {
+    $result = [
+        'push_sent' => 0,
+        'push_failed' => 0,
+        'push_total' => 0,
+        'push_error' => '',
+        'mail_ok' => false,
+        'mail_error' => '',
+    ];
+
     try {
         $context = payment_received_notification_context($payment, $response, $source);
-        send_internal_push_notification(
-            'Ödeme geldi',
-            $context['customer'] . ' · ' . $context['amount'],
-            $context['url'],
-            'payment-received-' . $context['source'] . '-' . $context['record_id']
-        );
-        send_internal_mail_notification(
-            'Ödeme geldi: ' . $context['title'],
-            payment_received_mail_body($context)
-        );
+        if ($sendPush) {
+            $pushResult = send_internal_push_notification(
+                'Ödeme geldi',
+                $context['customer'] . ' · ' . $context['amount'],
+                $context['url'],
+                'payment-received-' . $context['source'] . '-' . $context['record_id'] . '-' . hash('sha1', (string) ($context['payment_id'] ?? '') . '|' . (string) ($payment['id'] ?? ''))
+            );
+            $result['push_sent'] = (int) ($pushResult['sent'] ?? 0);
+            $result['push_failed'] = (int) ($pushResult['failed'] ?? 0);
+            $result['push_total'] = (int) ($pushResult['total'] ?? 0);
+            $result['push_error'] = (string) ($pushResult['last_error'] ?? '');
+        }
+        if ($sendMail) {
+            $mailResult = send_internal_mail_notification(
+                'Ödeme geldi: ' . $context['title'],
+                payment_received_mail_body($context)
+            );
+            $result['mail_ok'] = !empty($mailResult['ok']);
+            $result['mail_error'] = (string) ($mailResult['error'] ?? '');
+        } else {
+            $result['mail_ok'] = true;
+        }
+        if (!$sendPush) {
+            $result['push_sent'] = 1;
+        }
     } catch (Throwable $e) {
+        $result['push_error'] = $e->getMessage();
         error_log('Ödeme alındı bildirimi gönderilemedi: ' . $e->getMessage());
     }
+
+    return $result;
 }
 
 function notify_customer_payment_received(array $payment, array $response, string $source): void
@@ -5006,6 +5062,19 @@ function notify_customer_payment_received(array $payment, array $response, strin
     } catch (Throwable $e) {
         error_log('Müşteri ödeme alındı bilgilendirmesi gönderilemedi: ' . $e->getMessage());
     }
+}
+
+function payment_internal_notification_error(array $result): string
+{
+    $errors = [];
+    if ((int) ($result['push_sent'] ?? 0) < 1) {
+        $errors[] = 'push: ' . ((string) ($result['push_error'] ?? '') ?: (((int) ($result['push_total'] ?? 0) < 1) ? 'aktif abonelik yok' : 'gönderilemedi'));
+    }
+    if (array_key_exists('mail_ok', $result) && empty($result['mail_ok'])) {
+        $errors[] = 'mail: ' . ((string) ($result['mail_error'] ?? '') ?: 'gönderilemedi');
+    }
+
+    return mb_substr(implode(' | ', $errors), 0, 1000);
 }
 
 function payment_customer_confirmation_recipients(array $payment, string $source): array
@@ -5283,11 +5352,12 @@ function notify_sales_offer_opened(array $offer, ?array $delivery = null): void
         $customer = trim((string) (($offer['customer_name'] ?? '') ?: ($offer['customer_email'] ?? 'Müşteri')));
         $reader = $delivery ? sales_offer_delivery_recipient_label($delivery) : '';
         $total = money_format_local($offer['total'] ?? null, (string) ($offer['currency'] ?? 'TRY'));
+        $viewCount = max(1, (int) ($delivery['view_count'] ?? 1));
         send_internal_push_notification(
             'Teklif açıldı',
-            sales_offer_number($offer) . ' · ' . ($reader !== '' ? $reader . ' · ' : '') . $customer . ' · ' . $total,
+            sales_offer_number($offer) . ' · ' . ($reader !== '' ? $reader . ' · ' : '') . $customer . ' · ' . $total . ' · ' . $viewCount . '. görüntüleme',
             '/',
-            'sales-offer-opened-' . $offerId . '-' . (int) ($delivery['id'] ?? 0)
+            'sales-offer-opened-' . $offerId . '-' . (int) ($delivery['id'] ?? 0) . '-' . $viewCount
         );
     } catch (Throwable $e) {
         error_log('Satış teklifi açıldı push bildirimi gönderilemedi: ' . $e->getMessage());
@@ -5424,78 +5494,19 @@ function payment_failed_mail_body(array $context, string $reason, array $respons
         . '</td></tr></table></body></html>';
 }
 
-function send_internal_push_notification(string $title, string $body, string $urlPath, string $tag = ''): void
+function send_internal_push_notification(string $title, string $body, string $urlPath, string $tag = ''): array
 {
-    $recipient = internal_notification_recipient();
-    $payload = [
-        'title' => $title,
-        'body' => $body,
-        'url' => $urlPath,
-        'tag' => $tag !== '' ? $tag : 'takip-' . hash('sha1', $title . '|' . $body . '|' . $urlPath),
-    ];
-
-    $result = $recipient !== null
-        ? WebPush::sendToUser((int) $recipient['id'], $payload)
-        : WebPush::sendToAll($payload);
-
-    if ($recipient !== null) {
-        $otherResult = WebPush::sendToAllExceptUser((int) $recipient['id'], $payload);
-        $result['sent'] = (int) ($result['sent'] ?? 0) + (int) ($otherResult['sent'] ?? 0);
-        $result['failed'] = (int) ($result['failed'] ?? 0) + (int) ($otherResult['failed'] ?? 0);
-        $result['total'] = (int) ($result['total'] ?? 0) + (int) ($otherResult['total'] ?? 0);
-    }
-
-    if ((int) ($result['sent'] ?? 0) < 1) {
-        error_log('İç bildirim push gönderilemedi: ' . json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-    }
+    return InternalNotifier::push($title, $body, $urlPath, $tag);
 }
 
-function send_internal_mail_notification(string $subject, string $body): void
+function send_internal_mail_notification(string $subject, string $body): array
 {
-    $recipient = internal_notification_recipient();
-    $email = trim((string) ($recipient['email'] ?? ''));
-    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        error_log('İç bildirim maili için geçerli Bilal e-postası bulunamadı.');
-        return;
-    }
-
-    $result = Mailer::sendWithResult($email, $subject, $body, true);
-    if (empty($result['ok'])) {
-        error_log('İç bildirim maili gönderilemedi: ' . (string) ($result['error'] ?? 'transport-failed'));
-    }
+    return InternalNotifier::mail($subject, $body);
 }
 
 function internal_notification_recipient(): ?array
 {
-    static $recipient = false;
-    if ($recipient !== false) {
-        return $recipient;
-    }
-
-    try {
-        $stmt = Database::connection()->query(
-            "SELECT id, name, email, role
-             FROM users
-             WHERE is_active = 1
-               AND deleted_at IS NULL
-             ORDER BY
-               CASE
-                 WHEN LOWER(name) LIKE '%bilal%' AND LOWER(name) LIKE '%bozduman%' THEN 0
-                 WHEN LOWER(email) LIKE '%bilal%' THEN 1
-                 WHEN role = 'admin' THEN 2
-                 ELSE 3
-               END,
-               id ASC
-             LIMIT 1"
-        );
-        $row = $stmt->fetch();
-        $recipient = $row ?: null;
-    } catch (Throwable $e) {
-        error_log('İç bildirim alıcısı bulunamadı: ' . $e->getMessage());
-        $recipient = null;
-    }
-
-    return $recipient;
+    return InternalNotifier::recipient();
 }
 
 function handle_push_public_key(): void
@@ -6597,13 +6608,12 @@ function handle_supplier_quote_public(string $method, string $token): void
         return;
     }
 
-    $supplierQuoteWasPending = (string) ($request['status'] ?? '') === 'pending';
     $repo->markSupplierQuoteRequestOpened(
         (int) $request['id'],
         (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
         (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
     );
-    if ($method === 'GET' && $supplierQuoteWasPending) {
+    if ($method === 'GET') {
         notify_supplier_quote_opened($request);
     }
 
@@ -6833,12 +6843,9 @@ function handle_customer_offer_public(string $method, string $token): void
     }
 
     if ($method === 'GET' && in_array((string) ($offer['status'] ?? ''), ['sent', 'opened'], true)) {
-        $customerOfferWasSent = (string) ($offer['status'] ?? '') === 'sent';
         $offer['view_count'] = $repo->markCustomerOfferOpened((int) $offer['id']);
         $offer['status'] = 'opened';
-        if ($customerOfferWasSent) {
-            notify_customer_offer_opened($offer);
-        }
+        notify_customer_offer_opened($offer);
     }
 
     if (in_array((string) ($offer['status'] ?? ''), ['approved', 'revision_requested', 'rejected'], true)) {
@@ -7638,9 +7645,7 @@ function handle_sales_offer_public(string $method, int $offerId): void
             (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
             (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
         );
-        if (!empty($viewRecord['first_view'])) {
-            notify_sales_offer_opened($offer, $viewRecord);
-        }
+        notify_sales_offer_opened($offer, $viewRecord);
         $reader = $viewRecord ?: $reader;
         $offer = $repo->findSalesOffer($offerId) ?: $offer;
     }

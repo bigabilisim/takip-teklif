@@ -3326,6 +3326,45 @@ final class RenewalRepository
         return $stmt->fetchAll();
     }
 
+    public function paidCardPaymentsPendingInternalNotifications(int $limit = 50): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT
+                rp.*,
+                r.customer_id,
+                r.title,
+                r.brand,
+                COALESCE(ri_stats.items_summary, r.title) AS title,
+                c.company_name,
+                c.contact_name,
+                c.email AS customer_email,
+                c.phone AS customer_phone
+             FROM renewal_payments rp
+             INNER JOIN renewals r ON r.id = rp.renewal_id
+             INNER JOIN customers c ON c.id = r.customer_id
+             LEFT JOIN (
+                SELECT
+                    renewal_id,
+                    CASE
+                        WHEN COUNT(*) > 1 THEN CONCAT(SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1), ' + ', COUNT(*) - 1, ' ürün')
+                        ELSE SUBSTRING_INDEX(GROUP_CONCAT(title ORDER BY sort_order ASC, id ASC SEPARATOR ', '), ', ', 1)
+                    END AS items_summary
+                FROM renewal_items
+                GROUP BY renewal_id
+             ) ri_stats ON ri_stats.renewal_id = r.id
+             WHERE rp.provider = 'iyzico'
+               AND rp.status = 'paid'
+               AND COALESCE(rp.payment_id, '') <> ''
+               AND (rp.internal_push_sent_at IS NULL OR rp.internal_mail_sent_at IS NULL)
+             ORDER BY COALESCE(rp.paid_at, rp.updated_at, rp.created_at) ASC, rp.id ASC
+             LIMIT :limit"
+        );
+        $stmt->bindValue('limit', max(1, min(200, $limit)), PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
     public function providerPayments(int $renewalId, string $provider): array
     {
         $stmt = $this->db->prepare(
@@ -3443,6 +3482,29 @@ final class RenewalRepository
             'error_message' => $this->nullableString($response['errorMessage'] ?? ''),
             'raw_request' => $this->jsonOrNull($request),
             'raw_response' => $this->jsonOrNull($response),
+        ]);
+    }
+
+    public function markPaymentInternalNotification(int $paymentId, bool $pushSent, bool $mailSent, string $error = ''): void
+    {
+        if ($paymentId < 1) {
+            return;
+        }
+
+        $stmt = $this->db->prepare(
+            'UPDATE renewal_payments
+             SET internal_push_sent_at = CASE WHEN :push_sent = 1 THEN COALESCE(internal_push_sent_at, NOW()) ELSE internal_push_sent_at END,
+                 internal_mail_sent_at = CASE WHEN :mail_sent = 1 THEN COALESCE(internal_mail_sent_at, NOW()) ELSE internal_mail_sent_at END,
+                 internal_notification_attempts = internal_notification_attempts + 1,
+                 internal_notification_error = :error_message,
+                 updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $paymentId,
+            'push_sent' => $pushSent ? 1 : 0,
+            'mail_sent' => $mailSent ? 1 : 0,
+            'error_message' => trim($error) !== '' ? mb_substr($error, 0, 1000) : null,
         ]);
     }
 
@@ -3946,6 +4008,10 @@ final class RenewalRepository
                 raw_request MEDIUMTEXT NULL,
                 raw_response MEDIUMTEXT NULL,
                 paid_at DATETIME NULL,
+                internal_push_sent_at DATETIME NULL,
+                internal_mail_sent_at DATETIME NULL,
+                internal_notification_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+                internal_notification_error TEXT NULL,
                 created_by INT UNSIGNED NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -3953,9 +4019,15 @@ final class RenewalRepository
                 UNIQUE KEY uq_renewal_payments_conversation (conversation_id),
                 INDEX idx_renewal_payments_renewal (renewal_id, created_at),
                 INDEX idx_renewal_payments_token (token),
-                INDEX idx_renewal_payments_status (status)
+                INDEX idx_renewal_payments_status (status),
+                INDEX idx_renewal_payments_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('renewal_payments', 'internal_push_sent_at', 'DATETIME NULL AFTER paid_at');
+        $this->ensureColumn('renewal_payments', 'internal_mail_sent_at', 'DATETIME NULL AFTER internal_push_sent_at');
+        $this->ensureColumn('renewal_payments', 'internal_notification_attempts', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER internal_mail_sent_at');
+        $this->ensureColumn('renewal_payments', 'internal_notification_error', 'TEXT NULL AFTER internal_notification_attempts');
+        $this->ensureIndex('renewal_payments', 'idx_renewal_payments_internal_notice', 'INDEX idx_renewal_payments_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS renewal_payment_receipts (

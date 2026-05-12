@@ -202,6 +202,25 @@ final class PaymentRequestRepository
         return $stmt->fetchAll();
     }
 
+    public function paidCardPaymentsPendingInternalNotifications(int $limit = 50): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT mpt.*, mpr.public_token, mpr.customer_id, mpr.title, mpr.description, mpr.customer_name, mpr.customer_email, mpr.customer_phone, mpr.customer_tax_number, mpr.recipients_json
+             FROM manual_payment_transactions mpt
+             INNER JOIN manual_payment_requests mpr ON mpr.id = mpt.request_id
+             WHERE mpt.provider = 'iyzico'
+               AND mpt.status = 'paid'
+               AND COALESCE(mpt.payment_id, '') <> ''
+               AND (mpt.internal_push_sent_at IS NULL OR mpt.internal_mail_sent_at IS NULL)
+             ORDER BY COALESCE(mpt.paid_at, mpt.updated_at, mpt.created_at) ASC, mpt.id ASC
+             LIMIT :limit"
+        );
+        $stmt->bindValue('limit', max(1, min(200, $limit)), PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
     public function find(int $id): ?array
     {
         $stmt = $this->db->prepare(
@@ -485,6 +504,29 @@ final class PaymentRequestRepository
         }
     }
 
+    public function markPaymentInternalNotification(int $paymentId, bool $pushSent, bool $mailSent, string $error = ''): void
+    {
+        if ($paymentId < 1) {
+            return;
+        }
+
+        $stmt = $this->db->prepare(
+            'UPDATE manual_payment_transactions
+             SET internal_push_sent_at = CASE WHEN :push_sent = 1 THEN COALESCE(internal_push_sent_at, NOW()) ELSE internal_push_sent_at END,
+                 internal_mail_sent_at = CASE WHEN :mail_sent = 1 THEN COALESCE(internal_mail_sent_at, NOW()) ELSE internal_mail_sent_at END,
+                 internal_notification_attempts = internal_notification_attempts + 1,
+                 internal_notification_error = :error_message,
+                 updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $paymentId,
+            'push_sent' => $pushSent ? 1 : 0,
+            'mail_sent' => $mailSent ? 1 : 0,
+            'error_message' => trim($error) !== '' ? mb_substr($error, 0, 1000) : null,
+        ]);
+    }
+
     public function logDelivery(int $requestId, string $channel, string $recipient, string $subject, string $body, string $status, ?string $error = null): int
     {
         $stmt = $this->db->prepare(
@@ -652,6 +694,10 @@ final class PaymentRequestRepository
                 raw_request MEDIUMTEXT NULL,
                 raw_response MEDIUMTEXT NULL,
                 paid_at DATETIME NULL,
+                internal_push_sent_at DATETIME NULL,
+                internal_mail_sent_at DATETIME NULL,
+                internal_notification_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+                internal_notification_error TEXT NULL,
                 created_by INT UNSIGNED NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -659,9 +705,15 @@ final class PaymentRequestRepository
                 UNIQUE KEY uq_manual_payment_transactions_conversation (conversation_id),
                 INDEX idx_manual_payment_transactions_token (token),
                 INDEX idx_manual_payment_transactions_status (status),
-                INDEX idx_manual_payment_transactions_request (request_id, created_at)
+                INDEX idx_manual_payment_transactions_request (request_id, created_at),
+                INDEX idx_manual_payment_transactions_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('manual_payment_transactions', 'internal_push_sent_at', 'DATETIME NULL AFTER paid_at');
+        $this->ensureColumn('manual_payment_transactions', 'internal_mail_sent_at', 'DATETIME NULL AFTER internal_push_sent_at');
+        $this->ensureColumn('manual_payment_transactions', 'internal_notification_attempts', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER internal_mail_sent_at');
+        $this->ensureColumn('manual_payment_transactions', 'internal_notification_error', 'TEXT NULL AFTER internal_notification_attempts');
+        $this->ensureIndex('manual_payment_transactions', 'idx_manual_payment_transactions_internal_notice', 'INDEX idx_manual_payment_transactions_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)');
 
         $this->db->exec(
             "CREATE TABLE IF NOT EXISTS manual_payment_request_logs (

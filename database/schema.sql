@@ -327,6 +327,10 @@ CREATE TABLE renewal_payments (
     raw_request MEDIUMTEXT NULL,
     raw_response MEDIUMTEXT NULL,
     paid_at DATETIME NULL,
+    internal_push_sent_at DATETIME NULL,
+    internal_mail_sent_at DATETIME NULL,
+    internal_notification_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+    internal_notification_error TEXT NULL,
     created_by INT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -334,7 +338,8 @@ CREATE TABLE renewal_payments (
     UNIQUE KEY uq_renewal_payments_conversation (conversation_id),
     INDEX idx_renewal_payments_renewal (renewal_id, created_at),
     INDEX idx_renewal_payments_token (token),
-    INDEX idx_renewal_payments_status (status)
+    INDEX idx_renewal_payments_status (status),
+    INDEX idx_renewal_payments_internal_notice (status, internal_push_sent_at, internal_mail_sent_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE renewal_payment_receipts (
