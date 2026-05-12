@@ -69,6 +69,11 @@ if ($path === '/forgot-password') {
     exit;
 }
 
+if (preg_match('#^/cari-bilgi/([a-f0-9]{64})/hatirlatma-kapat$#', $path, $matches)) {
+    handle_customer_info_reminder_opt_out($matches[1]);
+    exit;
+}
+
 if (preg_match('#^/cari-bilgi/([a-f0-9]{64})$#', $path, $matches)) {
     handle_customer_info_public($method, $matches[1]);
     exit;
@@ -6499,6 +6504,29 @@ function handle_customer_info_public(string $method, string $token): void
     });
 }
 
+function handle_customer_info_reminder_opt_out(string $token): void
+{
+    $request = (new CustomerInfoRequestRepository())->optOutRemindersByToken($token);
+    render_public_layout('Cari Bilgi Hatırlatması', static function () use ($request): void {
+        if (!$request) {
+            echo '<section class="login-panel"><div class="alert error">Cari bilgi talebi bulunamadı veya bağlantı geçersiz.</div></section>';
+            return;
+        }
+
+        $message = ($request['status'] ?? '') === 'submitted'
+            ? 'Cari bilgileriniz zaten alınmış. Teşekkür ederiz.'
+            : 'Bu cari bilgi talebi için tekrar hatırlatma gönderilmeyecek.';
+        ?>
+        <section class="login-panel">
+            <div class="alert success"><?= h($message) ?></div>
+            <?php if (($request['status'] ?? '') === 'pending'): ?>
+                <p class="muted compact">Dilerseniz aynı bağlantıdan cari bilgilerini daha sonra yine doldurabilirsiniz.</p>
+            <?php endif; ?>
+        </section>
+        <?php
+    });
+}
+
 function handle_supplier_quote_public(string $method, string $token): void
 {
     $repo = new RenewalRepository();
@@ -12714,18 +12742,19 @@ function send_customer_info_request(CustomerInfoRequestRepository $repo, array $
     $expiresHours = max(1, min(168, (int) ($data['request_expires_hours'] ?? 48)));
     $request = $repo->create($email, $customerId, (int) ($_SESSION['user_id'] ?? 0), $recipientName, $expiresHours);
     $link = absolute_app_url('/cari-bilgi/' . $request['token']);
+    $stopReminderLink = absolute_app_url('/cari-bilgi/' . $request['token'] . '/hatirlatma-kapat');
 
     if ($channel === 'whatsapp') {
         return [
             'channel' => 'whatsapp',
             'request' => $request,
             'link' => $link,
-            'whatsapp_url' => whatsapp_web_url((string) $whatsappNumber, customer_info_whatsapp_message($request, $link)),
+            'whatsapp_url' => whatsapp_web_url((string) $whatsappNumber, customer_info_whatsapp_message($request, $link, $stopReminderLink)),
         ];
     }
 
     $settings = (new SettingsRepository())->all();
-    $mail = MailTemplate::renderCustomerInfoRequest($settings, $request, $link);
+    $mail = MailTemplate::renderCustomerInfoRequest($settings, $request, $link, $stopReminderLink);
     $result = Mailer::sendWithResult(
         $email,
         'Cari bilgi formu',
@@ -12771,7 +12800,7 @@ function log_customer_info_request_mail(string $email, string $subject, string $
     }
 }
 
-function customer_info_whatsapp_message(array $request, string $link): string
+function customer_info_whatsapp_message(array $request, string $link, string $stopReminderLink = ''): string
 {
     $name = trim((string) ($request['recipient_name'] ?? ''));
     $greeting = $name !== '' ? 'Merhaba ' . $name . ',' : 'Merhaba,';
@@ -12781,6 +12810,7 @@ function customer_info_whatsapp_message(array $request, string $link): string
         . "\n\nCari kartınızdaki bilgilendirme yapılacak yetkili kişi bilgileri eksik görünüyor. Ürün yenileme bildirimi ve teklif süreçlerini doğru kişilere ulaştırabilmemiz için aşağıdaki güvenli linkten firma ve yetkili bilgilerinizi tamamlamanızı rica ederiz."
         . "\n\nLink: " . $link
         . "\n\nBağlantı geçerlilik süresi: " . $expiresAt
+        . ($stopReminderLink !== '' ? "\nTekrar hatırlatma istemiyorsanız: " . $stopReminderLink : '')
         . "\nBilgiler gönderildikten sonra link otomatik kapanır.";
 }
 

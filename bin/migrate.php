@@ -657,6 +657,7 @@ ensure_table($pdo, 'customer_info_requests', "
     CREATE TABLE customer_info_requests (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         customer_id INT UNSIGNED NULL,
+        public_token CHAR(64) NULL,
         token_hash CHAR(64) NOT NULL,
         recipient_email VARCHAR(190) NOT NULL,
         recipient_name VARCHAR(190) NULL,
@@ -667,17 +668,29 @@ ensure_table($pdo, 'customer_info_requests', "
         submitted_customer_id INT UNSIGNED NULL,
         expires_at DATETIME NOT NULL,
         submitted_at DATETIME NULL,
+        last_reminder_sent_at DATETIME NULL,
+        reminder_count INT UNSIGNED NOT NULL DEFAULT 0,
+        reminder_opted_out_at DATETIME NULL,
         created_by INT UNSIGNED NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_customer_info_requests_public_token (public_token),
         UNIQUE KEY uq_customer_info_requests_token (token_hash),
         INDEX idx_customer_info_requests_status (status, expires_at),
+        INDEX idx_customer_info_requests_reminders (status, reminder_opted_out_at, last_reminder_sent_at, created_at),
         INDEX idx_customer_info_requests_customer (customer_id),
         INDEX idx_customer_info_requests_submitted_customer (submitted_customer_id),
         INDEX idx_customer_info_requests_email (recipient_email)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_column($pdo, 'customer_info_requests', 'public_token', 'CHAR(64) NULL AFTER customer_id');
 ensure_column($pdo, 'customer_info_requests', 'recipient_name', 'VARCHAR(190) NULL AFTER recipient_email');
+ensure_column($pdo, 'customer_info_requests', 'last_reminder_sent_at', 'DATETIME NULL AFTER submitted_at');
+ensure_column($pdo, 'customer_info_requests', 'reminder_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER last_reminder_sent_at');
+ensure_column($pdo, 'customer_info_requests', 'reminder_opted_out_at', 'DATETIME NULL AFTER reminder_count');
+ensure_index($pdo, 'customer_info_requests', 'uq_customer_info_requests_public_token', 'UNIQUE KEY uq_customer_info_requests_public_token (public_token)');
+ensure_index($pdo, 'customer_info_requests', 'idx_customer_info_requests_reminders', 'INDEX idx_customer_info_requests_reminders (status, reminder_opted_out_at, last_reminder_sent_at, created_at)');
+backfill_customer_info_public_tokens($pdo);
 ensure_table($pdo, 'interaction_notes', "
     CREATE TABLE interaction_notes (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -778,6 +791,29 @@ function ensure_column_type(PDO $pdo, string $table, string $column, string $exp
 
     if ($type !== strtolower($expectedType)) {
         $pdo->exec(sprintf('ALTER TABLE `%s` MODIFY COLUMN `%s` %s', $table, $column, $definition));
+    }
+}
+
+function backfill_customer_info_public_tokens(PDO $pdo): void
+{
+    $stmt = $pdo->query(
+        "SELECT id
+         FROM customer_info_requests
+         WHERE public_token IS NULL
+            OR public_token = ''
+         LIMIT 500"
+    );
+    $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+    if ($rows === []) {
+        return;
+    }
+
+    $update = $pdo->prepare('UPDATE customer_info_requests SET public_token = :public_token WHERE id = :id');
+    foreach ($rows as $row) {
+        $update->execute([
+            'id' => (int) $row['id'],
+            'public_token' => bin2hex(random_bytes(32)),
+        ]);
     }
 }
 

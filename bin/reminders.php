@@ -6,6 +6,7 @@ use App\Core\Mailer;
 use App\Core\MailTemplate;
 use App\Core\DatabaseBackup;
 use App\Core\WebPush;
+use App\Models\CustomerInfoRequestRepository;
 use App\Models\PaymentRequestRepository;
 use App\Models\RenewalRepository;
 use App\Models\SettingsRepository;
@@ -17,8 +18,10 @@ $force = in_array('--force', $argv ?? [], true);
 $renewalWindowOpen = notification_window_is_open((string) ($settings['notifications.send_time'] ?? '09:00'));
 $paymentRequestRepo = new PaymentRequestRepository();
 $paymentReminderRows = $paymentRequestRepo->dueForDailyReminders($force);
+$customerInfoRequestRepo = new CustomerInfoRequestRepository();
+$customerInfoReminderRows = $customerInfoRequestRepo->dueForReminders(3, 50, $force);
 
-if (!$force && !$renewalWindowOpen && $paymentReminderRows === []) {
+if (!$force && !$renewalWindowOpen && $paymentReminderRows === [] && $customerInfoReminderRows === []) {
     echo sprintf(
         "Bildirim saati bekleniyor. Ayar: %s, simdi: %s\n",
         notification_send_time((string) ($settings['notifications.send_time'] ?? '09:00')),
@@ -35,6 +38,8 @@ $supplierSent = 0;
 $supplierFailed = 0;
 $paymentReminderSent = 0;
 $paymentReminderFailed = 0;
+$customerInfoReminderSent = 0;
+$customerInfoReminderFailed = 0;
 $pushSent = 0;
 $pushFailed = 0;
 $backupMessage = 'yedek kontrol edilmedi';
@@ -195,7 +200,51 @@ foreach ($paymentReminderRows as $paymentRequest) {
     $paymentRequestRepo->markReminderAttempted($requestId);
 }
 
-$pushNeeded = $rows !== [] || $priceRequestRows !== [] || $paymentReminderRows !== [];
+foreach ($customerInfoReminderRows as $request) {
+    $requestId = (int) ($request['id'] ?? 0);
+    $email = trim(mb_strtolower((string) ($request['recipient_email'] ?? '')));
+    $publicToken = trim((string) ($request['public_token'] ?? ''));
+    $subject = 'Cari bilgi hatırlatması';
+
+    if ($requestId < 1 || $publicToken === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        if ($requestId > 0) {
+            customer_info_reminder_log_mail(
+                $email !== '' ? $email : 'missing-recipient',
+                $subject,
+                'Otomatik cari bilgi hatırlatması için geçerli e-posta alıcısı veya bağlantı bulunamadı.',
+                'failed',
+                'missing-recipient'
+            );
+            $customerInfoRequestRepo->markReminderAttempted($requestId);
+        }
+        $customerInfoReminderFailed++;
+        continue;
+    }
+
+    $link = url('/cari-bilgi/' . rawurlencode($publicToken));
+    $stopReminderLink = url('/cari-bilgi/' . rawurlencode($publicToken) . '/hatirlatma-kapat');
+    $mail = MailTemplate::renderCustomerInfoRequest($settings, $request, $link, $stopReminderLink, true);
+    $result = Mailer::sendWithResult(
+        $email,
+        $subject,
+        (string) $mail['body'],
+        (bool) $mail['is_html'],
+        $mail['inline_attachments'] ?? []
+    );
+    $ok = !empty($result['ok']);
+    customer_info_reminder_log_mail(
+        $email,
+        $subject,
+        (string) ($result['body'] ?? $mail['body']),
+        $ok ? 'sent' : 'failed',
+        $ok ? null : (string) ($result['error'] ?? 'transport-failed')
+    );
+    $customerInfoRequestRepo->markReminderAttempted($requestId);
+
+    $ok ? $customerInfoReminderSent++ : $customerInfoReminderFailed++;
+}
+
+$pushNeeded = $rows !== [] || $priceRequestRows !== [] || $paymentReminderRows !== [] || $customerInfoReminderRows !== [];
 if ($pushNeeded) {
     try {
         $pushBodyParts = [];
@@ -208,11 +257,14 @@ if ($pushNeeded) {
         if ($paymentReminderRows !== []) {
             $pushBodyParts[] = count($paymentReminderRows) . ' ödeme talebi hatırlatması';
         }
+        if ($customerInfoReminderRows !== []) {
+            $pushBodyParts[] = count($customerInfoReminderRows) . ' cari bilgi hatırlatması';
+        }
 
         $pushResult = WebPush::sendToAll([
             'title' => 'Sistem bildirimi',
             'body' => implode(', ', $pushBodyParts) . ' için işlem var.',
-            'url' => ($paymentReminderRows !== [] && $rows === [] && $priceRequestRows === []) ? '/payment-requests' : '/renewals',
+            'url' => ($paymentReminderRows !== [] && $rows === [] && $priceRequestRows === [] && $customerInfoReminderRows === []) ? '/payment-requests' : '/',
         ]);
         $pushSent = (int) $pushResult['sent'];
         $pushFailed = (int) $pushResult['failed'];
@@ -231,13 +283,15 @@ try {
 }
 
 echo sprintf(
-    "Hatirlatma tamamlandi. Musteri gonderilen: %d, musteri basarisiz: %d, tedarikci fiyat talebi gonderilen: %d, tedarikci basarisiz: %d, odeme talebi hatirlatma gonderilen: %d, odeme talebi basarisiz: %d, web push gonderilen: %d, web push basarisiz: %d, yedek: %s\n",
+    "Hatirlatma tamamlandi. Musteri gonderilen: %d, musteri basarisiz: %d, tedarikci fiyat talebi gonderilen: %d, tedarikci basarisiz: %d, odeme talebi hatirlatma gonderilen: %d, odeme talebi basarisiz: %d, cari bilgi hatirlatma gonderilen: %d, cari bilgi hatirlatma basarisiz: %d, web push gonderilen: %d, web push basarisiz: %d, yedek: %s\n",
     $sent,
     $failed,
     $supplierSent,
     $supplierFailed,
     $paymentReminderSent,
     $paymentReminderFailed,
+    $customerInfoReminderSent,
+    $customerInfoReminderFailed,
     $pushSent,
     $pushFailed,
     $backupMessage
@@ -375,4 +429,21 @@ function manual_payment_reminder_due_date(array $row): string
     }
 
     return date('d.m.Y', strtotime($date));
+}
+
+function customer_info_reminder_log_mail(string $email, string $subject, string $body, string $status, ?string $error = null): void
+{
+    try {
+        (new RenewalRepository())->logMail(
+            null,
+            $email,
+            $subject,
+            $body,
+            $status === 'sent' ? 'sent' : 'failed',
+            $error,
+            false
+        );
+    } catch (Throwable $e) {
+        error_log('Cari bilgi hatırlatma mail logu yazılamadı: ' . $e->getMessage());
+    }
 }

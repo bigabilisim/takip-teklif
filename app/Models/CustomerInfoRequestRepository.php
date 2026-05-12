@@ -24,12 +24,13 @@ final class CustomerInfoRequestRepository
         $expiresAt = date('Y-m-d H:i:s', time() + ($expiresHours * 3600));
         $stmt = $this->db->prepare(
             'INSERT INTO customer_info_requests
-                (customer_id, token_hash, recipient_email, recipient_name, status, expires_at, created_by)
+                (customer_id, public_token, token_hash, recipient_email, recipient_name, status, expires_at, created_by)
              VALUES
-                (:customer_id, :token_hash, :recipient_email, :recipient_name, "pending", :expires_at, :created_by)'
+                (:customer_id, :public_token, :token_hash, :recipient_email, :recipient_name, "pending", :expires_at, :created_by)'
         );
         $stmt->execute([
             'customer_id' => $customerId ?: null,
+            'public_token' => $token,
             'token_hash' => hash('sha256', $token),
             'recipient_email' => $email,
             'recipient_name' => trim($recipientName),
@@ -50,8 +51,17 @@ final class CustomerInfoRequestRepository
 
     public function findByToken(string $token): ?array
     {
-        $stmt = $this->db->prepare('SELECT * FROM customer_info_requests WHERE token_hash = :token_hash LIMIT 1');
-        $stmt->execute(['token_hash' => hash('sha256', $token)]);
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM customer_info_requests
+             WHERE token_hash = :token_hash
+                OR public_token = :public_token
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'token_hash' => hash('sha256', $token),
+            'public_token' => trim($token),
+        ]);
         $request = $stmt->fetch();
         if (!$request) {
             return null;
@@ -64,6 +74,69 @@ final class CustomerInfoRequestRepository
         }
 
         return $request;
+    }
+
+    public function dueForReminders(int $intervalHours = 3, int $limit = 50, bool $force = false): array
+    {
+        $intervalHours = max(1, min(24, $intervalHours));
+        $limit = max(1, min(200, $limit));
+        $conditions = [
+            "status = 'pending'",
+            'expires_at > NOW()',
+            'reminder_opted_out_at IS NULL',
+            "recipient_email <> ''",
+            'recipient_email LIKE :email_pattern',
+            "COALESCE(public_token, '') <> ''",
+        ];
+        $params = ['email_pattern' => '%@%'];
+
+        if (!$force) {
+            $conditions[] = 'created_at <= DATE_SUB(NOW(), INTERVAL ' . $intervalHours . ' HOUR)';
+            $conditions[] = '(last_reminder_sent_at IS NULL OR last_reminder_sent_at <= DATE_SUB(NOW(), INTERVAL ' . $intervalHours . ' HOUR))';
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT *
+             FROM customer_info_requests
+             WHERE ' . implode(' AND ', $conditions) . '
+             ORDER BY COALESCE(last_reminder_sent_at, created_at) ASC, id ASC
+             LIMIT :limit'
+        );
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+        }
+        $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    public function markReminderAttempted(int $id): void
+    {
+        $this->db->prepare(
+            'UPDATE customer_info_requests
+             SET last_reminder_sent_at = NOW(),
+                 reminder_count = reminder_count + 1,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute(['id' => $id]);
+    }
+
+    public function optOutRemindersByToken(string $token): ?array
+    {
+        $request = $this->findByToken($token);
+        if (!$request) {
+            return null;
+        }
+
+        $this->db->prepare(
+            'UPDATE customer_info_requests
+             SET reminder_opted_out_at = COALESCE(reminder_opted_out_at, NOW()),
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute(['id' => (int) $request['id']]);
+
+        return $this->find((int) $request['id']);
     }
 
     public function recent(int $limit = 6): array
@@ -416,6 +489,7 @@ final class CustomerInfoRequestRepository
             "CREATE TABLE IF NOT EXISTS customer_info_requests (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 customer_id INT UNSIGNED NULL,
+                public_token CHAR(64) NULL,
                 token_hash CHAR(64) NOT NULL,
                 recipient_email VARCHAR(190) NOT NULL,
                 recipient_name VARCHAR(190) NULL,
@@ -426,11 +500,16 @@ final class CustomerInfoRequestRepository
                 submitted_customer_id INT UNSIGNED NULL,
                 expires_at DATETIME NOT NULL,
                 submitted_at DATETIME NULL,
+                last_reminder_sent_at DATETIME NULL,
+                reminder_count INT UNSIGNED NOT NULL DEFAULT 0,
+                reminder_opted_out_at DATETIME NULL,
                 created_by INT UNSIGNED NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_customer_info_requests_public_token (public_token),
                 UNIQUE KEY uq_customer_info_requests_token (token_hash),
                 INDEX idx_customer_info_requests_status (status, expires_at),
+                INDEX idx_customer_info_requests_reminders (status, reminder_opted_out_at, last_reminder_sent_at, created_at),
                 INDEX idx_customer_info_requests_customer (customer_id),
                 INDEX idx_customer_info_requests_submitted_customer (submitted_customer_id),
                 INDEX idx_customer_info_requests_email (recipient_email)
@@ -440,7 +519,44 @@ final class CustomerInfoRequestRepository
         if (!$this->columnExists('customer_info_requests', 'recipient_name')) {
             $this->db->exec('ALTER TABLE customer_info_requests ADD COLUMN recipient_name VARCHAR(190) NULL AFTER recipient_email');
         }
+        if (!$this->columnExists('customer_info_requests', 'public_token')) {
+            $this->db->exec('ALTER TABLE customer_info_requests ADD COLUMN public_token CHAR(64) NULL AFTER customer_id');
+        }
+        if (!$this->columnExists('customer_info_requests', 'last_reminder_sent_at')) {
+            $this->db->exec('ALTER TABLE customer_info_requests ADD COLUMN last_reminder_sent_at DATETIME NULL AFTER submitted_at');
+        }
+        if (!$this->columnExists('customer_info_requests', 'reminder_count')) {
+            $this->db->exec('ALTER TABLE customer_info_requests ADD COLUMN reminder_count INT UNSIGNED NOT NULL DEFAULT 0 AFTER last_reminder_sent_at');
+        }
+        if (!$this->columnExists('customer_info_requests', 'reminder_opted_out_at')) {
+            $this->db->exec('ALTER TABLE customer_info_requests ADD COLUMN reminder_opted_out_at DATETIME NULL AFTER reminder_count');
+        }
+        $this->ensureIndex('customer_info_requests', 'uq_customer_info_requests_public_token', 'UNIQUE KEY uq_customer_info_requests_public_token (public_token)');
+        $this->ensureIndex('customer_info_requests', 'idx_customer_info_requests_reminders', 'INDEX idx_customer_info_requests_reminders (status, reminder_opted_out_at, last_reminder_sent_at, created_at)');
+        $this->backfillPublicTokens();
         $this->ensureContactRoleSchema();
+    }
+
+    private function backfillPublicTokens(): void
+    {
+        $rows = $this->db->query(
+            "SELECT id
+             FROM customer_info_requests
+             WHERE public_token IS NULL
+                OR public_token = ''
+             LIMIT 200"
+        )->fetchAll();
+        if ($rows === []) {
+            return;
+        }
+
+        $update = $this->db->prepare('UPDATE customer_info_requests SET public_token = :public_token WHERE id = :id');
+        foreach ($rows as $row) {
+            $update->execute([
+                'id' => (int) $row['id'],
+                'public_token' => bin2hex(random_bytes(32)),
+            ]);
+        }
     }
 
     private function ensureContactRoleSchema(): void
@@ -488,5 +604,24 @@ final class CustomerInfoRequestRepository
         ]);
 
         return (int) $stmt->fetchColumn() > 0;
+    }
+
+    private function ensureIndex(string $table, string $index, string $definition): void
+    {
+        $stmt = $this->db->prepare(
+            'SELECT COUNT(*)
+             FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = :table_name
+               AND INDEX_NAME = :index_name'
+        );
+        $stmt->execute([
+            'table_name' => $table,
+            'index_name' => $index,
+        ]);
+
+        if ((int) $stmt->fetchColumn() === 0) {
+            $this->db->exec(sprintf('ALTER TABLE `%s` ADD %s', $table, $definition));
+        }
     }
 }

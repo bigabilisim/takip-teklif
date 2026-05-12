@@ -629,7 +629,7 @@ CSS;
         ];
     }
 
-    public static function renderCustomerInfoRequest(array $settings, array $request, string $link): array
+    public static function renderCustomerInfoRequest(array $settings, array $request, string $link, string $stopReminderLink = '', bool $isReminder = false): array
     {
         $inlineAttachments = self::logoInlineAttachments($settings);
         $logoSrc = $inlineAttachments !== []
@@ -639,6 +639,14 @@ CSS;
         $expiresAt = !empty($request['expires_at']) ? date('d.m.Y H:i', strtotime((string) $request['expires_at'])) : '-';
         $recipientName = trim((string) ($request['recipient_name'] ?? ''));
         $greeting = $recipientName !== '' ? 'Merhaba ' . self::escape($recipientName) . ',' : 'Merhaba,';
+        $kicker = $isReminder ? 'Cari bilgi hatırlatması' : 'Cari bilgi talebi';
+        $title = $isReminder ? 'Cari bilgilerinizi bekliyoruz' : 'Cari bilgilerinizi tamamlayın';
+        $reminderNote = $stopReminderLink !== ''
+            ? '<p style="margin:14px 0 0;color:#607069;font-size:12px;line-height:1.5;">Bilgileri gönderene kadar 3 saatte bir hatırlatma alabilirsiniz. Hatırlatma almak istemiyorsanız aşağıdaki butonu kullanabilirsiniz.</p>'
+            : '';
+        $stopReminderButton = $stopReminderLink !== ''
+            ? '<p style="margin:12px 0 0;"><a href="' . self::escape($stopReminderLink) . '" style="display:inline-block;background:#eef3f1;color:#31413c;text-decoration:none;border:1px solid #cfdcd7;border-radius:8px;padding:11px 15px;font-weight:700;">Tekrar hatırlatma</a></p>'
+            : '';
 
         $body = '<!doctype html><html><head><meta charset="UTF-8"><meta name="color-scheme" content="light"></head>'
             . '<body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
@@ -647,8 +655,8 @@ CSS;
             . '<tr><td style="height:6px;background:#147c72;font-size:0;line-height:0;">&nbsp;</td></tr>'
             . '<tr><td style="padding:28px;">'
             . '<img src="' . self::escape($logoSrc) . '" alt="' . $appName . '" style="display:block;width:auto;max-width:150px;max-height:58px;margin:0 0 22px;">'
-            . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Cari bilgi talebi</p>'
-            . '<h1 style="margin:0 0 14px;color:#17201c;font-size:26px;line-height:1.2;">Cari bilgilerinizi tamamlayın</h1>'
+            . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">' . self::escape($kicker) . '</p>'
+            . '<h1 style="margin:0 0 14px;color:#17201c;font-size:26px;line-height:1.2;">' . self::escape($title) . '</h1>'
             . '<p style="margin:0 0 18px;color:#607069;font-size:15px;line-height:1.55;">' . $greeting . ' cari kartınızdaki bilgilendirme yapılacak yetkili kişi bilgileri eksik görünüyor. Firma, vergi, adres ve yetkili bilgilerinizi güvenli form üzerinden tamamlamanızı rica ederiz. İsterseniz vergi levhanızı yükleyerek alanların otomatik dolmasını sağlayabilirsiniz.</p>'
             . '<div style="margin:0 0 22px;padding:14px 16px;background:#eef6f4;border:1px solid #cae5df;border-radius:8px;color:#31413c;font-size:14px;line-height:1.55;"><strong style="display:block;margin:0 0 5px;color:#147c72;">Neden gerekli?</strong>Ürün yenileme bildirimi ve teklif süreçlerinin doğru kişilere ulaşabilmesi için bilgilendirme yapılacak yetkililerin eksiksiz ve güncel olması gerekir.</div>'
             . '<p style="margin:0 0 22px;"><a href="' . self::escape($link) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:13px 18px;font-weight:700;">Cari bilgilerini doldur</a></p>'
@@ -657,6 +665,8 @@ CSS;
             . '<tr><td style="padding:12px 14px;color:#607069;font-size:13px;">Bağlantı geçerlilik süresi</td><td style="padding:12px 14px;color:#17201c;font-size:13px;font-weight:700;text-align:right;">' . self::escape($expiresAt) . '</td></tr>'
             . '</table>'
             . '<p style="margin:18px 0 0;color:#607069;font-size:12px;line-height:1.5;">Bu bağlantı size özel oluşturuldu. Bilgileri gönderdikten sonra bağlantı kapanır.</p>'
+            . $reminderNote
+            . $stopReminderButton
             . '</td></tr></table>'
             . '<p style="margin:14px 0 0;color:#607069;font-size:12px;">' . $appName . '</p>'
             . '</td></tr></table></body></html>';

@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.65] - 2026-05-12
+
+- Cari bilgi talepleri için 3 saatte bir otomatik hatırlatma maili eklendi.
+- Cari bilgi talebi maillerine “Tekrar hatırlatma” bağlantısı eklendi; alıcı bu bağlantıya basarsa hatırlatma döngüsü durur.
+- Cari bilgi talep linklerinin otomatik hatırlatmalarda tekrar gönderilebilmesi için talep kayıtlarına hatırlatma durumu alanları eklendi.
+
 ## [2.0.64] - 2026-05-12
 
 - Teklif müşteri tarafından onaylanmadan da Paraşüt faturası oluşturulabilir hale getirildi.
