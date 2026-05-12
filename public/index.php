@@ -10644,6 +10644,12 @@ function render_payment_requests(): void
 {
     $repo = new PaymentRequestRepository();
     $requests = $repo->all(40);
+    $openRequests = array_values(array_filter($requests, static function (array $request): bool {
+        return !in_array((string) ($request['status'] ?? 'pending'), ['paid', 'refunded'], true);
+    }));
+    $closedRequests = array_values(array_filter($requests, static function (array $request): bool {
+        return in_array((string) ($request['status'] ?? 'pending'), ['paid', 'refunded'], true);
+    }));
     $createdId = (int) ($_GET['created'] ?? 0);
     $created = $createdId > 0 ? $repo->find($createdId) : null;
     $message = $created ? payment_request_default_message($created) : '';
@@ -10656,7 +10662,7 @@ function render_payment_requests(): void
     $createdRecipients = $created ? manual_payment_request_recipients($created) : [];
     $canManage = Auth::can('collections.manage');
 
-    render_layout('Ödeme Talep Et', static function () use ($requests, $created, $message, $paymentUrl, $whatsappHref, $customerChoices, $createdRecipients, $canManage): void {
+    render_layout('Ödeme Talep Et', static function () use ($requests, $openRequests, $closedRequests, $created, $message, $paymentUrl, $whatsappHref, $customerChoices, $createdRecipients, $canManage): void {
         ?>
         <div class="page-title">
             <div>
@@ -10871,132 +10877,169 @@ function render_payment_requests(): void
             <div class="section-head">
                 <div>
                     <p class="eyebrow">Geçmiş</p>
-                    <h2>Son manuel ödeme talepleri</h2>
+                    <h2>Manuel ödeme talepleri</h2>
+                    <span>Ödenmemiş talepler üstte, tamamlanan tahsilatlar altta ayrı izlenir.</span>
                 </div>
             </div>
             <?php if ($requests === []): ?>
                 <div class="empty">Henüz manuel ödeme talebi oluşturulmadı.</div>
             <?php else: ?>
-                <div class="manual-payment-list">
-                    <?php foreach ($requests as $request): ?>
-                        <?php $requestUrl = manual_payment_request_url($request); ?>
-                        <?php $requestStatus = (string) ($request['status'] ?? 'pending'); ?>
-                        <?php $isPaidRequest = $requestStatus === 'paid'; ?>
-                        <?php $isRefundedRequest = $requestStatus === 'refunded'; ?>
-                        <?php $isFinalizedRequest = $isPaidRequest || $isRefundedRequest; ?>
-                        <details class="manual-payment-case">
-                            <summary class="manual-payment-row">
-                                <div>
-                                    <small><?= h(manual_payment_request_number($request)) ?></small>
-                                    <strong><?= h((string) ($request['title'] ?? '-')) ?></strong>
-                                    <span><?= h((string) (($request['customer_name'] ?? '') ?: ($request['customer_phone'] ?? '') ?: ($request['customer_email'] ?? '-'))) ?></span>
-                                </div>
-                                <b><?= h(money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'))) ?></b>
-                                <span class="badge <?= h(payment_request_status_class((string) ($request['status'] ?? 'pending'))) ?>"><?= h(payment_request_status_label((string) ($request['status'] ?? 'pending'))) ?></span>
-                                <span class="button small secondary">Düzenle</span>
-                            </summary>
-                            <div class="manual-payment-case-body">
-                                <div class="manual-payment-case-actions">
-                                    <a class="button small secondary" href="<?= h($requestUrl) ?>" target="_blank" rel="noopener">Linki aç</a>
-                                    <span class="badge"><?= h(payment_request_reminder_summary($request)) ?></span>
-                                    <?php if (manual_payment_request_email_recipients($request) === []): ?>
-                                        <span class="badge warning">E-posta eksik</span>
-                                    <?php endif; ?>
-                                    <?php if ($canManage && $isPaidRequest): ?>
-                                        <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/refund')) ?>" onsubmit="return confirm('Bu ödeme iade edildi olarak işaretlensin mi? Bu işlem tahsilat toplamlarından düşer, kayıt geçmişte kalır.')">
-                                            <?= csrf_field() ?>
-                                            <input type="hidden" name="refund_note" value="Manuel iade kaydı">
-                                            <button class="button small danger" type="submit">İade edildi</button>
-                                        </form>
-                                    <?php endif; ?>
-                                    <?php if ($canManage && !$isFinalizedRequest): ?>
-                                        <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/delete')) ?>" onsubmit="return confirm('Bu ödeme talebi silinsin mi? Link iptal edilecek ve hatırlatma gönderilmeyecek.')">
-                                            <?= csrf_field() ?>
-                                            <button class="button small danger" type="submit">Sil</button>
-                                        </form>
-                                    <?php endif; ?>
-                                </div>
-                                <?php if ($canManage): ?>
-                                    <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/update')) ?>" class="manual-payment-edit-form">
-                                        <?= csrf_field() ?>
-                                        <label>
-                                            Başlık
-                                            <input name="title" value="<?= h((string) ($request['title'] ?? '')) ?>" required>
-                                        </label>
-                                        <label>
-                                            Tutar
-                                            <input type="number" min="0.01" step="0.01" name="amount" value="<?= h(number_format((float) ($request['amount'] ?? 0), 2, '.', '')) ?>" <?= $isFinalizedRequest ? 'readonly' : '' ?> required>
-                                        </label>
-                                        <label>
-                                            Para birimi
-                                            <select name="currency" <?= $isFinalizedRequest ? 'disabled' : '' ?>>
-                                                <?php foreach (allowed_currency_options() as $currency): ?>
-                                                    <?= option($currency, $currency, (string) ($request['currency'] ?? 'TRY')) ?>
-                                                <?php endforeach; ?>
-                                            </select>
-                                        </label>
-                                        <label>
-                                            Ödeme günü
-                                            <input type="date" name="payment_due_date" value="<?= h(payment_request_due_date_value($request)) ?>">
-                                        </label>
-                                        <div class="payment-request-reminder-card field-wide compact" data-payment-request-reminder>
-                                            <div>
-                                                <strong>Otomatik hatırlatma</strong>
-                                                <span><?= h(payment_request_reminder_summary($request)) ?></span>
-                                            </div>
-                                            <label>
-                                                Saat
-                                                <input type="time" name="reminder_time" value="<?= h(payment_request_reminder_time_value($request)) ?>">
-                                            </label>
-                                            <label>
-                                                Gün önce
-                                                <input type="number" min="0" max="365" name="reminder_start_days_before" value="<?= h((string) max(0, (int) ($request['reminder_start_days_before'] ?? 3))) ?>">
-                                            </label>
-                                            <label class="payment-request-check">
-                                                <input type="checkbox" name="reminder_repeat_daily" value="1" data-reminder-repeat-daily <?= !empty($request['reminder_repeat_daily']) ? 'checked' : '' ?>>
-                                                <span>Her gün</span>
-                                            </label>
-                                            <label class="payment-request-check">
-                                                <input type="checkbox" name="reminder_until_paid" value="1" data-reminder-until-paid <?= !empty($request['reminder_until_paid']) ? 'checked' : '' ?>>
-                                                <span>Ödeyene kadar</span>
-                                            </label>
-                                        </div>
-                                        <label>
-                                            Firma / müşteri
-                                            <input name="customer_name" value="<?= h((string) ($request['customer_name'] ?? '')) ?>" placeholder="Cari unvanı">
-                                        </label>
-                                        <label>
-                                            Telefon
-                                            <input name="customer_phone" value="<?= h((string) ($request['customer_phone'] ?? '')) ?>" placeholder="05xx xxx xx xx">
-                                        </label>
-                                        <label>
-                                            E-posta alıcıları
-                                            <input type="text" name="customer_email" value="<?= h(manual_payment_email_input_value($request)) ?>" placeholder="musteri@firma.com, muhasebe@firma.com">
-                                        </label>
-                                        <label>
-                                            Vergi / TC no
-                                            <input name="customer_tax_number" value="<?= h((string) ($request['customer_tax_number'] ?? '')) ?>" maxlength="60">
-                                        </label>
-                                        <label class="field-wide">
-                                            Açıklama
-                                            <textarea name="description" rows="3"><?= h((string) ($request['description'] ?? '')) ?></textarea>
-                                        </label>
-                                        <div class="field-wide manual-payment-edit-footer">
-                                            <?php if ($isFinalizedRequest): ?>
-                                                <span><?= $isRefundedRequest ? 'İade edilmiş' : 'Ödenmiş' ?> case için tutar ve para birimi korunur; iletişim ve açıklama güncellenir.</span>
-                                            <?php endif; ?>
-                                            <button type="submit" class="button small primary">Kaydet</button>
-                                        </div>
-                                    </form>
-                                <?php endif; ?>
+                <div class="manual-payment-board">
+                    <section class="manual-payment-group open">
+                        <div class="manual-payment-group-head">
+                            <div>
+                                <small>Üstte takip edilecekler</small>
+                                <strong>Ödenmemiş ödeme talepleri</strong>
                             </div>
-                        </details>
-                    <?php endforeach; ?>
+                            <span class="badge warning"><?= count($openRequests) ?> açık</span>
+                        </div>
+                        <?= render_manual_payment_request_list($openRequests, $canManage, 'Şu anda bekleyen ödeme talebi yok.') ?>
+                    </section>
+
+                    <section class="manual-payment-group closed">
+                        <div class="manual-payment-group-head">
+                            <div>
+                                <small>Geçmiş kayıt</small>
+                                <strong>Ödenmiş ve iade edilmiş talepler</strong>
+                            </div>
+                            <span class="badge active"><?= count($closedRequests) ?> tamamlandı</span>
+                        </div>
+                        <?= render_manual_payment_request_list($closedRequests, $canManage, 'Henüz tamamlanmış ödeme talebi yok.') ?>
+                    </section>
                 </div>
             <?php endif; ?>
         </section>
         <?php
     });
+}
+
+function render_manual_payment_request_list(array $requests, bool $canManage, string $emptyMessage): string
+{
+    if ($requests === []) {
+        return '<div class="empty compact-empty">' . h($emptyMessage) . '</div>';
+    }
+
+    ob_start();
+    ?>
+    <div class="manual-payment-list">
+        <?php foreach ($requests as $request): ?>
+            <?php $requestUrl = manual_payment_request_url($request); ?>
+            <?php $requestStatus = (string) ($request['status'] ?? 'pending'); ?>
+            <?php $isPaidRequest = $requestStatus === 'paid'; ?>
+            <?php $isRefundedRequest = $requestStatus === 'refunded'; ?>
+            <?php $isFinalizedRequest = $isPaidRequest || $isRefundedRequest; ?>
+            <details class="manual-payment-case <?= $isFinalizedRequest ? 'finalized' : 'open' ?>">
+                <summary class="manual-payment-row">
+                    <div>
+                        <small><?= h(manual_payment_request_number($request)) ?></small>
+                        <strong><?= h((string) ($request['title'] ?? '-')) ?></strong>
+                        <span><?= h((string) (($request['customer_name'] ?? '') ?: ($request['customer_phone'] ?? '') ?: ($request['customer_email'] ?? '-'))) ?></span>
+                    </div>
+                    <b><?= h(money_format_local($request['amount'] ?? null, (string) ($request['currency'] ?? 'TRY'))) ?></b>
+                    <span class="badge <?= h(payment_request_status_class((string) ($request['status'] ?? 'pending'))) ?>"><?= h(payment_request_status_label((string) ($request['status'] ?? 'pending'))) ?></span>
+                    <span class="button small secondary">Düzenle</span>
+                </summary>
+                <div class="manual-payment-case-body">
+                    <div class="manual-payment-case-actions">
+                        <a class="button small secondary" href="<?= h($requestUrl) ?>" target="_blank" rel="noopener">Linki aç</a>
+                        <span class="badge"><?= h(payment_request_reminder_summary($request)) ?></span>
+                        <?php if (manual_payment_request_email_recipients($request) === []): ?>
+                            <span class="badge warning">E-posta eksik</span>
+                        <?php endif; ?>
+                        <?php if ($canManage && $isPaidRequest): ?>
+                            <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/refund')) ?>" onsubmit="return confirm('Bu ödeme iade edildi olarak işaretlensin mi? Bu işlem tahsilat toplamlarından düşer, kayıt geçmişte kalır.')">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="refund_note" value="Manuel iade kaydı">
+                                <button class="button small danger" type="submit">İade edildi</button>
+                            </form>
+                        <?php endif; ?>
+                        <?php if ($canManage && !$isFinalizedRequest): ?>
+                            <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/delete')) ?>" onsubmit="return confirm('Bu ödeme talebi silinsin mi? Link iptal edilecek ve hatırlatma gönderilmeyecek.')">
+                                <?= csrf_field() ?>
+                                <button class="button small danger" type="submit">Sil</button>
+                            </form>
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($canManage): ?>
+                        <form method="post" action="<?= h(url('/payment-requests/' . (int) $request['id'] . '/update')) ?>" class="manual-payment-edit-form">
+                            <?= csrf_field() ?>
+                            <label>
+                                Başlık
+                                <input name="title" value="<?= h((string) ($request['title'] ?? '')) ?>" required>
+                            </label>
+                            <label>
+                                Tutar
+                                <input type="number" min="0.01" step="0.01" name="amount" value="<?= h(number_format((float) ($request['amount'] ?? 0), 2, '.', '')) ?>" <?= $isFinalizedRequest ? 'readonly' : '' ?> required>
+                            </label>
+                            <label>
+                                Para birimi
+                                <select name="currency" <?= $isFinalizedRequest ? 'disabled' : '' ?>>
+                                    <?php foreach (allowed_currency_options() as $currency): ?>
+                                        <?= option($currency, $currency, (string) ($request['currency'] ?? 'TRY')) ?>
+                                    <?php endforeach; ?>
+                                </select>
+                            </label>
+                            <label>
+                                Ödeme günü
+                                <input type="date" name="payment_due_date" value="<?= h(payment_request_due_date_value($request)) ?>">
+                            </label>
+                            <div class="payment-request-reminder-card field-wide compact" data-payment-request-reminder>
+                                <div>
+                                    <strong>Otomatik hatırlatma</strong>
+                                    <span><?= h(payment_request_reminder_summary($request)) ?></span>
+                                </div>
+                                <label>
+                                    Saat
+                                    <input type="time" name="reminder_time" value="<?= h(payment_request_reminder_time_value($request)) ?>">
+                                </label>
+                                <label>
+                                    Gün önce
+                                    <input type="number" min="0" max="365" name="reminder_start_days_before" value="<?= h((string) max(0, (int) ($request['reminder_start_days_before'] ?? 3))) ?>">
+                                </label>
+                                <label class="payment-request-check">
+                                    <input type="checkbox" name="reminder_repeat_daily" value="1" data-reminder-repeat-daily <?= !empty($request['reminder_repeat_daily']) ? 'checked' : '' ?>>
+                                    <span>Her gün</span>
+                                </label>
+                                <label class="payment-request-check">
+                                    <input type="checkbox" name="reminder_until_paid" value="1" data-reminder-until-paid <?= !empty($request['reminder_until_paid']) ? 'checked' : '' ?>>
+                                    <span>Ödeyene kadar</span>
+                                </label>
+                            </div>
+                            <label>
+                                Firma / müşteri
+                                <input name="customer_name" value="<?= h((string) ($request['customer_name'] ?? '')) ?>" placeholder="Cari unvanı">
+                            </label>
+                            <label>
+                                Telefon
+                                <input name="customer_phone" value="<?= h((string) ($request['customer_phone'] ?? '')) ?>" placeholder="05xx xxx xx xx">
+                            </label>
+                            <label>
+                                E-posta alıcıları
+                                <input type="text" name="customer_email" value="<?= h(manual_payment_email_input_value($request)) ?>" placeholder="musteri@firma.com, muhasebe@firma.com">
+                            </label>
+                            <label>
+                                Vergi / TC no
+                                <input name="customer_tax_number" value="<?= h((string) ($request['customer_tax_number'] ?? '')) ?>" maxlength="60">
+                            </label>
+                            <label class="field-wide">
+                                Açıklama
+                                <textarea name="description" rows="3"><?= h((string) ($request['description'] ?? '')) ?></textarea>
+                            </label>
+                            <div class="field-wide manual-payment-edit-footer">
+                                <?php if ($isFinalizedRequest): ?>
+                                    <span><?= $isRefundedRequest ? 'İade edilmiş' : 'Ödenmiş' ?> case için tutar ve para birimi korunur; iletişim ve açıklama güncellenir.</span>
+                                <?php endif; ?>
+                                <button type="submit" class="button small primary">Kaydet</button>
+                            </div>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            </details>
+        <?php endforeach; ?>
+    </div>
+    <?php
+
+    return (string) ob_get_clean();
 }
 
 function render_renewals(RenewalRepository $repo): void

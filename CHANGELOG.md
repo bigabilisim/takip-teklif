@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.60] - 2026-05-12
+
+- Ödeme Talep Et ekranında bekleyen/ödenmemiş ödeme talepleri üst bölümde ayrı gösterildi.
+- Ödenmiş ve iade edilmiş ödeme talepleri alt bölümde geçmiş kayıt olarak ayrıldı.
+- Manuel ödeme listesi daha okunur durum başlıkları ve sayaçlarla düzenlendi.
+
 ## [2.0.59] - 2026-05-10
 
 - Ödeme Talep Et ekranında manuel ödeme talebi formu ilk açılışta kapalı gelecek şekilde düzenlendi.
