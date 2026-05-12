@@ -1705,6 +1705,76 @@ final class RenewalRepository
         ]);
     }
 
+    public function matchSalesOfferPaymentRequests(int $id, ?int $paymentRequestId, ?int $balancePaymentRequestId): array
+    {
+        $offer = $this->findSalesOffer($id);
+        if ($offer === null) {
+            throw new \RuntimeException('Teklif kaydı bulunamadı.');
+        }
+
+        $paymentRequestId = ($paymentRequestId ?? 0) > 0 ? (int) $paymentRequestId : null;
+        $balancePaymentRequestId = ($balancePaymentRequestId ?? 0) > 0 ? (int) $balancePaymentRequestId : null;
+        if ($paymentRequestId !== null && $balancePaymentRequestId !== null && $paymentRequestId === $balancePaymentRequestId) {
+            throw new \RuntimeException('Aynı ödeme talebi hem ön ödeme hem kalan bakiye olarak seçilemez.');
+        }
+
+        $this->assertPaymentRequestCanBeMatched($id, $paymentRequestId, 'Ön ödeme');
+        $this->assertPaymentRequestCanBeMatched($id, $balancePaymentRequestId, 'Kalan bakiye');
+
+        $this->db->prepare(
+            'UPDATE sales_offers
+             SET payment_request_id = :payment_request_id,
+                 balance_payment_request_id = :balance_payment_request_id,
+                 payment_request_enabled = CASE WHEN :payment_request_enabled = 1 THEN 1 ELSE payment_request_enabled END,
+                 updated_at = NOW()
+             WHERE id = :id'
+        )->execute([
+            'id' => $id,
+            'payment_request_id' => $paymentRequestId,
+            'balance_payment_request_id' => $balancePaymentRequestId,
+            'payment_request_enabled' => $paymentRequestId !== null ? 1 : 0,
+        ]);
+
+        return $this->findSalesOffer($id) ?? $offer;
+    }
+
+    private function assertPaymentRequestCanBeMatched(int $offerId, ?int $paymentRequestId, string $label): void
+    {
+        if ($paymentRequestId === null) {
+            return;
+        }
+
+        $stmt = $this->db->prepare(
+            "SELECT id, status
+             FROM manual_payment_requests
+             WHERE id = :id
+               AND status <> 'cancelled'
+             LIMIT 1"
+        );
+        $stmt->execute(['id' => $paymentRequestId]);
+        $payment = $stmt->fetch();
+        if (!$payment) {
+            throw new \RuntimeException($label . ' için seçilen ödeme talebi bulunamadı veya iptal edilmiş.');
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT offer_number, customer_name
+             FROM sales_offers
+             WHERE id <> :offer_id
+               AND (payment_request_id = :payment_request_id OR balance_payment_request_id = :payment_request_id)
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'offer_id' => $offerId,
+            'payment_request_id' => $paymentRequestId,
+        ]);
+        $linked = $stmt->fetch();
+        if ($linked) {
+            $offerLabel = trim((string) (($linked['offer_number'] ?? '') ?: ($linked['customer_name'] ?? 'başka teklif')));
+            throw new \RuntimeException($label . ' için seçilen ödeme talebi zaten ' . $offerLabel . ' ile eşleşmiş.');
+        }
+    }
+
     public function markSalesOfferParasutInvoice(int $id, array $invoice): void
     {
         $this->db->prepare(

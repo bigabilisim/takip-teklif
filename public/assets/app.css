@@ -3788,6 +3788,37 @@ td.actions {
     background: #fff3f3;
 }
 
+.payment-match-form {
+    margin-top: 12px;
+}
+
+.payment-match-current {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.payment-match-current > div {
+    display: grid;
+    gap: 4px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #f8faf9;
+}
+
+.payment-match-current span {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.payment-match-current strong {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.35;
+}
+
 .sales-offer-operation-panel {
     display: grid;
     gap: 9px;
@@ -8070,7 +8101,8 @@ label {
     }
 
     .operation-step-grid,
-    .sales-offer-operation-form {
+    .sales-offer-operation-form,
+    .payment-match-current {
         grid-template-columns: 1fr;
     }
 

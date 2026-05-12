@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.61] - 2026-05-12
+
+- Teklif kartlarına “Ödeme eşleştir” butonu eklendi.
+- Teklifler manuel ödeme taleplerindeki ön ödeme/ana ödeme ve kalan bakiye kayıtlarıyla eşleştirilebilir hale getirildi.
+- Aynı ödeme talebinin farklı teklifler arasında yanlışlıkla tekrar eşleşmesi engellendi.
+
 ## [2.0.60] - 2026-05-12
 
 - Ödeme Talep Et ekranında bekleyen/ödenmemiş ödeme talepleri üst bölümde ayrı gösterildi.

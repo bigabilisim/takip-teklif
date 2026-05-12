@@ -237,6 +237,9 @@ try {
     } elseif (preg_match('#^/offers/(\d+)/collect-balance$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_sales_offer_collect_balance($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/offers/(\d+)/match-payment$#', $path, $matches) && $method === 'POST') {
+        require_permission('renewals.manage');
+        handle_sales_offer_payment_match($repo, (int) $matches[1]);
     } elseif (preg_match('#^/offers/(\d+)/parasut-invoice$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_sales_offer_parasut_invoice($repo, (int) $matches[1]);
@@ -7871,6 +7874,28 @@ function handle_sales_offer_collect_balance(RenewalRepository $repo, int $offerI
     redirect($returnTo);
 }
 
+function handle_sales_offer_payment_match(RenewalRepository $repo, int $offerId): void
+{
+    verify_csrf();
+    $returnTo = safe_return_path($_POST['return_to'] ?? '/');
+
+    try {
+        new PaymentRequestRepository();
+        $paymentRequestId = (int) ($_POST['payment_request_id'] ?? 0);
+        $balancePaymentRequestId = (int) ($_POST['balance_payment_request_id'] ?? 0);
+        $repo->matchSalesOfferPaymentRequests(
+            $offerId,
+            $paymentRequestId > 0 ? $paymentRequestId : null,
+            $balancePaymentRequestId > 0 ? $balancePaymentRequestId : null
+        );
+        flash('success', 'Teklif ile ödeme talebi eşleştirildi.');
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+    }
+
+    redirect($returnTo);
+}
+
 function handle_sales_offer_parasut_invoice(RenewalRepository $repo, int $offerId): void
 {
     verify_csrf();
@@ -9138,6 +9163,7 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
     }
 
     $paymentRepo = new PaymentRequestRepository();
+    $paymentRequests = $paymentRepo->all(200);
     ob_start();
     ?>
     <div class="dashboard-card-list">
@@ -9255,6 +9281,7 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
                             <?php if ($canManage): ?>
                                 <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/preview')) ?>">Taslak görüntüle</a>
                                 <button type="button" class="button small primary" data-dialog-open="sales-offer-send-<?= h($offerId) ?>">Müşteriye gönder</button>
+                                <button type="button" class="button small secondary" data-dialog-open="sales-offer-payment-match-<?= h($offerId) ?>">Ödeme eşleştir</button>
 	                                    <?php if ($canCollectBalance): ?>
 	                                        <form method="post" action="<?= h(url('/offers/' . $offerId . '/collect-balance')) ?>" onsubmit="return confirm('Bu teklif için kalan bakiye ödeme talebi mail olarak gönderilsin mi?')">
 	                                            <?= csrf_field() ?>
@@ -9268,6 +9295,7 @@ function render_sales_offer_lane(array $offers, bool $canManage, bool $canDelete
 			                                <a class="button small secondary" target="_blank" rel="noopener" href="<?= h(url('/offers/' . $offerId . '/pdf')) ?>">PDF olarak indir</a>
 		                                <a class="button small secondary" href="<?= h(url('/offers/' . $offerId . '/edit')) ?>">Düzenle</a>
 	                                    <?= render_sales_offer_send_dialog($offer) ?>
+                                        <?= render_sales_offer_payment_match_dialog($offer, $paymentRequests, $advancePayment, $balancePayment) ?>
                                         <?php if ($canCreateParasutInvoice): ?>
                                             <?= render_sales_offer_parasut_transfer_dialog($offer, $advancePayment, $balancePayment) ?>
                                         <?php endif; ?>
@@ -9346,6 +9374,107 @@ function render_sales_offer_parasut_transfer_dialog(array $offer, ?array $advanc
     <?php
 
     return (string) ob_get_clean();
+}
+
+function render_sales_offer_payment_match_dialog(array $offer, array $paymentRequests, ?array $advancePayment = null, ?array $balancePayment = null): string
+{
+    $offerId = (int) ($offer['id'] ?? 0);
+    if ($offerId < 1) {
+        return '';
+    }
+
+    foreach ([$advancePayment, $balancePayment] as $currentRequest) {
+        if (!$currentRequest) {
+            continue;
+        }
+
+        $currentId = (int) ($currentRequest['id'] ?? 0);
+        $exists = false;
+        foreach ($paymentRequests as $request) {
+            if ((int) ($request['id'] ?? 0) === $currentId) {
+                $exists = true;
+                break;
+            }
+        }
+        if (!$exists && $currentId > 0) {
+            $paymentRequests[] = $currentRequest;
+        }
+    }
+
+    $currency = normalize_allowed_currency((string) ($offer['currency'] ?? 'TRY'));
+    $total = money_format_local($offer['total'] ?? 0, $currency);
+    $returnTo = (string) ($_SERVER['REQUEST_URI'] ?? route_path());
+    $advanceId = (int) ($offer['payment_request_id'] ?? 0);
+    $balanceId = (int) ($offer['balance_payment_request_id'] ?? 0);
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog communication-dialog payment-match-dialog" id="sales-offer-payment-match-<?= h((string) $offerId) ?>">
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <p class="eyebrow">Ödeme eşleştirme</p>
+                    <h2>Teklif ile ödeme talebini bağla</h2>
+                    <span><?= h(sales_offer_number($offer)) ?> · <?= h((string) ($offer['customer_name'] ?? '-')) ?> · <?= h($total) ?></span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+
+            <div class="settings-note compact">
+                Ödeme talebi silinmez; sadece bu teklif kartındaki ön ödeme ve kalan bakiye alanlarına bağlanır. Başka bir teklife bağlı ödeme talebi tekrar seçilemez.
+            </div>
+
+            <form method="post" action="<?= h(url('/offers/' . $offerId . '/match-payment')) ?>" class="form-grid payment-match-form">
+                <?= csrf_field() ?>
+                <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+                <label>
+                    Ön ödeme / ana ödeme
+                    <select name="payment_request_id">
+                        <option value="0">Eşleşme yok</option>
+                        <?php foreach ($paymentRequests as $request): ?>
+                            <?= option((string) (int) ($request['id'] ?? 0), sales_offer_payment_request_option_label($request), (string) $advanceId) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    Kalan bakiye ödemesi
+                    <select name="balance_payment_request_id">
+                        <option value="0">Eşleşme yok</option>
+                        <?php foreach ($paymentRequests as $request): ?>
+                            <?= option((string) (int) ($request['id'] ?? 0), sales_offer_payment_request_option_label($request), (string) $balanceId) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <div class="payment-match-current field-wide">
+                    <div>
+                        <span>Mevcut ön ödeme</span>
+                        <strong><?= $advancePayment ? h(sales_offer_payment_request_option_label($advancePayment)) : 'Eşleşme yok' ?></strong>
+                    </div>
+                    <div>
+                        <span>Mevcut kalan bakiye</span>
+                        <strong><?= $balancePayment ? h(sales_offer_payment_request_option_label($balancePayment)) : 'Eşleşme yok' ?></strong>
+                    </div>
+                </div>
+                <div class="form-actions field-wide">
+                    <button type="button" class="button secondary" data-dialog-close>Vazgeç</button>
+                    <button type="submit" class="button primary">Ödeme eşleştir</button>
+                </div>
+            </form>
+        </div>
+    </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function sales_offer_payment_request_option_label(array $request): string
+{
+    $number = manual_payment_request_number($request);
+    $customer = trim((string) (($request['customer_name'] ?? '') ?: ($request['customer_email'] ?? '') ?: 'Müşteri yok'));
+    $amount = money_format_local($request['amount'] ?? 0, (string) ($request['currency'] ?? 'TRY'));
+    $status = payment_request_status_label((string) ($request['status'] ?? 'pending'));
+
+    return $number . ' - ' . $customer . ' - ' . $amount . ' - ' . $status;
 }
 
 function render_sales_offer_operation_panel(
