@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.63] - 2026-05-12
+
+- Teklif güncellendiğinde kayıt otomatik taslak durumuna alınır ve eski mail/WhatsApp takip linkleri silinir.
+- Eski takip token’ı ile açılan teklif bağlantıları artık genel bağlantıya düşmez; güncellendiği için geçersiz uyarısı gösterilir.
+- Güncelleme sonrası bekleyen eski ön ödeme/kalan bakiye ödeme talepleri iptal edilerek yeni gönderimden önce akış temizlenir.
+
 ## [2.0.62] - 2026-05-12
 
 - Müşteri teklif onayı artık ad, soyad ve e-posta formu istemeden gönderilen alıcı linkindeki kişi adına kaydedilir.

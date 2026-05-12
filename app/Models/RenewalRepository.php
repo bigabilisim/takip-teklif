@@ -1263,7 +1263,8 @@ final class RenewalRepository
 
     public function updateSalesOffer(int $id, array $data): void
     {
-        if ($this->findSalesOffer($id) === null) {
+        $existing = $this->findSalesOffer($id);
+        if ($existing === null) {
             throw new \RuntimeException('Teklif kaydı bulunamadı.');
         }
 
@@ -1289,7 +1290,7 @@ final class RenewalRepository
         $this->db->beginTransaction();
         try {
             $stmt = $this->db->prepare(
-                'UPDATE sales_offers
+                "UPDATE sales_offers
                  SET template_id = :template_id,
                      customer_id = :customer_id,
                      title = :title,
@@ -1301,10 +1302,24 @@ final class RenewalRepository
                      vat_total = :vat_total,
                      total = :total,
                      notes = :notes,
+                     status = 'draft',
+                     operation_status = 'approved',
+                     operation_note = NULL,
+                     operation_updated_at = NULL,
+                     operation_completed_at = NULL,
                      payment_request_enabled = :payment_request_enabled,
                      payment_request_percent = :payment_request_percent,
+                     payment_request_id = NULL,
+                     balance_payment_request_id = NULL,
+                     approved_at = NULL,
+                     approved_name = NULL,
+                     approved_email = NULL,
+                     approved_phone = NULL,
+                     approved_delivery_id = NULL,
+                     approval_ip = NULL,
+                     approval_user_agent = NULL,
                      updated_at = NOW()
-                 WHERE id = :id'
+                 WHERE id = :id"
             );
             $stmt->execute([
                 'id' => $id,
@@ -1323,11 +1338,37 @@ final class RenewalRepository
                 'payment_request_percent' => $paymentRequestPercent,
             ]);
             $this->replaceSalesOfferItems($id, $items, $currency);
+            $this->resetSalesOfferDispatchState($id, $existing);
             $this->db->commit();
         } catch (\Throwable $e) {
             $this->db->rollBack();
             throw $e;
         }
+    }
+
+    private function resetSalesOfferDispatchState(int $offerId, array $existing): void
+    {
+        if ($this->tableExists('manual_payment_requests')) {
+            foreach (['payment_request_id', 'balance_payment_request_id'] as $field) {
+                $paymentRequestId = (int) ($existing[$field] ?? 0);
+                if ($paymentRequestId <= 0) {
+                    continue;
+                }
+
+                $this->db->prepare(
+                    "UPDATE manual_payment_requests
+                     SET status = 'cancelled',
+                         reminder_repeat_daily = 0,
+                         reminder_until_paid = 0,
+                         updated_at = NOW()
+                     WHERE id = :id
+                       AND status = 'pending'"
+                )->execute(['id' => $paymentRequestId]);
+            }
+        }
+
+        $this->db->prepare('DELETE FROM sales_offer_deliveries WHERE offer_id = :offer_id')
+            ->execute(['offer_id' => $offerId]);
     }
 
     public function deleteSalesOffer(int $id): void

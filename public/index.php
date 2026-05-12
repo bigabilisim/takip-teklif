@@ -7595,6 +7595,12 @@ function handle_sales_offer_public(string $method, int $offerId): void
     }
 
     $reader = $readerToken !== '' ? $repo->findSalesOfferDeliveryByToken($offerId, $readerToken) : null;
+    if ($readerToken !== '' && $reader === null) {
+        render_public_layout('Teklif', static function (): void {
+            echo '<section class="login-panel"><div class="alert error">Bu teklif bağlantısı güncellendiği için geçersiz oldu. Lütfen size gönderilen yeni teklif bağlantısını kullanın.</div></section>';
+        });
+        return;
+    }
 
     if ($method === 'GET') {
         $viewRecord = $repo->recordSalesOfferView(
@@ -8714,7 +8720,7 @@ function handle_sales_offer_create(RenewalRepository $repo, string $method, ?int
         try {
             if ($editingOffer !== null) {
                 $repo->updateSalesOffer((int) $editingOffer['id'], $formData);
-                flash('success', 'Teklif güncellendi: ' . (string) (($editingOffer['offer_number'] ?? '') ?: ('TK-' . date('Y', strtotime((string) $editingOffer['created_at'])) . '-' . str_pad((string) (int) $editingOffer['id'], 6, '0', STR_PAD_LEFT))));
+                flash('success', 'Teklif güncellendi ve taslağa alındı. Eski mail/WhatsApp linkleri iptal edildi; müşteriye yeniden göndermeniz gerekiyor: ' . (string) (($editingOffer['offer_number'] ?? '') ?: ('TK-' . date('Y', strtotime((string) $editingOffer['created_at'])) . '-' . str_pad((string) (int) $editingOffer['id'], 6, '0', STR_PAD_LEFT))));
                 redirect('/');
             }
 
