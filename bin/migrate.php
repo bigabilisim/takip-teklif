@@ -616,12 +616,16 @@ ensure_table($pdo, 'renewal_notification_deliveries', "
         mail_log_id INT UNSIGNED NULL,
         recipient_email VARCHAR(190) NOT NULL,
         recipient_name VARCHAR(190) NULL,
+        recipient_phone VARCHAR(60) NULL,
         token_hash CHAR(64) NOT NULL,
         notification_date DATE NOT NULL,
         status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
         error_message TEXT NULL,
         sent_at DATETIME NULL,
+        first_read_at DATETIME NULL,
         read_at DATETIME NULL,
+        last_read_at DATETIME NULL,
+        read_count INT UNSIGNED NOT NULL DEFAULT 0,
         read_ip VARCHAR(45) NULL,
         read_user_agent VARCHAR(255) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -636,9 +640,13 @@ ensure_table($pdo, 'renewal_notification_deliveries', "
 ");
 ensure_column($pdo, 'renewal_notification_deliveries', 'mail_log_id', 'INT UNSIGNED NULL AFTER renewal_id');
 ensure_column($pdo, 'renewal_notification_deliveries', 'recipient_name', 'VARCHAR(190) NULL AFTER recipient_email');
+ensure_column($pdo, 'renewal_notification_deliveries', 'recipient_phone', 'VARCHAR(60) NULL AFTER recipient_name');
 ensure_column($pdo, 'renewal_notification_deliveries', 'notification_date', 'DATE NULL AFTER token_hash');
 ensure_column($pdo, 'renewal_notification_deliveries', 'sent_at', 'DATETIME NULL AFTER error_message');
+ensure_column($pdo, 'renewal_notification_deliveries', 'first_read_at', 'DATETIME NULL AFTER sent_at');
 ensure_column($pdo, 'renewal_notification_deliveries', 'read_at', 'DATETIME NULL AFTER sent_at');
+ensure_column($pdo, 'renewal_notification_deliveries', 'last_read_at', 'DATETIME NULL AFTER read_at');
+ensure_column($pdo, 'renewal_notification_deliveries', 'read_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER last_read_at');
 ensure_column($pdo, 'renewal_notification_deliveries', 'read_ip', 'VARCHAR(45) NULL AFTER read_at');
 ensure_column($pdo, 'renewal_notification_deliveries', 'read_user_agent', 'VARCHAR(255) NULL AFTER read_ip');
 ensure_column($pdo, 'renewal_notification_deliveries', 'created_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER read_user_agent');
@@ -646,6 +654,17 @@ ensure_column($pdo, 'renewal_notification_deliveries', 'updated_at', 'DATETIME N
 ensure_index($pdo, 'renewal_notification_deliveries', 'idx_renewal_notification_delivery_mail_log', 'INDEX idx_renewal_notification_delivery_mail_log (mail_log_id)');
 ensure_index($pdo, 'renewal_notification_deliveries', 'idx_renewal_notification_delivery_read', 'INDEX idx_renewal_notification_delivery_read (read_at)');
 ensure_index($pdo, 'renewal_notification_deliveries', 'idx_renewal_notification_delivery_recipient', 'INDEX idx_renewal_notification_delivery_recipient (recipient_email)');
+try {
+    $pdo->exec(
+        'UPDATE renewal_notification_deliveries
+         SET first_read_at = COALESCE(first_read_at, read_at),
+             last_read_at = COALESCE(last_read_at, read_at),
+             read_count = CASE WHEN read_at IS NOT NULL AND read_count = 0 THEN 1 ELSE read_count END
+         WHERE read_at IS NOT NULL'
+    );
+} catch (Throwable) {
+    // Eski kurulumlar alanlari olusturduktan hemen sonra bu bilgileri doldurur.
+}
 try {
     $pdo->exec(
         'UPDATE renewal_notification_deliveries rnd

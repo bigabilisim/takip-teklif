@@ -315,6 +315,9 @@ try {
     } elseif (preg_match('#^/renewals/(\d+)/mail$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_manual_renewal_mail($repo, (int) $matches[1]);
+    } elseif (preg_match('#^/renewals/(\d+)/whatsapp$#', $path, $matches) && $method === 'GET') {
+        require_permission('renewals.manage');
+        handle_renewal_customer_whatsapp($repo, (int) $matches[1]);
     } elseif (preg_match('#^/renewals/(\d+)/supplier-price-mail$#', $path, $matches) && $method === 'POST') {
         require_permission('renewals.manage');
         handle_supplier_price_request_mail($repo, (int) $matches[1]);
@@ -1024,16 +1027,19 @@ function handle_manual_renewal_mail(RenewalRepository $repo, int $renewalId): vo
             throw new RuntimeException('Mail gönderilecek en az bir alıcı seçin veya manuel e-posta yazın.');
         }
 
-        $body = manual_renewal_mail_body($row, $message);
         $sent = 0;
         $failed = 0;
         $lastError = '';
 
         foreach ($recipients as $recipient) {
+            $delivery = $repo->createNotificationDelivery((int) $row['id'], $recipient);
+            $summaryUrl = renewal_tracked_summary_url((int) $row['id'], (string) $delivery['token'], 60, (string) ($recipient['email'] ?? ''));
+            $personalMessage = renewal_personalized_summary_message($message, $summaryUrl);
+            $body = manual_renewal_mail_body($row, $personalMessage, $summaryUrl);
             $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
             $ok = !empty($result['ok']);
             $error = $ok ? null : (string) ($result['error'] ?? 'transport-failed');
-            $repo->logMail(
+            $mailLogId = $repo->logMail(
                 (int) $row['id'],
                 (string) $recipient['email'],
                 $subject,
@@ -1041,6 +1047,12 @@ function handle_manual_renewal_mail(RenewalRepository $repo, int $renewalId): vo
                 $ok ? 'sent' : 'failed',
                 $error,
                 false
+            );
+            $repo->updateNotificationDeliveryStatus(
+                (int) $delivery['id'],
+                $mailLogId,
+                $ok ? 'sent' : 'failed',
+                $error
             );
 
             if ($ok) {
@@ -1063,6 +1075,38 @@ function handle_manual_renewal_mail(RenewalRepository $repo, int $renewalId): vo
     }
 
     redirect(safe_return_path($_POST['return_to'] ?? '/renewals'));
+}
+
+function handle_renewal_customer_whatsapp(RenewalRepository $repo, int $renewalId): void
+{
+    try {
+        $row = $repo->find($renewalId);
+        if (!$row) {
+            throw new RuntimeException('Yenileme kaydı bulunamadı.');
+        }
+
+        $contactKey = trim((string) ($_GET['contact'] ?? ''));
+        $contact = renewal_contact_by_tracking_key($row, $contactKey);
+        if (!$contact) {
+            throw new RuntimeException('WhatsApp gönderilecek yetkili bulunamadı.');
+        }
+
+        $waNumber = whatsapp_number_from_phone((string) ($contact['phone'] ?? ''));
+        if ($waNumber === null) {
+            throw new RuntimeException('Seçilen yetkilinin WhatsApp için geçerli telefon numarası yok.');
+        }
+
+        $recipient = renewal_tracking_recipient_from_contact($contact, 'WhatsApp alıcısı');
+        $delivery = $repo->createNotificationDelivery($renewalId, $recipient);
+        $repo->updateNotificationDeliveryStatus((int) $delivery['id'], null, 'sent');
+        $summaryUrl = renewal_tracked_summary_url($renewalId, (string) $delivery['token'], 60, (string) ($contact['email'] ?? ''));
+        $message = renewal_whatsapp_message($row, $contact, $summaryUrl);
+
+        redirect(whatsapp_web_url($waNumber, $message));
+    } catch (Throwable $e) {
+        flash('error', $e->getMessage());
+        redirect(safe_return_path($_GET['return_to'] ?? '/renewals'));
+    }
 }
 
 function handle_supplier_price_request_mail(RenewalRepository $repo, int $renewalId): void
@@ -2047,12 +2091,24 @@ function renewal_mail_recipients_from_request(RenewalRepository $repo, array $ro
     return array_values($recipients);
 }
 
-function manual_renewal_mail_body(array $row, string $message): string
+function renewal_personalized_summary_message(string $message, string $summaryUrl): string
+{
+    $message = trim($message);
+    $replacement = 'PDF / özet bağlantısı: ' . $summaryUrl;
+    $updated = preg_replace('/^PDF\s*\/\s*özet bağlantısı:\s*\S+\s*$/miu', $replacement, $message);
+    if (is_string($updated) && $updated !== $message) {
+        return trim($updated);
+    }
+
+    return trim($message . "\n" . $replacement);
+}
+
+function manual_renewal_mail_body(array $row, string $message, string $summaryLink = ''): string
 {
     $days = days_until($row['renewal_date'] ?? null);
     $daysLabel = $days === null ? '-' : ($days < 0 ? abs($days) . ' gün geçti' : $days . ' gün');
     $total = money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
-    $summaryLink = renewal_summary_url((int) $row['id'], 60);
+    $summaryLink = $summaryLink !== '' ? $summaryLink : renewal_summary_url((int) $row['id'], 60);
 
     return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;font-family:Arial,sans-serif;color:#17201c;">'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px;"><tr><td align="center">'
@@ -3477,6 +3533,19 @@ function handle_public_renewal_summary(int $renewalId): void
         return;
     }
 
+    $trackingToken = trim((string) ($_GET['track'] ?? ''));
+    if ($trackingToken !== '') {
+        $read = $repo->markNotificationDeliveryRead(
+            $renewalId,
+            $trackingToken,
+            (string) ($_SERVER['REMOTE_ADDR'] ?? ''),
+            (string) ($_SERVER['HTTP_USER_AGENT'] ?? '')
+        );
+        if ($read && (string) ($read['already_read'] ?? '0') !== '1') {
+            notify_renewal_notification_read($read);
+        }
+    }
+
     $items = $repo->renewalItems($renewalId);
     $totalAmount = (float) (($renewal['item_total'] ?? 0) ?: ($renewal['amount'] ?? 0));
     $currency = (string) ($renewal['currency'] ?? 'TRY');
@@ -3670,6 +3739,16 @@ function renewal_summary_url(int $renewalId, int $ttlDays = 60, string $recipien
     $query = parse_url($signedPaymentUrl, PHP_URL_QUERY);
 
     return url('/renewals/' . $renewalId . '/summary') . ($query ? '?' . $query : '');
+}
+
+function renewal_tracked_summary_url(int $renewalId, string $trackingToken, int $ttlDays = 60, string $recipientEmail = ''): string
+{
+    $url = renewal_summary_url($renewalId, $ttlDays, $recipientEmail);
+    if (!preg_match('/^[a-f0-9]{64}$/i', $trackingToken)) {
+        return $url;
+    }
+
+    return $url . (str_contains($url, '?') ? '&' : '?') . 'track=' . rawurlencode($trackingToken);
 }
 
 function customer_offer_view_count(array $offer): int
@@ -14200,7 +14279,7 @@ function render_logs(): void
                                     <td>
                                         <?php if (!empty($row['read_at'])): ?>
                                             <span class="badge active">Okundu</span>
-                                            <br><span class="muted compact"><?= h(date('d.m.Y H:i', strtotime((string) $row['read_at']))) ?></span>
+                                            <br><span class="muted compact"><?= h(max(1, (int) ($row['read_count'] ?? 1)) . ' kez · ' . date('d.m.Y H:i', strtotime((string) $row['read_at']))) ?></span>
                                         <?php elseif (!empty($row['tracking_status'])): ?>
                                             <span class="badge cancelled">Bekliyor</span>
                                         <?php else: ?>
@@ -14547,7 +14626,7 @@ function recent_mail_logs(int $limit = 100): array
                         LIMIT 1
                     ) AS tracking_status,
                     (
-                        SELECT rnd.read_at
+                        SELECT COALESCE(rnd.last_read_at, rnd.read_at)
                         FROM renewal_notification_deliveries rnd
                         WHERE rnd.mail_log_id = ml.id
                            OR (
@@ -14558,7 +14637,20 @@ function recent_mail_logs(int $limit = 100): array
                            )
                         ORDER BY (rnd.mail_log_id = ml.id) DESC, rnd.created_at DESC
                         LIMIT 1
-                    ) AS read_at
+                    ) AS read_at,
+                    (
+                        SELECT GREATEST(rnd.read_count, CASE WHEN rnd.read_at IS NOT NULL THEN 1 ELSE 0 END)
+                        FROM renewal_notification_deliveries rnd
+                        WHERE rnd.mail_log_id = ml.id
+                           OR (
+                                rnd.mail_log_id IS NULL
+                                AND rnd.renewal_id = ml.renewal_id
+                                AND LOWER(rnd.recipient_email) = LOWER(ml.recipient_email)
+                                AND ABS(TIMESTAMPDIFF(MINUTE, rnd.created_at, ml.sent_at)) <= 15
+                           )
+                        ORDER BY (rnd.mail_log_id = ml.id) DESC, rnd.created_at DESC
+                        LIMIT 1
+                    ) AS read_count
              FROM mail_logs ml
              ORDER BY ml.sent_at DESC
              LIMIT :limit_count'
@@ -16819,7 +16911,7 @@ function render_renewal_communication_dialogs(array $row): string
             <div class="section-head dialog-head">
                 <div>
                     <h2>Müşteriye gönder</h2>
-                    <span><?= h($row['company_name'] ?? '-') ?> için mail veya WhatsApp ile PDF/özet bağlantısı gönderin.</span>
+                    <span><?= h($row['company_name'] ?? '-') ?> için mail veya WhatsApp ile kişi bazlı takip edilen PDF/özet bağlantısı gönderin.</span>
                 </div>
                 <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
             </div>
@@ -16873,7 +16965,7 @@ function render_renewal_communication_dialogs(array $row): string
                     <div class="section-head compact">
                         <div>
                             <h3>WhatsApp ile gönder</h3>
-                            <span class="muted compact">Yetkili seçildiğinde PDF/özet bağlantılı hazır mesaj WhatsApp'ta açılır.</span>
+                            <span class="muted compact">Her yetkili için ayrı takip linki üretilir; kaç kez ve ne zaman açıldığı kartta görünür.</span>
                         </div>
                     </div>
                     <div class="whatsapp-recipient-list">
@@ -16886,14 +16978,18 @@ function render_renewal_communication_dialogs(array $row): string
                             continue;
                         }
                         $hasWhatsappRecipient = true;
-                        $message = renewal_whatsapp_message($row, $contact);
+                        $contactKey = renewal_contact_tracking_key($contact);
+                        $whatsappLink = url('/renewals/' . $id . '/whatsapp') . '?' . http_build_query([
+                            'contact' => $contactKey,
+                            'return_to' => $returnTo,
+                        ]);
                         ?>
                         <div class="whatsapp-contact-card">
                             <div>
                                 <strong><?= h((string) (($contact['full_name'] ?? '') ?: $phone)) ?></strong>
                                 <span><?= h($phone) ?><?= !empty($contact['email']) ? ' - ' . h((string) $contact['email']) : '' ?></span>
                             </div>
-                            <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h(whatsapp_web_url($waNumber, $message)) ?>">WhatsApp aç</a>
+                            <a class="button small whatsapp" target="takip_whatsapp_web" href="<?= h($whatsappLink) ?>">WhatsApp aç</a>
                         </div>
                     <?php endforeach; ?>
                     <?php if (!$hasWhatsappRecipient): ?>
@@ -17812,14 +17908,54 @@ function renewal_customer_contacts(array $row): array
     return array_values($unique);
 }
 
-function renewal_default_direct_message(array $row, string $summaryEmail = ''): string
+function renewal_contact_tracking_key(array $contact): string
+{
+    $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+    $phone = preg_replace('/\D+/', '', (string) ($contact['phone'] ?? '')) ?: '';
+    $name = trim(mb_strtolower((string) ($contact['full_name'] ?? $contact['contact_name'] ?? '')));
+
+    return hash('sha256', $email . '|' . $phone . '|' . $name);
+}
+
+function renewal_contact_by_tracking_key(array $row, string $key): ?array
+{
+    if ($key === '') {
+        return null;
+    }
+
+    foreach (renewal_customer_contacts($row) as $contact) {
+        if (hash_equals(renewal_contact_tracking_key($contact), $key)) {
+            return $contact;
+        }
+    }
+
+    return null;
+}
+
+function renewal_tracking_recipient_from_contact(array $contact, string $fallbackName = 'Cari yetkilisi'): array
+{
+    $name = trim((string) ($contact['full_name'] ?? $contact['contact_name'] ?? ''));
+    $email = trim(mb_strtolower((string) ($contact['email'] ?? '')));
+    $phone = trim((string) ($contact['phone'] ?? ''));
+
+    return [
+        'name' => $name !== '' ? $name : $fallbackName,
+        'email' => filter_var($email, FILTER_VALIDATE_EMAIL) ? $email : '',
+        'phone' => $phone,
+    ];
+}
+
+function renewal_default_direct_message(array $row, string $summaryEmail = '', string $summaryUrl = ''): string
 {
     $days = days_until($row['renewal_date'] ?? null);
     $daysLabel = $days === null ? '-' : ($days < 0 ? abs($days) . ' gün geçti' : $days . ' gün kaldı');
     $title = (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'yenileme kaydı'));
     $date = !empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-';
     $total = money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
-    $summaryLink = !empty($row['id']) ? "\nPDF / özet bağlantısı: " . renewal_summary_url((int) $row['id'], 60, $summaryEmail) : '';
+    if ($summaryUrl === '' && !empty($row['id'])) {
+        $summaryUrl = renewal_summary_url((int) $row['id'], 60, $summaryEmail);
+    }
+    $summaryLink = $summaryUrl !== '' ? "\nPDF / özet bağlantısı: " . $summaryUrl : '';
 
     return "Merhaba,\n\n{$title} için yenileme süreci yaklaşmaktadır.\nYenileme tarihi: {$date}\nKalan süre: {$daysLabel}\nToplam: {$total} KDV dahil{$summaryLink}\n\nBilginize sunarız.";
 }
@@ -17849,10 +17985,10 @@ function whatsapp_web_url(string $number, string $message): string
     return 'https://web.whatsapp.com/send?phone=' . rawurlencode($number) . '&text=' . rawurlencode($message);
 }
 
-function renewal_whatsapp_message(array $row, array $contact): string
+function renewal_whatsapp_message(array $row, array $contact, string $summaryUrl = ''): string
 {
     $email = (string) ($contact['email'] ?? '');
-    $message = renewal_default_direct_message($row, $email);
+    $message = renewal_default_direct_message($row, $email, $summaryUrl);
     $paymentLink = PaymentLink::urlForRenewal((int) $row['id'], 60, $email);
 
     return $message . "\n\nÖdeme / tercih linki:\n" . $paymentLink;
@@ -18109,6 +18245,7 @@ function renewal_notification_read_summary(array $row): array
     $recipients = max(0, (int) ($row['notification_recipient_count'] ?? 0));
     $total = max($sent, $recipients);
     $read = min(max(0, (int) ($row['notification_read_count'] ?? 0)), $total > 0 ? $total : PHP_INT_MAX);
+    $views = max(0, (int) ($row['notification_view_count'] ?? 0));
 
     if ($total < 1 || $sent < 1) {
         return [
@@ -18119,7 +18256,9 @@ function renewal_notification_read_summary(array $row): array
     }
 
     return [
-        'label' => sprintf('%d/%d yetkili okudu', $read, $total),
+        'label' => $views > 0
+            ? sprintf('%d/%d yetkili okudu · %d görüntüleme', $read, $total, $views)
+            : sprintf('%d/%d yetkili okudu', $read, $total),
         'readers' => (string) ($row['notification_readers'] ?? ''),
         'complete' => $read >= $total,
     ];
@@ -18134,11 +18273,12 @@ function render_notification_reader_chips(string $readers): string
 
     $html = '<div class="reader-chip-list">';
     foreach ($items as $item) {
-        [$name, $date] = array_pad(explode(' - ', $item, 2), 2, '');
+        [$name, $count, $date] = array_pad(explode(' - ', $item, 3), 3, '');
         $html .= '<div class="reader-chip">'
             . '<strong>' . h(trim($name) ?: $item) . '</strong>';
-        if (trim($date) !== '') {
-            $html .= '<small>' . h(trim($date)) . '</small>';
+        $meta = trim(implode(' · ', array_filter([trim($count), trim($date)])));
+        if ($meta !== '') {
+            $html .= '<small>' . h($meta) . '</small>';
         }
         $html .= '</div>';
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.67] - 2026-05-13
+
+- Takipteki ürün ve hizmetleri müşteriye gönderirken her alıcı için ayrı takipli PDF/özet bağlantısı üretilir hale getirildi.
+- PDF/özet bağlantısı açıldığında kişi bazında ilk okuma, son okuma ve toplam görüntüleme sayısı kaydedilmeye başlandı.
+- Yenileme kartları ve mail logları okundu bilgisinde kaç kez ve son ne zaman açıldığını gösterecek şekilde güncellendi.
+
 ## [2.0.66] - 2026-05-12
 
 - Başarılı iyzico tahsilatlarında iç push/mail bildirim durumu ödeme kaydı üzerinde takip edilir hale getirildi.

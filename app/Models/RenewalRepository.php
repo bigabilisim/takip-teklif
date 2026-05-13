@@ -4402,12 +4402,16 @@ final class RenewalRepository
                 mail_log_id INT UNSIGNED NULL,
                 recipient_email VARCHAR(190) NOT NULL,
                 recipient_name VARCHAR(190) NULL,
+                recipient_phone VARCHAR(60) NULL,
                 token_hash CHAR(64) NOT NULL,
                 notification_date DATE NOT NULL,
                 status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
                 error_message TEXT NULL,
                 sent_at DATETIME NULL,
+                first_read_at DATETIME NULL,
                 read_at DATETIME NULL,
+                last_read_at DATETIME NULL,
+                read_count INT UNSIGNED NOT NULL DEFAULT 0,
                 read_ip VARCHAR(45) NULL,
                 read_user_agent VARCHAR(255) NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -4422,9 +4426,13 @@ final class RenewalRepository
         );
         $this->ensureColumn('renewal_notification_deliveries', 'mail_log_id', 'INT UNSIGNED NULL AFTER renewal_id');
         $this->ensureColumn('renewal_notification_deliveries', 'recipient_name', 'VARCHAR(190) NULL AFTER recipient_email');
+        $this->ensureColumn('renewal_notification_deliveries', 'recipient_phone', 'VARCHAR(60) NULL AFTER recipient_name');
         $this->ensureColumn('renewal_notification_deliveries', 'notification_date', 'DATE NULL AFTER token_hash');
         $this->ensureColumn('renewal_notification_deliveries', 'sent_at', 'DATETIME NULL AFTER error_message');
+        $this->ensureColumn('renewal_notification_deliveries', 'first_read_at', 'DATETIME NULL AFTER sent_at');
         $this->ensureColumn('renewal_notification_deliveries', 'read_at', 'DATETIME NULL AFTER sent_at');
+        $this->ensureColumn('renewal_notification_deliveries', 'last_read_at', 'DATETIME NULL AFTER read_at');
+        $this->ensureColumn('renewal_notification_deliveries', 'read_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER last_read_at');
         $this->ensureColumn('renewal_notification_deliveries', 'read_ip', 'VARCHAR(45) NULL AFTER read_at');
         $this->ensureColumn('renewal_notification_deliveries', 'read_user_agent', 'VARCHAR(255) NULL AFTER read_ip');
         $this->ensureColumn('renewal_notification_deliveries', 'created_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER read_user_agent');
@@ -4432,6 +4440,17 @@ final class RenewalRepository
         $this->ensureIndex('renewal_notification_deliveries', 'idx_renewal_notification_delivery_mail_log', 'INDEX idx_renewal_notification_delivery_mail_log (mail_log_id)');
         $this->ensureIndex('renewal_notification_deliveries', 'idx_renewal_notification_delivery_read', 'INDEX idx_renewal_notification_delivery_read (read_at)');
         $this->ensureIndex('renewal_notification_deliveries', 'idx_renewal_notification_delivery_recipient', 'INDEX idx_renewal_notification_delivery_recipient (recipient_email)');
+        try {
+            $this->db->exec(
+                'UPDATE renewal_notification_deliveries
+                 SET first_read_at = COALESCE(first_read_at, read_at),
+                     last_read_at = COALESCE(last_read_at, read_at),
+                     read_count = CASE WHEN read_at IS NOT NULL AND read_count = 0 THEN 1 ELSE read_count END
+                 WHERE read_at IS NOT NULL'
+            );
+        } catch (\Throwable) {
+            // Alanlar eski kurulumlarda yeni olusturulurken bir sonraki calismada tamamlanir.
+        }
         try {
             $this->db->exec(
                 'UPDATE renewal_notification_deliveries rnd
@@ -5503,16 +5522,24 @@ final class RenewalRepository
     public function createNotificationDelivery(int $renewalId, array $recipient): array
     {
         $token = bin2hex(random_bytes(32));
+        $email = trim(mb_strtolower((string) ($recipient['email'] ?? '')));
+        $phone = trim((string) ($recipient['phone'] ?? ''));
+        if ($email === '') {
+            $digits = preg_replace('/\D+/', '', $phone) ?: '';
+            $email = $digits !== '' ? 'whatsapp:' . $digits : 'manual:' . hash('sha1', (string) json_encode($recipient, JSON_UNESCAPED_UNICODE));
+        }
+
         $stmt = $this->db->prepare(
             'INSERT INTO renewal_notification_deliveries
-                (renewal_id, recipient_email, recipient_name, token_hash, notification_date, status, created_at, updated_at)
+                (renewal_id, recipient_email, recipient_name, recipient_phone, token_hash, notification_date, status, created_at, updated_at)
              VALUES
-                (:renewal_id, :recipient_email, :recipient_name, :token_hash, CURDATE(), :status, NOW(), NOW())'
+                (:renewal_id, :recipient_email, :recipient_name, :recipient_phone, :token_hash, CURDATE(), :status, NOW(), NOW())'
         );
         $stmt->execute([
             'renewal_id' => $renewalId,
-            'recipient_email' => trim((string) ($recipient['email'] ?? '')),
+            'recipient_email' => $email,
             'recipient_name' => $this->nullableString($recipient['name'] ?? ''),
+            'recipient_phone' => $this->nullableString($phone),
             'token_hash' => hash('sha256', $token),
             'status' => 'pending',
         ]);
@@ -5552,9 +5579,8 @@ final class RenewalRepository
         }
 
         $hash = hash('sha256', strtolower($token));
-        $alreadyRead = false;
         $existing = $this->db->prepare(
-            'SELECT read_at
+            'SELECT read_at, read_count
              FROM renewal_notification_deliveries
              WHERE renewal_id = :renewal_id
                AND token_hash = :token_hash
@@ -5564,15 +5590,18 @@ final class RenewalRepository
             'renewal_id' => $renewalId,
             'token_hash' => $hash,
         ]);
-        $existingReadAt = $existing->fetchColumn();
-        if ($existingReadAt === false) {
+        $existingRow = $existing->fetch();
+        if (!$existingRow) {
             return null;
         }
-        $alreadyRead = trim((string) $existingReadAt) !== '';
+        $alreadyRead = trim((string) ($existingRow['read_at'] ?? '')) !== '' || (int) ($existingRow['read_count'] ?? 0) > 0;
 
         $stmt = $this->db->prepare(
             'UPDATE renewal_notification_deliveries
-             SET read_at = COALESCE(read_at, NOW()),
+             SET first_read_at = COALESCE(first_read_at, read_at, NOW()),
+                 read_at = COALESCE(read_at, NOW()),
+                 last_read_at = NOW(),
+                 read_count = read_count + 1,
                  read_ip = :read_ip,
                  read_user_agent = :read_user_agent,
                  updated_at = NOW()
@@ -6811,7 +6840,7 @@ final class RenewalRepository
                     FROM renewal_notification_deliveries rnd_read
                     WHERE rnd_read.renewal_id = r.id
                       AND rnd_read.status <> 'failed'
-                      AND rnd_read.read_at IS NOT NULL
+                      AND (rnd_read.read_at IS NOT NULL OR rnd_read.read_count > 0)
                       AND rnd_read.notification_date = (
                           SELECT MAX(rnd_latest.notification_date)
                           FROM renewal_notification_deliveries rnd_latest
@@ -6820,15 +6849,33 @@ final class RenewalRepository
                       )
                 ) AS notification_read_count,
                 (
+                    SELECT COALESCE(SUM(rnd_view.read_count), 0)
+                    FROM renewal_notification_deliveries rnd_view
+                    WHERE rnd_view.renewal_id = r.id
+                      AND rnd_view.status <> 'failed'
+                      AND rnd_view.notification_date = (
+                          SELECT MAX(rnd_latest.notification_date)
+                          FROM renewal_notification_deliveries rnd_latest
+                          WHERE rnd_latest.renewal_id = r.id
+                            AND rnd_latest.status <> 'failed'
+                      )
+                ) AS notification_view_count,
+                (
                     SELECT GROUP_CONCAT(
-                        CONCAT(COALESCE(NULLIF(rnd_reader.recipient_name, ''), rnd_reader.recipient_email), ' - ', DATE_FORMAT(rnd_reader.read_at, '%d.%m.%Y %H:%i'))
-                        ORDER BY rnd_reader.read_at DESC
+                        CONCAT(
+                            COALESCE(NULLIF(rnd_reader.recipient_name, ''), NULLIF(rnd_reader.recipient_phone, ''), rnd_reader.recipient_email),
+                            ' - ',
+                            GREATEST(rnd_reader.read_count, CASE WHEN rnd_reader.read_at IS NOT NULL THEN 1 ELSE 0 END),
+                            ' kez - ',
+                            DATE_FORMAT(COALESCE(rnd_reader.last_read_at, rnd_reader.read_at), '%d.%m.%Y %H:%i')
+                        )
+                        ORDER BY COALESCE(rnd_reader.last_read_at, rnd_reader.read_at) DESC
                         SEPARATOR ', '
                     )
                     FROM renewal_notification_deliveries rnd_reader
                     WHERE rnd_reader.renewal_id = r.id
                       AND rnd_reader.status <> 'failed'
-                      AND rnd_reader.read_at IS NOT NULL
+                      AND (rnd_reader.read_at IS NOT NULL OR rnd_reader.read_count > 0)
                       AND rnd_reader.notification_date = (
                           SELECT MAX(rnd_latest.notification_date)
                           FROM renewal_notification_deliveries rnd_latest
