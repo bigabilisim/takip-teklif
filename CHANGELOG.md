@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.68] - 2026-05-13
+
+- Teklif ve yenileme maillerinden fiyat, ara toplam, KDV ve KDV dahil toplam alanları kaldırıldı.
+- Müşteri teklif/yenileme mailinde fiyat detaylarının yalnızca güvenli bağlantıdaki teklif şablonunda görüntülenmesi sağlandı.
+- Yenileme mail şablonuna alıcıya özel takipli “Teklif şablonunu aç” butonu eklendi.
+
 ## [2.0.67] - 2026-05-13
 
 - Takipteki ürün ve hizmetleri müşteriye gönderirken her alıcı için ayrı takipli PDF/özet bağlantısı üretilir hale getirildi.

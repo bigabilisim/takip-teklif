@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Core\Mailer;
 use App\Core\MailTemplate;
+use App\Core\PaymentLink;
 use App\Core\DatabaseBackup;
 use App\Core\InternalNotifier;
 use App\Core\WebPush;
@@ -82,7 +83,10 @@ foreach ($rows as $row) {
 
     foreach ($recipients as $recipient) {
         $delivery = $repo->createNotificationDelivery((int) $row['id'], $recipient);
-        $recipientForMail = array_merge($recipient, ['read_ack_url' => $delivery['read_url']]);
+        $recipientForMail = array_merge($recipient, [
+            'read_ack_url' => $delivery['read_url'],
+            'summary_url' => renewal_summary_url_for_reminder((int) $row['id'], (string) ($delivery['token'] ?? ''), (string) ($recipient['email'] ?? '')),
+        ]);
         $mail = MailTemplate::renderRenewal($settings, $row, $recipientForMail, $statusLine, $days);
         $body = (string) $mail['body'];
         $ok = Mailer::send($recipient['email'], $subject, $body, (bool) $mail['is_html'], $mail['inline_attachments'] ?? []);
@@ -578,6 +582,18 @@ function manual_payment_reminder_due_date(array $row): string
     }
 
     return date('d.m.Y', strtotime($date));
+}
+
+function renewal_summary_url_for_reminder(int $renewalId, string $trackingToken = '', string $recipientEmail = ''): string
+{
+    $signedPaymentUrl = PaymentLink::urlForRenewal($renewalId, 60, $recipientEmail);
+    $query = parse_url($signedPaymentUrl, PHP_URL_QUERY);
+    $url = url('/renewals/' . $renewalId . '/summary') . ($query ? '?' . $query : '');
+    if (preg_match('/^[a-f0-9]{64}$/i', $trackingToken) !== 1) {
+        return $url;
+    }
+
+    return $url . (str_contains($url, '?') ? '&' : '?') . 'track=' . rawurlencode($trackingToken);
 }
 
 function customer_info_reminder_log_mail(string $email, string $subject, string $body, string $status, ?string $error = null): void

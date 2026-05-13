@@ -2103,11 +2103,28 @@ function renewal_personalized_summary_message(string $message, string $summaryUr
     return trim($message . "\n" . $replacement);
 }
 
+function mail_message_without_prices(string $message): string
+{
+    $lines = preg_split('/\R/', trim($message)) ?: [];
+    $filtered = [];
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+        if ($trimmed !== '' && preg_match('/(?:₺|€|\\$|\\b(?:TRY|TL|USD|EUR)\\b|Toplam\\s*:|Ara\\s+toplam|Birim\\s+fiyat|KDV\\s+dahil\\s+toplam|Toplam\\s+tutar)/iu', $trimmed) === 1) {
+            continue;
+        }
+
+        $filtered[] = $line;
+    }
+
+    $clean = trim(implode("\n", $filtered));
+
+    return $clean !== '' ? $clean : 'Detaylı teklif ve fiyat bilgilerini güvenli bağlantıdan inceleyebilirsiniz.';
+}
+
 function manual_renewal_mail_body(array $row, string $message, string $summaryLink = ''): string
 {
     $days = days_until($row['renewal_date'] ?? null);
     $daysLabel = $days === null ? '-' : ($days < 0 ? abs($days) . ' gün geçti' : $days . ' gün');
-    $total = money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
     $summaryLink = $summaryLink !== '' ? $summaryLink : renewal_summary_url((int) $row['id'], 60);
 
     return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;background:#f4f6f5;font-family:Arial,sans-serif;color:#17201c;">'
@@ -2117,13 +2134,13 @@ function manual_renewal_mail_body(array $row, string $message, string $summaryLi
         . '<tr><td style="padding:24px;">'
         . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Yenileme bilgilendirmesi</p>'
         . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">' . h((string) ($row['company_name'] ?? '-')) . '</h1>'
-        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h($message), false) . '</div>'
+        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h(mail_message_without_prices($message)), false) . '</div>'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
         . manual_mail_row('Kayıt', (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')))
         . manual_mail_row('Yenileme tarihi', !empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-')
         . manual_mail_row('Kalan süre', $daysLabel)
-        . manual_mail_row('Toplam', $total . ' KDV dahil')
         . manual_mail_row('Ödeme şekli', renewal_payment_label($row))
+        . manual_mail_row('Teklif detayı', 'Güvenli bağlantıdan görüntülenir')
         . '</table>'
         . '<p style="margin:20px 0 0;"><a href="' . h($summaryLink) . '" style="display:inline-block;background:#eef6f3;color:#0f625b;text-decoration:none;border:1px solid #cfe1db;border-radius:8px;padding:13px 18px;font-weight:700;">PDF / özet sayfasını aç</a></p>'
         . '</td></tr></table></td></tr></table></body></html>';
@@ -2602,7 +2619,10 @@ function send_manual_renewal_notification(RenewalRepository $repo, int $renewalI
 
     foreach ($recipients as $recipient) {
         $delivery = $repo->createNotificationDelivery((int) $row['id'], $recipient);
-        $recipientForMail = array_merge($recipient, ['read_ack_url' => $delivery['read_url']]);
+        $recipientForMail = array_merge($recipient, [
+            'read_ack_url' => $delivery['read_url'],
+            'summary_url' => renewal_tracked_summary_url((int) $row['id'], (string) $delivery['token'], 60, (string) ($recipient['email'] ?? '')),
+        ]);
         $mail = MailTemplate::renderRenewal($settings, $row, $recipientForMail, $statusLine, $days);
         $body = (string) $mail['body'];
         $ok = Mailer::send(
@@ -3001,7 +3021,6 @@ function supplier_quote_closed_body(array $request, int $submittedCount): string
 
 function customer_offer_mail_body(array $row, array $offer, string $message): string
 {
-    $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
     $rows = [];
     $offerNumber = trim((string) ($offer['offer_number'] ?? ''));
     if ($offerNumber !== '') {
@@ -3010,9 +3029,7 @@ function customer_offer_mail_body(array $row, array $offer, string $message): st
     $rows += [
         'Müşteri' => (string) ($row['company_name'] ?? '-'),
         'Kayıt' => (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? '-')),
-        'Ara toplam' => money_format_local($offer['subtotal'] ?? null, $currency),
-        'KDV' => money_format_local($offer['vat_total'] ?? null, $currency),
-        'KDV dahil toplam' => money_format_local($offer['total'] ?? null, $currency),
+        'Teklif detayı' => 'Güvenli bağlantıdan görüntülenir',
     ];
 
     $htmlRows = '';
@@ -3029,24 +3046,17 @@ function customer_offer_mail_body(array $row, array $offer, string $message): st
             continue;
         }
         $quantity = (float) ($line['quantity'] ?? 1);
-        $unitPrice = (float) ($line['unit_price'] ?? 0);
-        $subtotal = (float) ($line['line_subtotal'] ?? ($quantity * $unitPrice));
-        $total = (float) ($line['line_total'] ?? $subtotal);
         $lineRows .= '<tr>'
             . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h((string) ($line['item_title'] ?? '-')) . '</td>'
             . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;text-align:center;">' . h(number_format($quantity, 2, ',', '.')) . '</td>'
-            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($unitPrice, $currency)) . '</td>'
-            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($subtotal, $currency)) . '</td>'
-            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#147c72;font-weight:700;text-align:right;">' . h(money_format_local($total, $currency)) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;text-align:right;">Linkte görüntülenir</td>'
             . '</tr>';
     }
     $lineTable = $lineRows === '' ? '' : '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;border-collapse:collapse;background:#ffffff;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">'
         . '<tr>'
         . '<th align="left" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Ürün / hizmet</th>'
         . '<th align="center" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Adet</th>'
-        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Birim fiyat</th>'
-        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Toplam</th>'
-        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">KDV dahil</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Detay</th>'
         . '</tr>'
         . $lineRows
         . '</table>';
@@ -3058,7 +3068,7 @@ function customer_offer_mail_body(array $row, array $offer, string $message): st
         . '<tr><td style="padding:24px;">'
         . '<p style="margin:0 0 8px;color:#147c72;font-size:12px;font-weight:700;text-transform:uppercase;">Müşteri yenileme teklifi</p>'
         . '<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;">Yenileme teklifinizi inceleyebilirsiniz.</h1>'
-        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h($message), false) . '</div>'
+        . '<div style="margin:0 0 18px;color:#26322e;font-size:15px;line-height:1.6;">' . nl2br(h(mail_message_without_prices($message)), false) . '</div>'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fbfcfb;border:1px solid #d8e0dd;border-radius:8px;overflow:hidden;">' . $htmlRows . '</table>'
         . $lineTable
         . '<p style="margin:20px 0 0;"><a href="' . h((string) ($offer['url'] ?? '')) . '" style="display:inline-block;background:#147c72;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 20px;font-weight:700;">Teklifi incele ve yanıtla</a></p>'
@@ -8704,14 +8714,12 @@ function sales_offer_number(array $offer): string
 
 function sales_offer_whatsapp_message(array $offer, string $url): string
 {
-    $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
     $lines = [
         'Merhaba,',
         '',
         sales_offer_number($offer) . ' numaralı teklifinizi incelemeniz için paylaşıyoruz.',
         'Firma: ' . (string) ($offer['customer_name'] ?? '-'),
         'Teklif: ' . (string) ($offer['title'] ?? '-'),
-        'KDV dahil toplam: ' . money_format_local($offer['total'] ?? 0, $currency),
         '',
         'Teklif / PDF çıktısı: ' . $url,
     ];
@@ -8721,14 +8729,11 @@ function sales_offer_whatsapp_message(array $offer, string $url): string
 
 function sales_offer_mail_body(array $offer, string $url, string $mode, string $customIntro = ''): string
 {
-    $currency = normalize_allowed_currency($offer['currency'] ?? 'TRY');
     $rows = [
         'Teklif no' => sales_offer_number($offer),
         'Firma' => (string) ($offer['customer_name'] ?? '-'),
         'Teklif' => (string) ($offer['title'] ?? '-'),
-        'Ara toplam' => money_format_local($offer['subtotal'] ?? 0, $currency),
-        'KDV' => money_format_local($offer['vat_total'] ?? 0, $currency),
-        'KDV dahil toplam' => money_format_local($offer['total'] ?? 0, $currency),
+        'Teklif detayı' => 'Güvenli bağlantıdan görüntülenir',
     ];
 
     $htmlRows = '';
@@ -8742,15 +8747,10 @@ function sales_offer_mail_body(array $offer, string $url, string $mode, string $
     $lineRows = '';
     foreach ((array) ($offer['items'] ?? []) as $item) {
         $quantity = (float) ($item['quantity'] ?? 1);
-        $unitPrice = (float) ($item['unit_price'] ?? 0);
-        $subtotal = (float) ($item['line_subtotal'] ?? ($quantity * $unitPrice));
-        $total = (float) ($item['line_total'] ?? $subtotal);
         $lineRows .= '<tr>'
             . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;font-weight:700;">' . h((string) ($item['title'] ?? '-')) . '</td>'
             . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;text-align:center;">' . h(number_format($quantity, 2, ',', '.')) . '</td>'
-            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($unitPrice, $currency)) . '</td>'
-            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#17201c;text-align:right;">' . h(money_format_local($subtotal, $currency)) . '</td>'
-            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#147c72;font-weight:700;text-align:right;">' . h(money_format_local($total, $currency)) . '</td>'
+            . '<td style="padding:10px 12px;border-bottom:1px solid #d8e0dd;color:#607069;text-align:right;">Linkte görüntülenir</td>'
             . '</tr>';
     }
 
@@ -8758,9 +8758,7 @@ function sales_offer_mail_body(array $offer, string $url, string $mode, string $
         . '<tr>'
         . '<th align="left" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Ürün / hizmet</th>'
         . '<th align="center" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Adet</th>'
-        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Birim fiyat</th>'
-        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Toplam</th>'
-        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">KDV dahil</th>'
+        . '<th align="right" style="padding:9px 12px;border-bottom:1px solid #d8e0dd;color:#607069;font-size:12px;text-transform:uppercase;">Detay</th>'
         . '</tr>'
         . $lineRows
         . '</table>';
@@ -8772,6 +8770,7 @@ function sales_offer_mail_body(array $offer, string $url, string $mode, string $
             ? 'Teklif çıktınızı PDF olarak kaydedebilmeniz için bağlantıyı paylaşıyoruz.'
             : 'Hazırlanan teklifinizi inceleyebilmeniz için bağlantıyı paylaşıyoruz.';
     }
+    $intro = mail_message_without_prices($intro);
 
     return '<!doctype html><html><head><meta charset="UTF-8"></head><body style="margin:0;padding:24px;background:#f2f6f4;font-family:Arial,sans-serif;color:#17201c;">'
         . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
@@ -14819,15 +14818,27 @@ function template_placeholders(): array
         ],
         [
             'key' => 'total_amount',
-            'label' => 'Toplam tutar',
+            'label' => 'Fiyat gizli bilgisi',
             'token' => '{{total_amount}}',
-            'description' => 'Ürün satırlarının KDV dahil toplam tutarını yazar.',
+            'description' => 'Mailde fiyat göstermez; detayların güvenli bağlantıda olduğunu yazar.',
         ],
         [
             'key' => 'items_table',
             'label' => 'Ürün satırları',
             'token' => '{{items_table}}',
-            'description' => 'Birden fazla ürün varsa ürün, adet ve KDV dahil tutar tablosunu ekler.',
+            'description' => 'Birden fazla ürün varsa fiyat içermeyen ürün ve adet tablosunu ekler.',
+        ],
+        [
+            'key' => 'summary_action',
+            'label' => 'Teklif şablonu butonu',
+            'token' => '{{summary_action}}',
+            'description' => 'Alıcıya özel takipli link ile detaylı teklif/yenileme sayfasını açan butonu ekler.',
+        ],
+        [
+            'key' => 'summary_url',
+            'label' => 'Teklif şablonu linki',
+            'token' => '{{summary_url}}',
+            'description' => 'Alıcıya özel takipli detay bağlantısını yazar.',
         ],
         [
             'key' => 'read_ack_action',
@@ -14939,7 +14950,12 @@ function handle_grapesjs_template(string $method): void
 
                 $settings = array_merge($settingsRepo->all(), $templateValues, ['template.renewal.enabled' => '1']);
                 $sampleRow = template_test_row();
-                $recipient = ['name' => 'Test Alıcı', 'email' => $testEmail, 'read_ack_url' => url('/renewals/1/read?token=' . str_repeat('0', 64))];
+                $recipient = [
+                    'name' => 'Test Alıcı',
+                    'email' => $testEmail,
+                    'read_ack_url' => url('/renewals/1/read?token=' . str_repeat('0', 64)),
+                    'summary_url' => renewal_summary_url(1, 60, $testEmail),
+                ];
                 $mail = MailTemplate::renderRenewal($settings, $sampleRow, $recipient, 'Kalan süre: 15 gün.', 15);
                 $result = Mailer::sendWithResult(
                     $testEmail,
@@ -17951,13 +17967,12 @@ function renewal_default_direct_message(array $row, string $summaryEmail = '', s
     $daysLabel = $days === null ? '-' : ($days < 0 ? abs($days) . ' gün geçti' : $days . ' gün kaldı');
     $title = (string) (($row['item_summary'] ?? '') ?: ($row['title'] ?? 'yenileme kaydı'));
     $date = !empty($row['renewal_date']) ? date('d.m.Y', strtotime((string) $row['renewal_date'])) : '-';
-    $total = money_format_local($row['item_total'] ?? $row['amount'] ?? null, (string) ($row['currency'] ?? 'TRY'));
     if ($summaryUrl === '' && !empty($row['id'])) {
         $summaryUrl = renewal_summary_url((int) $row['id'], 60, $summaryEmail);
     }
     $summaryLink = $summaryUrl !== '' ? "\nPDF / özet bağlantısı: " . $summaryUrl : '';
 
-    return "Merhaba,\n\n{$title} için yenileme süreci yaklaşmaktadır.\nYenileme tarihi: {$date}\nKalan süre: {$daysLabel}\nToplam: {$total} KDV dahil{$summaryLink}\n\nBilginize sunarız.";
+    return "Merhaba,\n\n{$title} için yenileme süreci yaklaşmaktadır.\nYenileme tarihi: {$date}\nKalan süre: {$daysLabel}\nDetaylı teklif ve fiyat bilgilerini güvenli bağlantıdan inceleyebilirsiniz.{$summaryLink}\n\nBilginize sunarız.";
 }
 
 function whatsapp_number_from_phone(string $phone): ?string

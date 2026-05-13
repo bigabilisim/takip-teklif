@@ -94,10 +94,11 @@ final class MailTemplate
                 <tr><td>Marka</td><td>{{brand}}</td></tr>
                 <tr><td>Bir Önceki Fatura Numarası</td><td>{{previous_invoice_number}}</td></tr>
                 <tr><td>Ödeme şekli</td><td>{{payment_method}}</td></tr>
-                <tr><td>KDV dahil toplam fiyat</td><td>{{total_amount}}</td></tr>
               </table>
 
               {{items_table}}
+
+              {{summary_action}}
 
               {{read_ack_action}}
 
@@ -553,8 +554,9 @@ CSS;
         $html = self::normalizeMetricRow($html);
         $html = self::removeDisabledTemplateFields($html);
         $html = self::removePaymentTemplateFields($html);
+        $html = self::removePriceTemplateFields($html);
         $html = self::ensurePaymentMethodRow($html);
-        $html = self::ensureTotalAmountRow($html);
+        $html = self::ensureSummaryActionBlock($html);
         $html = self::ensureReadAckActionBlock($html);
         $html = self::ensureDefinitionInfoBlock($html);
 
@@ -806,7 +808,7 @@ CSS;
             'Kayıt tipi: ' . $recordType,
             'Bir Önceki Fatura Numarası: ' . self::invoiceNumberLabel($row),
             'Ödeme şekli: ' . self::paymentMethodLabel($row),
-            'Toplam: ' . self::totalAmountLabel($row) . ' KDV dahil',
+            self::summaryActionText($recipient),
             self::readAckActionText($recipient),
             'Bilgilendirme:',
             self::definitionInfoLabel($row),
@@ -832,6 +834,8 @@ CSS;
             'payment_method' => self::escape(self::paymentMethodLabel($row)),
             'total_amount' => self::escape(self::totalAmountLabel($row)),
             'items_table' => self::itemsTableHtml($row),
+            'summary_url' => self::escape((string) ($recipient['summary_url'] ?? '')),
+            'summary_action' => self::summaryActionHtml($recipient),
             'payment_choice_url' => '',
             'payment_action' => '',
             'read_ack_url' => self::escape((string) ($recipient['read_ack_url'] ?? '')),
@@ -895,12 +899,12 @@ CSS;
 
     private static function totalAmountLabel(array $row): string
     {
-        $amount = ($row['item_total'] ?? null) ?: ($row['amount'] ?? null);
-        if ($amount === null || $amount === '' || (float) $amount <= 0) {
-            return '-';
-        }
+        return self::priceHiddenLabel();
+    }
 
-        return \money_format_local((float) $amount, (string) ($row['currency'] ?? 'TRY'));
+    private static function priceHiddenLabel(): string
+    {
+        return 'Güvenli bağlantıdan görüntülenir';
     }
 
     private static function itemsTableHtml(array $row): string
@@ -920,24 +924,41 @@ CSS;
             return '';
         }
 
-        $currency = (string) ($row['currency'] ?? 'TRY');
         $html = '<table class="items-table" role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            . '<tr><th>Ürün</th><th>Adet</th><th>Tutar</th></tr>';
+            . '<tr><th>Ürün</th><th>Adet</th><th>Detay</th></tr>';
 
         foreach ($items as $item) {
             $quantity = (float) ($item['quantity'] ?? 1);
-            $unitPrice = ($item['unit_price'] ?? null) === null ? null : (float) $item['unit_price'];
-            $vatRate = (float) ($item['vat_rate'] ?? 0);
-            $net = $unitPrice === null ? null : $quantity * $unitPrice;
-            $lineTotal = $net === null ? null : $net + ($net * $vatRate / 100);
             $html .= '<tr>'
                 . '<td>' . self::escape((string) ($item['title'] ?? '-')) . '<br><span>' . self::escape((string) (($item['brand'] ?? '') ?: '-')) . '</span></td>'
                 . '<td>' . self::escape(number_format($quantity, 2, ',', '.')) . '</td>'
-                . '<td>' . self::escape(\money_format_local($lineTotal, $currency)) . '<br><span>KDV %' . self::escape(number_format($vatRate, 2, ',', '.')) . ' dahil</span></td>'
+                . '<td>Teklif bağlantısında görüntülenir</td>'
                 . '</tr>';
         }
 
         return $html . '</table>';
+    }
+
+    private static function summaryActionHtml(array $recipient): string
+    {
+        $url = trim((string) ($recipient['summary_url'] ?? ''));
+        if ($url === '') {
+            return '';
+        }
+
+        return '<table class="payment-action" role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+            . '<tr><td>'
+            . '<strong>Detaylı teklif ve yenileme bilgilerini görüntüleyin</strong>'
+            . '<p>Fiyat ve kalem detayları güvenli bağlantıda yer alır.</p>'
+            . '<a class="payment-button" href="' . self::escape($url) . '">Teklif şablonunu aç</a>'
+            . '</td></tr></table>';
+    }
+
+    private static function summaryActionText(array $recipient): string
+    {
+        $url = trim((string) ($recipient['summary_url'] ?? ''));
+
+        return $url !== '' ? 'Detaylı teklif / yenileme bağlantısı: ' . $url : '';
     }
 
     private static function paymentActionHtml(array $row, array $recipient): string
@@ -1320,6 +1341,16 @@ CSS;
         return str_replace(['{{payment_action}}', '{{payment_choice_url}}'], '', $html);
     }
 
+    private static function removePriceTemplateFields(string $html): string
+    {
+        $pattern = '(?:\{\{total_amount\}\}|KDV\s+dahil\s+toplam(?:\s+fiyat)?|Ara\s+toplam|Birim\s+fiyat)';
+        foreach (['tr', 'table', 'div', 'p', 'span'] as $tag) {
+            $html = preg_replace('#\s*<' . $tag . '\b[^>]*>(?:(?!</' . $tag . '>).)*' . $pattern . '(?:(?!</' . $tag . '>).)*</' . $tag . '>#isu', '', $html) ?? $html;
+        }
+
+        return str_replace('{{total_amount}}', self::priceHiddenLabel(), $html);
+    }
+
     private static function ensurePaymentMethodRow(string $html): string
     {
         if (str_contains($html, '{{payment_method}}')) {
@@ -1352,48 +1383,29 @@ CSS;
         ) ?? $html;
     }
 
-    private static function ensureTotalAmountRow(string $html): string
+    private static function ensureSummaryActionBlock(string $html): string
     {
-        if (str_contains($html, '{{total_amount}}')) {
+        if (str_contains($html, '{{summary_action}}')) {
             return $html;
         }
 
-        $row = "\n                <tr><td>KDV dahil toplam fiyat</td><td>{{total_amount}}</td></tr>";
-        $htmlWithPaymentRow = preg_replace(
-            '#(<tr\b[^>]*>(?:(?!</tr>).)*\{\{payment_method\}\}(?:(?!</tr>).)*</tr>)#isu',
-            '$1' . $row,
-            $html,
-            1,
-            $count
-        );
+        $block = "\n\n              {{summary_action}}";
+        $inserted = false;
 
-        if ($htmlWithPaymentRow !== null && $count > 0) {
-            return $htmlWithPaymentRow;
-        }
-
-        $htmlWithInvoiceRow = preg_replace(
-            '#(<tr\b[^>]*>\s*<td\b[^>]*>\s*Bir Önceki Fatura Numarası\s*</td>\s*<td\b[^>]*>\s*\{\{previous_invoice_number\}\}\s*</td>\s*</tr>)#iu',
-            '$1' . $row,
-            $html,
-            1,
-            $count
-        );
-
-        if ($htmlWithInvoiceRow !== null && $count > 0) {
-            return $htmlWithInvoiceRow;
-        }
-
-        return preg_replace_callback(
+        $afterInfoTable = preg_replace_callback(
             '#<table\b[^>]*>.*?</table>#is',
-            static function (array $matches) use ($row): string {
-                if (!self::tagHasClass($matches[0], 'info-table')) {
+            static function (array $matches) use ($block, &$inserted): string {
+                if ($inserted || !self::tagHasClass($matches[0], 'info-table')) {
                     return $matches[0];
                 }
 
-                return preg_replace('#</table>\s*$#i', $row . "\n              </table>", $matches[0], 1) ?? $matches[0];
+                $inserted = true;
+                return $matches[0] . $block;
             },
             $html
-        ) ?? $html;
+        );
+
+        return $afterInfoTable ?? $html;
     }
 
     private static function ensurePaymentActionBlock(string $html): string
