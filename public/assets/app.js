@@ -2470,3 +2470,108 @@
 
     document.querySelectorAll('[data-parasut-search]').forEach(initParasutSearch);
 })();
+
+(() => {
+    const parseNumber = (value) => {
+        let normalized = String(value || '')
+            .trim()
+            .replace(/\s+/g, '');
+        if (normalized.includes(',')) {
+            normalized = normalized.replace(/\./g, '').replace(',', '.');
+        }
+        const number = Number.parseFloat(normalized);
+
+        return Number.isFinite(number) ? number : 0;
+    };
+
+    const formatMoney = (amount, currency) => {
+        try {
+            return new Intl.NumberFormat('tr-TR', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            }).format(amount) + ' ' + currency;
+        } catch (error) {
+            return amount.toFixed(2) + ' ' + currency;
+        }
+    };
+
+    const initBudgetItems = (editor) => {
+        const list = editor.querySelector('[data-budget-item-list]');
+        const template = editor.querySelector('[data-budget-item-template]');
+        const addButton = editor.querySelector('[data-add-budget-item]');
+        const form = editor.closest('[data-budget-form]');
+        const currencySelect = form?.querySelector('[data-budget-currency]');
+        const grandTotal = editor.querySelector('[data-budget-grand-total]');
+
+        if (!list) {
+            return;
+        }
+
+        const currency = () => currencySelect?.value || 'TRY';
+
+        const recalculate = () => {
+            let total = 0;
+            list.querySelectorAll('[data-budget-item]').forEach((row) => {
+                const quantity = Math.max(0, parseNumber(row.querySelector('[data-budget-quantity]')?.value || 0));
+                const unitPrice = Math.max(0, parseNumber(row.querySelector('[data-budget-unit-price]')?.value || 0));
+                const vatRate = Math.max(0, parseNumber(row.querySelector('[data-budget-vat]')?.value || 0));
+                const lineTotal = quantity * unitPrice * (1 + vatRate / 100);
+                total += lineTotal;
+                const lineTarget = row.querySelector('[data-budget-line-total]');
+                if (lineTarget) {
+                    lineTarget.textContent = formatMoney(lineTotal, currency());
+                }
+            });
+
+            if (grandTotal) {
+                grandTotal.textContent = formatMoney(total, currency());
+            }
+        };
+
+        const bindRow = (row) => {
+            row.querySelectorAll('input, select, textarea').forEach((field) => {
+                field.addEventListener('input', recalculate);
+                field.addEventListener('change', recalculate);
+            });
+
+            row.querySelector('[data-remove-budget-item]')?.addEventListener('click', () => {
+                if (list.querySelectorAll('[data-budget-item]').length <= 1) {
+                    row.querySelectorAll('input, textarea').forEach((field) => {
+                        field.value = '';
+                    });
+                    recalculate();
+                    return;
+                }
+
+                row.remove();
+                recalculate();
+            });
+        };
+
+        list.querySelectorAll('[data-budget-item]').forEach(bindRow);
+        currencySelect?.addEventListener('change', recalculate);
+        addButton?.addEventListener('click', () => {
+            if (!(template instanceof HTMLTemplateElement)) {
+                return;
+            }
+
+            const index = Number.parseInt(editor.dataset.nextIndex || '0', 10);
+            editor.dataset.nextIndex = String(index + 1);
+            const html = template.innerHTML.replaceAll('__INDEX__', String(index));
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = html.trim();
+            const row = wrapper.firstElementChild;
+            if (!row) {
+                return;
+            }
+
+            list.appendChild(row);
+            bindRow(row);
+            recalculate();
+        });
+
+        recalculate();
+    };
+
+    document.querySelectorAll('[data-budget-items]').forEach(initBudgetItems);
+})();

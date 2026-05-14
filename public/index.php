@@ -14,6 +14,7 @@ use App\Core\ParasutClient;
 use App\Core\PaymentLink;
 use App\Core\TaxCertificateAnalyzer;
 use App\Core\WebPush;
+use App\Models\BudgetRepository;
 use App\Models\CustomerInfoRequestRepository;
 use App\Models\NotesRepository;
 use App\Models\PaymentRequestRepository;
@@ -175,6 +176,21 @@ try {
     } elseif ($path === '/reports/sales') {
         require_permission('reports.view');
         render_sales_report($repo);
+    } elseif ($path === '/budgets') {
+        require_permission('budgets.view');
+        handle_budgets_page($repo);
+    } elseif ($path === '/budgets/create') {
+        require_permission('budgets.manage');
+        handle_budget_form($repo, $method);
+    } elseif (preg_match('#^/budgets/(\d+)/edit$#', $path, $matches)) {
+        require_permission('budgets.manage');
+        handle_budget_form($repo, $method, (int) $matches[1]);
+    } elseif (preg_match('#^/budgets/(\d+)/preview$#', $path, $matches) && $method === 'GET') {
+        require_permission('budgets.view');
+        render_budget_preview((int) $matches[1]);
+    } elseif (preg_match('#^/budgets/(\d+)/delete$#', $path, $matches) && $method === 'POST') {
+        require_permission('budgets.delete');
+        handle_budget_delete((int) $matches[1]);
     } elseif ($path === '/notes') {
         require_permission($method === 'POST' ? 'notes.manage' : 'notes.view');
         handle_notes_page($method);
@@ -7655,6 +7671,445 @@ function render_sales_report(RenewalRepository $repo): void
         </section>
         <?php
     });
+}
+
+function handle_budgets_page(RenewalRepository $repo): void
+{
+    $budgetRepo = new BudgetRepository();
+    $years = $budgetRepo->years();
+    $year = (int) ($_GET['year'] ?? ((int) date('Y') + 1));
+    $query = trim((string) ($_GET['q'] ?? ''));
+    $plans = $budgetRepo->list($year, $query);
+    $summary = $budgetRepo->summary($year);
+    $canManage = Auth::can('budgets.manage');
+    $canDelete = Auth::can('budgets.delete');
+
+    render_layout('Bütçeleme', static function () use ($years, $year, $query, $plans, $summary, $canManage, $canDelete): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Yıl sonu planlama</p>
+                <h1>Bütçeleme</h1>
+            </div>
+            <div class="page-actions">
+                <?php if ($canManage): ?>
+                    <a href="<?= h(url('/budgets/create')) ?>" class="button primary">Yeni bütçe planı</a>
+                <?php endif; ?>
+                <a href="<?= h(url('/')) ?>" class="button secondary">Dashboard'a dön</a>
+            </div>
+        </div>
+
+        <section class="budget-hero">
+            <div>
+                <h2>Firmaların gelecek yıl alacağı ürünleri tek bütçede toplayın.</h2>
+                <p>Televizyon, firewall, kamera, bakım, lisans veya proje kalemlerini firma bazlı planlayın; adet, KDV, onay notu ve planlanan ay ile yıl sonu bütçe çıktısı hazırlayın.</p>
+            </div>
+            <form method="get" class="budget-filter">
+                <label>
+                    Yıl
+                    <select name="year">
+                        <?php foreach ($years as $optionYear): ?>
+                            <?= option((string) $optionYear, (string) $optionYear, (string) $year) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    Firma / bütçe no
+                    <input name="q" value="<?= h($query) ?>" placeholder="Firma, başlık veya BT no">
+                </label>
+                <button class="button primary" type="submit">Filtrele</button>
+            </form>
+        </section>
+
+        <section class="budget-summary">
+            <article>
+                <span>Plan sayısı</span>
+                <strong><?= h((string) count($plans)) ?></strong>
+                <small><?= h((string) $year) ?> yılı</small>
+            </article>
+            <?php foreach ($summary as $row): ?>
+                <article>
+                    <span><?= h((string) $row['currency']) ?> bütçe</span>
+                    <strong><?= h(money_format_local($row['total'] ?? 0, (string) $row['currency'])) ?></strong>
+                    <small><?= h((string) ((int) $row['plan_count'])) ?> firma planı</small>
+                </article>
+            <?php endforeach; ?>
+        </section>
+
+        <section class="budget-list">
+            <?php if ($plans === []): ?>
+                <div class="empty">Bu filtreyle bütçe planı bulunmadı.</div>
+            <?php endif; ?>
+            <?php foreach ($plans as $plan): ?>
+                <?php
+                $planId = (int) $plan['id'];
+                $currency = (string) ($plan['currency'] ?? 'TRY');
+                ?>
+                <details class="budget-card">
+                    <summary>
+                        <span class="budget-card-main">
+                            <small><?= h((string) ($plan['budget_number'] ?? 'BT')) ?></small>
+                            <strong><?= h((string) ($plan['customer_name'] ?? '-')) ?></strong>
+                            <em><?= h((string) ($plan['title'] ?? '-')) ?></em>
+                        </span>
+                        <span class="budget-card-meta">
+                            <?= budget_status_badge((string) ($plan['status'] ?? 'draft')) ?>
+                            <b><?= h(money_format_local($plan['total'] ?? 0, $currency)) ?></b>
+                            <small><?= h((string) ((int) ($plan['item_count'] ?? 0))) ?> kalem · <?= h(budget_month_range($plan)) ?></small>
+                        </span>
+                        <span class="customer-detail-toggle">
+                            <span class="closed">Detay</span>
+                            <span class="open">Gizle</span>
+                        </span>
+                    </summary>
+                    <div class="budget-card-body">
+                        <div class="budget-card-grid">
+                            <span><small>Yıl</small><strong><?= h((string) $plan['budget_year']) ?></strong></span>
+                            <span><small>Ara toplam</small><strong><?= h(money_format_local($plan['subtotal'] ?? 0, $currency)) ?></strong></span>
+                            <span><small>KDV</small><strong><?= h(money_format_local($plan['vat_total'] ?? 0, $currency)) ?></strong></span>
+                            <span><small>KDV dahil</small><strong><?= h(money_format_local($plan['total'] ?? 0, $currency)) ?></strong></span>
+                        </div>
+                        <?php if (!empty($plan['notes'])): ?>
+                            <p class="muted compact"><?= h((string) $plan['notes']) ?></p>
+                        <?php endif; ?>
+                        <div class="budget-card-actions">
+                            <a class="button small secondary" href="<?= h(url('/budgets/' . $planId . '/preview')) ?>" target="_blank" rel="noopener">Çıktı / PDF</a>
+                            <?php if ($canManage): ?>
+                                <a class="button small secondary" href="<?= h(url('/budgets/' . $planId . '/edit')) ?>">Düzenle</a>
+                            <?php endif; ?>
+                            <?php if ($canDelete): ?>
+                                <form method="post" action="<?= h(url('/budgets/' . $planId . '/delete')) ?>" onsubmit="return confirm('Bu bütçe planı silinsin mi?')">
+                                    <?= csrf_field() ?>
+                                    <button type="submit" class="button small danger">Sil</button>
+                                </form>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </details>
+            <?php endforeach; ?>
+        </section>
+        <?php
+    });
+}
+
+function handle_budget_form(RenewalRepository $repo, string $method, ?int $id = null): void
+{
+    $budgetRepo = new BudgetRepository();
+    $plan = $id !== null ? $budgetRepo->find($id) : null;
+    if ($id !== null && $plan === null) {
+        flash('error', 'Bütçe kaydı bulunamadı.');
+        redirect('/budgets');
+    }
+
+    $errors = [];
+    $formData = $plan ?? [
+        'customer_id' => '',
+        'customer_name' => '',
+        'budget_year' => (int) date('Y') + 1,
+        'title' => '',
+        'currency' => 'TRY',
+        'status' => 'draft',
+        'notes' => '',
+        'items' => [],
+    ];
+
+    if ($method === 'POST') {
+        verify_csrf();
+        $payload = $_POST;
+        $payload['user_id'] = (int) (Auth::user()['id'] ?? 0);
+        try {
+            if ($id === null) {
+                $newId = $budgetRepo->create($payload);
+                flash('success', 'Bütçe planı oluşturuldu.');
+                redirect('/budgets/' . $newId . '/edit');
+            }
+
+            $budgetRepo->update($id, $payload);
+            flash('success', 'Bütçe planı güncellendi.');
+            redirect('/budgets');
+        } catch (Throwable $e) {
+            $errors[] = friendly_error_message($e);
+            $formData = $payload;
+        }
+    }
+
+    $customers = $repo->customersWithContacts();
+    $items = budget_form_items((array) ($formData['items'] ?? []));
+    $title = $id === null ? 'Yeni bütçe planı' : 'Bütçe planını düzenle';
+
+    render_layout($title, static function () use ($title, $formData, $items, $customers, $errors, $id): void {
+        ?>
+        <div class="page-title">
+            <div>
+                <p class="eyebrow">Bütçeleme</p>
+                <h1><?= h($title) ?></h1>
+            </div>
+            <a href="<?= h(url('/budgets')) ?>" class="button secondary">Bütçelere dön</a>
+        </div>
+
+        <?php if ($errors): ?>
+            <div class="alert error"><?= h(implode(' ', $errors)) ?></div>
+        <?php endif; ?>
+
+        <section class="panel budget-form-panel">
+            <form method="post" class="budget-form" data-budget-form>
+                <?= csrf_field() ?>
+                <div class="budget-plan-fields">
+                    <label>
+                        Firma
+                        <select name="customer_id">
+                            <option value="">Manuel firma adı yaz</option>
+                            <?php foreach ($customers as $customer): ?>
+                                <?= option((string) $customer['id'], (string) $customer['company_name'], (string) ($formData['customer_id'] ?? '')) ?>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>
+                        Manuel firma adı
+                        <input name="customer_name" value="<?= h((string) ($formData['customer_name'] ?? '')) ?>" placeholder="Listede yoksa firma adı">
+                    </label>
+                    <label>
+                        Bütçe yılı
+                        <input type="number" name="budget_year" min="2020" max="2100" value="<?= h((string) ($formData['budget_year'] ?? ((int) date('Y') + 1))) ?>">
+                    </label>
+                    <label>
+                        Para birimi
+                        <select name="currency" data-budget-currency>
+                            <?php foreach (allowed_currency_options() as $currency): ?>
+                                <?= option($currency, $currency, (string) ($formData['currency'] ?? 'TRY')) ?>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>
+                        Durum
+                        <select name="status">
+                            <?php foreach (BudgetRepository::planStatuses() as $key => $label): ?>
+                                <?= option($key, $label, (string) ($formData['status'] ?? 'draft')) ?>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label class="span-2">
+                        Başlık
+                        <input name="title" value="<?= h((string) ($formData['title'] ?? '')) ?>" placeholder="Örn: 2027 bilgi işlem bütçesi">
+                    </label>
+                    <label class="span-2">
+                        Genel not
+                        <textarea name="notes" rows="3" placeholder="Bu bütçenin amacı, kapsamı veya müşteriye verilecek açıklama"><?= h((string) ($formData['notes'] ?? '')) ?></textarea>
+                    </label>
+                </div>
+
+                <div class="budget-items-editor" data-budget-items data-next-index="<?= h((string) count($items)) ?>">
+                    <div class="section-head">
+                        <div>
+                            <h2>Bütçe kalemleri</h2>
+                            <span>Planlanan ürünleri, onay notunu ve yıl içindeki hedef ayı girin.</span>
+                        </div>
+                        <button type="button" class="button small secondary" data-add-budget-item>+ Kalem ekle</button>
+                    </div>
+                    <div class="budget-items-list" data-budget-item-list>
+                        <?php foreach ($items as $index => $item): ?>
+                            <?= render_budget_item_row((int) $index, $item) ?>
+                        <?php endforeach; ?>
+                    </div>
+                    <template data-budget-item-template>
+                        <?= render_budget_item_row('__INDEX__', []) ?>
+                    </template>
+                    <div class="budget-form-total">
+                        <span>Tahmini KDV dahil toplam</span>
+                        <strong data-budget-grand-total>0,00 <?= h((string) ($formData['currency'] ?? 'TRY')) ?></strong>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <a href="<?= h(url('/budgets')) ?>" class="button secondary">Vazgeç</a>
+                    <button type="submit" class="button primary"><?= $id === null ? 'Bütçe planı oluştur' : 'Bütçeyi güncelle' ?></button>
+                </div>
+            </form>
+        </section>
+        <?php
+    });
+}
+
+function handle_budget_delete(int $id): void
+{
+    verify_csrf();
+    (new BudgetRepository())->delete($id, (int) (Auth::user()['id'] ?? 0));
+    flash('success', 'Bütçe planı silindi.');
+    redirect('/budgets');
+}
+
+function render_budget_preview(int $id): void
+{
+    $plan = (new BudgetRepository())->find($id);
+    if (!$plan) {
+        flash('error', 'Bütçe kaydı bulunamadı.');
+        redirect('/budgets');
+    }
+    $currency = (string) ($plan['currency'] ?? 'TRY');
+    $items = (array) ($plan['items'] ?? []);
+
+    render_layout('Bütçe Çıktısı', static function () use ($plan, $items, $currency): void {
+        ?>
+        <div class="page-title no-print">
+            <div>
+                <p class="eyebrow">Bütçe çıktısı</p>
+                <h1><?= h((string) ($plan['customer_name'] ?? '-')) ?></h1>
+            </div>
+            <div class="page-actions">
+                <button type="button" class="button primary" onclick="window.print()">PDF / Yazdır</button>
+                <a href="<?= h(url('/budgets')) ?>" class="button secondary">Bütçelere dön</a>
+            </div>
+        </div>
+
+        <section class="budget-print-area">
+            <header class="budget-print-head">
+                <div>
+                    <p>Bütçe Planı</p>
+                    <h1><?= h((string) ($plan['customer_name'] ?? '-')) ?></h1>
+                    <span><?= h((string) ($plan['budget_year'] ?? '')) ?> yılı · <?= h((string) ($plan['budget_number'] ?? '')) ?></span>
+                </div>
+                <strong><?= h(money_format_local($plan['total'] ?? 0, $currency)) ?></strong>
+            </header>
+
+            <div class="budget-print-meta">
+                <span><small>Başlık</small><b><?= h((string) ($plan['title'] ?? '-')) ?></b></span>
+                <span><small>Durum</small><b><?= h(BudgetRepository::planStatuses()[(string) ($plan['status'] ?? 'draft')] ?? '-') ?></b></span>
+                <span><small>Ara toplam</small><b><?= h(money_format_local($plan['subtotal'] ?? 0, $currency)) ?></b></span>
+                <span><small>KDV</small><b><?= h(money_format_local($plan['vat_total'] ?? 0, $currency)) ?></b></span>
+            </div>
+
+            <?php if (!empty($plan['notes'])): ?>
+                <p class="budget-print-note"><?= h((string) $plan['notes']) ?></p>
+            <?php endif; ?>
+
+            <div class="budget-print-table">
+                <div class="budget-print-row head">
+                    <span>Ürün / hizmet</span>
+                    <span>Plan</span>
+                    <span>Adet</span>
+                    <span>Birim</span>
+                    <span>KDV dahil</span>
+                </div>
+                <?php foreach ($items as $item): ?>
+                    <div class="budget-print-row">
+                        <span>
+                            <strong><?= h((string) ($item['item_name'] ?? '-')) ?></strong>
+                            <?php if (!empty($item['description'])): ?><em><?= h((string) $item['description']) ?></em><?php endif; ?>
+                            <?php if (!empty($item['approval_note'])): ?><em>Onay: <?= h((string) $item['approval_note']) ?></em><?php endif; ?>
+                        </span>
+                        <span><?= h(budget_item_month_label($item)) ?><small><?= h(BudgetRepository::itemStatuses()[(string) ($item['status'] ?? 'planned')] ?? '-') ?></small></span>
+                        <span><?= h(decimal_format_local($item['quantity'] ?? 1)) ?> <?= h((string) ($item['unit'] ?? 'Adet')) ?></span>
+                        <span><?= h(money_format_local($item['unit_price'] ?? 0, $currency)) ?></span>
+                        <span><strong><?= h(money_format_local($item['total'] ?? 0, $currency)) ?></strong></span>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </section>
+        <?php
+    }, '<style>@media print {.sidebar,.no-print{display:none!important}.content{padding:0}.app-shell{display:block}.budget-print-area{box-shadow:none;border:0}}</style>');
+}
+
+function budget_form_items(array $items): array
+{
+    $normalized = array_values($items);
+    if ($normalized === []) {
+        $normalized = [
+            ['item_name' => '', 'quantity' => 1, 'unit' => 'Adet', 'vat_rate' => 20, 'status' => 'planned'],
+        ];
+    }
+
+    return $normalized;
+}
+
+function render_budget_item_row(int|string $index, array $item): string
+{
+    $name = 'items[' . $index . ']';
+    ob_start();
+    ?>
+    <article class="budget-item-row" data-budget-item>
+        <div class="budget-item-head">
+            <label>
+                Ürün / hizmet
+                <input name="<?= h($name) ?>[item_name]" value="<?= h((string) ($item['item_name'] ?? '')) ?>" placeholder="Örn: Televizyon, firewall, kamera">
+            </label>
+            <label>
+                Grup / kategori
+                <input name="<?= h($name) ?>[category]" value="<?= h((string) ($item['category'] ?? '')) ?>" placeholder="Donanım, lisans, proje">
+            </label>
+            <label>
+                Planlanan ay
+                <select name="<?= h($name) ?>[planned_month]">
+                    <option value="">Yıl içi</option>
+                    <?php foreach (BudgetRepository::months() as $month => $label): ?>
+                        <?= option((string) $month, $label, (string) ($item['planned_month'] ?? '')) ?>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+        </div>
+        <label>
+            Açıklama
+            <textarea name="<?= h($name) ?>[description]" rows="2" placeholder="Müşteriye verilecek kısa açıklama"><?= h((string) ($item['description'] ?? '')) ?></textarea>
+        </label>
+        <div class="budget-item-price-grid">
+            <label>Adet <input data-budget-quantity name="<?= h($name) ?>[quantity]" value="<?= h((string) ($item['quantity'] ?? 1)) ?>"></label>
+            <label>Birim <input name="<?= h($name) ?>[unit]" value="<?= h((string) (($item['unit'] ?? '') ?: 'Adet')) ?>"></label>
+            <label>Birim fiyat <input data-budget-unit-price name="<?= h($name) ?>[unit_price]" value="<?= h((string) ($item['unit_price'] ?? '')) ?>"></label>
+            <label>KDV % <input data-budget-vat name="<?= h($name) ?>[vat_rate]" value="<?= h((string) ($item['vat_rate'] ?? 20)) ?>"></label>
+            <label>
+                Durum
+                <select name="<?= h($name) ?>[status]">
+                    <?php foreach (BudgetRepository::itemStatuses() as $key => $label): ?>
+                        <?= option($key, $label, (string) ($item['status'] ?? 'planned')) ?>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+        </div>
+        <label>
+            Onay / not
+            <textarea name="<?= h($name) ?>[approval_note]" rows="2" placeholder="Örn: Yönetim onayı alındı, yıl sonu bütçesine yazıldı"><?= h((string) ($item['approval_note'] ?? '')) ?></textarea>
+        </label>
+        <div class="budget-item-footer">
+            <span>KDV dahil: <strong data-budget-line-total>0,00</strong></span>
+            <button type="button" class="button small secondary" data-remove-budget-item>Kalemi kaldır</button>
+        </div>
+    </article>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function budget_status_badge(string $status): string
+{
+    $label = BudgetRepository::planStatuses()[$status] ?? 'Taslak';
+    $class = match ($status) {
+        'approved' => 'active',
+        'shared' => 'renewed',
+        'ready' => 'pending',
+        default => '',
+    };
+
+    return '<span class="badge ' . h($class) . '">' . h($label) . '</span>';
+}
+
+function budget_month_range(array $plan): string
+{
+    $first = (int) ($plan['first_month'] ?? 0);
+    $last = (int) ($plan['last_month'] ?? 0);
+    if ($first < 1 && $last < 1) {
+        return 'Yıl içi';
+    }
+    if ($first === $last) {
+        return BudgetRepository::months()[$first] ?? 'Yıl içi';
+    }
+
+    return (BudgetRepository::months()[$first] ?? '-') . ' - ' . (BudgetRepository::months()[$last] ?? '-');
+}
+
+function budget_item_month_label(array $item): string
+{
+    $month = (int) ($item['planned_month'] ?? 0);
+
+    return BudgetRepository::months()[$month] ?? 'Yıl içi';
 }
 
 function turkish_month_name(int $month): string
@@ -16515,6 +16970,7 @@ function render_layout(string $title, callable $content, string $headExtra = '')
                 <nav class="nav">
                     <?= Auth::can('dashboard.view') ? nav_link('/', 'Dashboard') : '' ?>
                     <?= Auth::can('reports.view') ? nav_link('/reports/sales', 'Raporlar') : '' ?>
+                    <?= Auth::can('budgets.view') ? nav_link('/budgets', 'Bütçeleme') : '' ?>
                     <?= Auth::can('notes.view') ? nav_link('/notes', 'Görüşmeler ve Notlar') : '' ?>
                     <?= Auth::can('collections.view') ? nav_link('/collections', 'Tahsilat') : '' ?>
                     <?= Auth::can('collections.view') ? nav_link('/payment-requests', 'Ödeme Talep Et') : '' ?>
@@ -18657,6 +19113,7 @@ function first_allowed_path(): ?string
     $paths = [
         'dashboard.view' => '/',
         'reports.view' => '/reports/sales',
+        'budgets.view' => '/budgets',
         'notes.view' => '/notes',
         'flows.view' => '/settings/flows',
         'collections.view' => '/collections',

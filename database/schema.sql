@@ -807,6 +807,58 @@ CREATE TABLE interaction_notes (
     INDEX idx_interaction_notes_deleted (deleted_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE budget_plans (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    budget_number VARCHAR(30) NULL,
+    customer_id INT UNSIGNED NULL,
+    customer_name VARCHAR(190) NOT NULL,
+    budget_year SMALLINT UNSIGNED NOT NULL,
+    title VARCHAR(190) NOT NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'TRY',
+    status VARCHAR(30) NOT NULL DEFAULT 'draft',
+    subtotal DECIMAL(14,2) NOT NULL DEFAULT 0,
+    vat_total DECIMAL(14,2) NOT NULL DEFAULT 0,
+    total DECIMAL(14,2) NOT NULL DEFAULT 0,
+    notes TEXT NULL,
+    created_by INT UNSIGNED NULL,
+    updated_by INT UNSIGNED NULL,
+    deleted_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_budget_plans_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
+    CONSTRAINT fk_budget_plans_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_budget_plans_updated_by FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_budget_plans_number (budget_number),
+    INDEX idx_budget_plans_customer (customer_id),
+    INDEX idx_budget_plans_year_status (budget_year, status),
+    INDEX idx_budget_plans_deleted (deleted_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE budget_plan_items (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    budget_id INT UNSIGNED NOT NULL,
+    item_name VARCHAR(190) NOT NULL,
+    category VARCHAR(120) NULL,
+    description TEXT NULL,
+    quantity DECIMAL(12,2) NOT NULL DEFAULT 1,
+    unit VARCHAR(30) NOT NULL DEFAULT 'Adet',
+    unit_price DECIMAL(14,2) NOT NULL DEFAULT 0,
+    vat_rate DECIMAL(5,2) NOT NULL DEFAULT 20,
+    subtotal DECIMAL(14,2) NOT NULL DEFAULT 0,
+    vat_total DECIMAL(14,2) NOT NULL DEFAULT 0,
+    total DECIMAL(14,2) NOT NULL DEFAULT 0,
+    planned_month TINYINT UNSIGNED NULL,
+    approval_note TEXT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'planned',
+    sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_budget_items_budget FOREIGN KEY (budget_id) REFERENCES budget_plans(id) ON DELETE CASCADE,
+    INDEX idx_budget_items_budget (budget_id, sort_order),
+    INDEX idx_budget_items_status (status),
+    INDEX idx_budget_items_month (planned_month)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE push_subscriptions (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NULL,

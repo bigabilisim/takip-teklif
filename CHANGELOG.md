@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.70] - 2026-05-14
+
+- Firma bazlı yıllık ürün/hizmet bütçesi hazırlamak için Bütçeleme modülü eklendi.
+- Bütçe planlarında yıl, firma, para birimi, durum, kalem, adet, birim fiyat, KDV, planlanan ay ve onay notu tutulur hale getirildi.
+- Bütçe planları için yazdırılabilir/PDF alınabilir çıktı ekranı ve canlı KDV dahil toplam hesabı eklendi.
+
 ## [2.0.69] - 2026-05-14
 
 - Cari bilgi talebi tamamlanan kayıtlar için “Cariyi Paraşüt’e gönder” aksiyonu eklendi.
