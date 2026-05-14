@@ -1,6 +1,19 @@
 INSERT INTO users (name, email, password_hash, role)
 VALUES ('Sistem Yoneticisi', 'admin@example.com', 'sha256$240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'admin');
 
+INSERT INTO customer_sector_definitions (name, description, sort_order, is_active)
+VALUES
+    ('Tarım', 'Tarım, tohumculuk, seracılık ve üretici işletmeleri', 10, 1),
+    ('Bilişim', 'Yazılım, donanım, servis ve teknoloji odaklı işletmeler', 20, 1),
+    ('Eğitim', 'Okul, kurs, akademi ve eğitim kurumları', 30, 1),
+    ('Turizm', 'Otel, restoran, acente ve konaklama işletmeleri', 40, 1),
+    ('İnşaat', 'İnşaat, yapı, proje ve taahhüt firmaları', 50, 1),
+    ('Sağlık', 'Klinik, hastane, medikal ve sağlık hizmetleri', 60, 1),
+    ('Gıda', 'Gıda üretimi, dağıtımı, restoran ve perakende işletmeleri', 70, 1),
+    ('Sanayi', 'Üretim, imalat ve endüstriyel işletmeler', 80, 1),
+    ('Perakende', 'Mağaza, e-ticaret ve satış noktaları', 90, 1),
+    ('Hizmet', 'Danışmanlık, operasyon ve profesyonel hizmet firmaları', 100, 1);
+
 INSERT INTO customers (company_name, contact_name, email, phone, notes)
 VALUES
     ('Ornek Musteri A.S.', 'Ayse Demir', 'ayse@example.com', '0212 000 00 00', 'Demo musteri kaydi.'),

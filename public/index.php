@@ -12435,6 +12435,20 @@ function handle_customers(RenewalRepository $repo, string $method): void
                 }
                 $errors[] = $e->getMessage();
             }
+        } elseif ($action === 'send_sector_mail') {
+            try {
+                $result = send_customer_sector_mail($repo, $_POST);
+                if (($result['sent'] ?? 0) > 0 && ($result['failed'] ?? 0) === 0) {
+                    flash('success', 'Sektörel mailing gönderildi. Alıcı sayısı: ' . (string) $result['sent']);
+                } elseif (($result['sent'] ?? 0) > 0) {
+                    flash('error', 'Sektörel mailing kısmen gönderildi. Başarılı: ' . (string) $result['sent'] . ', başarısız: ' . (string) $result['failed']);
+                } else {
+                    flash('error', (string) (($result['message'] ?? '') ?: 'Bu sektör için gönderilecek e-posta alıcısı bulunamadı.'));
+                }
+                redirect('/customers');
+            } catch (Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
         } else {
             $errors = validate_customer_form($_POST);
 
@@ -12447,6 +12461,7 @@ function handle_customers(RenewalRepository $repo, string $method): void
     }
 
     $customers = $repo->customersWithContacts();
+    $customerSectors = $repo->customerSectors();
     $contactRows = submitted_contact_rows();
     $parasutStatus = (new ParasutClient())->status();
     $canManage = Auth::can('customers.manage');
@@ -12460,7 +12475,7 @@ function handle_customers(RenewalRepository $repo, string $method): void
     });
     $recentCustomers = array_slice($recentCustomers, 0, 10);
 
-    render_layout('Müşteriler', static function () use ($customers, $recentCustomers, $errors, $parasutStatus, $contactRows, $canManage, $canDelete, $canDetails): void {
+    render_layout('Müşteriler', static function () use ($customers, $recentCustomers, $customerSectors, $errors, $parasutStatus, $contactRows, $canManage, $canDelete, $canDetails): void {
         ?>
         <div class="page-title">
             <div>
@@ -12470,6 +12485,8 @@ function handle_customers(RenewalRepository $repo, string $method): void
             <div class="page-actions">
                 <?php if ($canManage): ?>
                     <button type="button" class="button primary" data-dialog-open="customer-create-dialog">+ Yeni müşteri</button>
+                    <button type="button" class="button secondary" data-dialog-open="customer-sector-mail-dialog">Sektörel mailing</button>
+                    <a href="<?= h(url('/settings/definitions#customer-sectors')) ?>" class="button secondary">Sektörleri yönet</a>
                 <?php endif; ?>
                 <?php if ($canDelete): ?>
                     <a href="<?= h(url('/customers/deleted')) ?>" class="button secondary">Silinenler havuzu</a>
@@ -12482,7 +12499,8 @@ function handle_customers(RenewalRepository $repo, string $method): void
         <?php endif; ?>
 
         <?php if ($canManage): ?>
-            <?= render_customer_create_dialog($customers, $contactRows, $parasutStatus, $errors !== []) ?>
+            <?= render_customer_create_dialog($customers, $contactRows, $parasutStatus, $customerSectors, $errors !== [] && (($_POST['action'] ?? 'create_customer') === 'create_customer')) ?>
+            <?= render_customer_sector_mail_dialog($customerSectors, $errors !== [] && (($_POST['action'] ?? '') === 'send_sector_mail')) ?>
         <?php endif; ?>
 
         <section class="customer-board" data-customer-board>
@@ -12495,7 +12513,7 @@ function handle_customers(RenewalRepository $repo, string $method): void
                 </div>
                 <label class="customer-live-filter">
                     <span>Alfabetik filtre</span>
-                    <input type="search" placeholder="A, BA, firma adı veya vergi no yazın" autocomplete="off" data-customer-filter-input>
+                    <input type="search" placeholder="A, BA, firma adı, sektör veya vergi no yazın" autocomplete="off" data-customer-filter-input>
                 </label>
                 <div class="stack customer-list-stack" data-customer-filter-list>
                     <?php foreach ($customers as $customer): ?>
@@ -12641,6 +12659,7 @@ function render_customer_list_card(array $customer, bool $canManage, bool $canDe
     $contacts = is_array($customer['contacts'] ?? null) ? $customer['contacts'] : [];
     $filterParts = [
         $customer['company_name'] ?? '',
+        $customer['sector_name'] ?? '',
         $customer['contact_name'] ?? '',
         $customer['email'] ?? '',
         $customer['phone'] ?? '',
@@ -12657,6 +12676,7 @@ function render_customer_list_card(array $customer, bool $canManage, bool $canDe
     }
     $filterText = trim(implode(' ', array_filter(array_map(static fn (mixed $value): string => trim((string) $value), $filterParts))));
     $companyName = (string) ($customer['company_name'] ?? '');
+    $sectorName = trim((string) ($customer['sector_name'] ?? ''));
     $primaryContact = trim((string) (($customer['contact_name'] ?? '') ?: ''));
     $locationLine = trim((string) (($customer['city'] ?? '') . (!empty($customer['district']) ? ' / ' . $customer['district'] : '')));
     $taxNumber = trim((string) ($customer['tax_number'] ?? ''));
@@ -12674,6 +12694,9 @@ function render_customer_list_card(array $customer, bool $canManage, bool $canDe
                     <?php if ($locationLine !== ''): ?>
                         <span><?= h($locationLine) ?></span>
                     <?php endif; ?>
+                    <?php if ($sectorName !== ''): ?>
+                        <span class="badge active"><?= h($sectorName) ?></span>
+                    <?php endif; ?>
                     <span class="badge active"><?= h((string) count($contacts)) ?> yetkili</span>
                     <?php if ($taxNumber !== ''): ?>
                         <span>VKN: <?= h($taxNumber) ?></span>
@@ -12690,6 +12713,7 @@ function render_customer_list_card(array $customer, bool $canManage, bool $canDe
                     <span><small>E-posta</small><strong><?= h(($customer['email'] ?? '') ?: '-') ?></strong></span>
                     <span><small>Telefon</small><strong><?= h(($customer['phone'] ?? '') ?: '-') ?></strong></span>
                     <span><small>Konum</small><strong><?= h(trim((string) (($customer['city'] ?? '') . ' / ' . ($customer['district'] ?? '')), ' /') ?: '-') ?></strong></span>
+                    <span><small>Sektör</small><strong><?= h($sectorName !== '' ? $sectorName : '-') ?></strong></span>
                     <span><small>Vergi no</small><strong><?= h(($customer['tax_number'] ?? '') ?: '-') ?></strong></span>
                     <span><small>Paraşüt</small><strong><?= h(!empty($customer['parasut_contact_id']) ? '#' . $customer['parasut_contact_id'] : '-') ?></strong></span>
                 </div>
@@ -12751,6 +12775,7 @@ function render_recent_customer_card(array $customer, bool $canManage): string
     $createdAt = !empty($customer['created_at']) ? date('d.m.Y H:i', strtotime((string) $customer['created_at'])) : '-';
     $contactLine = trim((string) (($customer['contact_name'] ?? '') ?: ($customer['email'] ?? '')));
     $location = trim((string) (($customer['city'] ?? '') . (!empty($customer['district']) ? ' / ' . $customer['district'] : '')));
+    $sectorName = trim((string) ($customer['sector_name'] ?? ''));
 
     ob_start();
     ?>
@@ -12758,6 +12783,9 @@ function render_recent_customer_card(array $customer, bool $canManage): string
         <span><?= h($createdAt) ?></span>
         <strong><?= h((string) ($customer['company_name'] ?? '-')) ?></strong>
         <small><?= h($contactLine !== '' ? $contactLine : 'Yetkili yok') ?><?= $location !== '' ? ' - ' . h($location) : '' ?></small>
+        <?php if ($sectorName !== ''): ?>
+            <small>Sektör: <?= h($sectorName) ?></small>
+        <?php endif; ?>
         <?php if ($canManage): ?>
             <div class="recent-customer-actions">
                 <?= render_customer_parasut_send_control($customer, '/customers') ?>
@@ -12830,7 +12858,210 @@ function render_customer_info_request_quick_form(array $customer): string
     return (string) ob_get_clean();
 }
 
-function render_customer_create_dialog(array $customers, array $contactRows, array $parasutStatus, bool $openOnLoad = false): string
+function send_customer_sector_mail(RenewalRepository $repo, array $data): array
+{
+    $sectorId = (int) ($data['customer_sector_id'] ?? 0);
+    $subject = trim((string) ($data['sector_mail_subject'] ?? ''));
+    $message = trim((string) ($data['sector_mail_message'] ?? ''));
+
+    if ($sectorId < 1) {
+        throw new RuntimeException('Mailing için bir sektör seçin.');
+    }
+    if ($subject === '') {
+        throw new RuntimeException('Mail konusu zorunlu.');
+    }
+    if ($message === '') {
+        throw new RuntimeException('Mail içeriği zorunlu.');
+    }
+
+    $sector = null;
+    foreach ($repo->customerSectors(true) as $row) {
+        if ((int) ($row['id'] ?? 0) === $sectorId) {
+            $sector = $row;
+            break;
+        }
+    }
+
+    if ($sector === null || (int) ($sector['is_active'] ?? 0) !== 1) {
+        throw new RuntimeException('Seçilen sektör aktif değil veya bulunamadı.');
+    }
+
+    $customers = $repo->customersBySectorWithContacts($sectorId);
+    $recipients = sector_mail_recipients($customers);
+    if ($recipients === []) {
+        return [
+            'sent' => 0,
+            'failed' => 0,
+            'message' => 'Bu sektörde e-posta alıcısı olan müşteri bulunamadı.',
+        ];
+    }
+
+    $sent = 0;
+    $failed = 0;
+    $lastError = null;
+    foreach ($recipients as $recipient) {
+        $body = customer_sector_mail_body($recipient, (string) $sector['name'], $subject, $message);
+        $result = Mailer::sendWithResult((string) $recipient['email'], $subject, $body, true);
+        $ok = !empty($result['ok']);
+        $repo->logMail(
+            null,
+            (string) $recipient['email'],
+            $subject,
+            (string) ($result['body'] ?? $body),
+            $ok ? 'sent' : 'failed',
+            $ok ? null : (string) ($result['error'] ?? 'Mail gönderimi başarısız.'),
+            false
+        );
+
+        if ($ok) {
+            $sent++;
+        } else {
+            $failed++;
+            $lastError = (string) ($result['error'] ?? 'Mail gönderimi başarısız.');
+        }
+    }
+
+    return [
+        'sent' => $sent,
+        'failed' => $failed,
+        'total' => count($recipients),
+        'last_error' => $lastError,
+    ];
+}
+
+function sector_mail_recipients(array $customers): array
+{
+    $recipients = [];
+    $seen = [];
+
+    foreach ($customers as $customer) {
+        $customerName = trim((string) ($customer['company_name'] ?? ''));
+        $primaryEmail = trim((string) ($customer['email'] ?? ''));
+        if (filter_var($primaryEmail, FILTER_VALIDATE_EMAIL)) {
+            $key = mb_strtolower($primaryEmail, 'UTF-8');
+            if (!isset($seen[$key])) {
+                $seen[$key] = true;
+                $recipients[] = [
+                    'email' => $primaryEmail,
+                    'name' => trim((string) (($customer['contact_name'] ?? '') ?: $customerName)),
+                    'customer_name' => $customerName,
+                ];
+            }
+        }
+
+        $contacts = is_array($customer['contacts'] ?? null) ? $customer['contacts'] : [];
+        foreach ($contacts as $contact) {
+            if ((int) ($contact['notify_enabled'] ?? 0) !== 1) {
+                continue;
+            }
+
+            $email = trim((string) ($contact['email'] ?? ''));
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                continue;
+            }
+
+            $key = mb_strtolower($email, 'UTF-8');
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $recipients[] = [
+                'email' => $email,
+                'name' => trim((string) (($contact['full_name'] ?? '') ?: $customerName)),
+                'customer_name' => $customerName,
+            ];
+        }
+    }
+
+    return $recipients;
+}
+
+function customer_sector_mail_body(array $recipient, string $sectorName, string $subject, string $message): string
+{
+    $recipientName = trim((string) ($recipient['name'] ?? ''));
+    $customerName = trim((string) ($recipient['customer_name'] ?? ''));
+    $greeting = $recipientName !== ''
+        ? 'Merhaba ' . $recipientName . ','
+        : ($customerName !== '' ? 'Merhaba ' . $customerName . ',' : 'Merhaba,');
+
+    $messageHtml = nl2br(h($message));
+    $sectorLine = $sectorName !== '' ? '<span style="display:inline-block;margin-top:10px;padding:7px 10px;border-radius:999px;background:#eef6f2;color:#245447;font-size:12px;font-weight:700;">Sektör: ' . h($sectorName) . '</span>' : '';
+
+    return '<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        . '<title>' . h($subject) . '</title></head>'
+        . '<body style="margin:0;background:#f4f6f5;color:#17201c;font-family:Arial,sans-serif;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f5;padding:24px 12px;">'
+        . '<tr><td align="center">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border:1px solid #dde7e2;border-radius:12px;overflow:hidden;">'
+        . '<tr>'
+        . '<td style="height:5px;background:#ed1678;width:33%;font-size:0;line-height:0;">&nbsp;</td>'
+        . '<td style="height:5px;background:#0068ad;width:34%;font-size:0;line-height:0;">&nbsp;</td>'
+        . '<td style="height:5px;background:#35aa47;width:33%;font-size:0;line-height:0;">&nbsp;</td>'
+        . '</tr>'
+        . '<tr><td colspan="3" style="padding:28px;">'
+        . '<p style="margin:0 0 12px;color:#66756f;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;">Biga Bilişim Bilgilendirmesi</p>'
+        . '<h1 style="margin:0 0 18px;color:#17201c;font-size:24px;line-height:1.25;">' . h($subject) . '</h1>'
+        . '<p style="margin:0 0 18px;font-size:16px;line-height:1.6;">' . h($greeting) . '</p>'
+        . '<div style="font-size:16px;line-height:1.65;color:#25342f;">' . $messageHtml . '</div>'
+        . $sectorLine
+        . '<p style="margin:24px 0 0;color:#66756f;font-size:12px;line-height:1.5;">Bu mesaj, cari kartınızda tanımlı sektör bilgisine göre gönderilmiştir.</p>'
+        . '</td></tr></table>'
+        . '</td></tr></table>'
+        . '</body></html>';
+}
+
+function render_customer_sector_mail_dialog(array $customerSectors, bool $openOnLoad = false): string
+{
+    $defaultSubject = '14 Mayıs Dünya Çiftçiler Günü Kutlu Olsun';
+    $defaultMessage = "14 Mayıs Dünya Çiftçiler Günü'nüz kutlu olsun.\n\nÜreten, emek veren ve toprağa değer katan tüm çiftçilerimize bereketli, sağlıklı ve verimli bir yıl dileriz.";
+
+    ob_start();
+    ?>
+    <dialog class="app-dialog customer-sector-mail-dialog" id="customer-sector-mail-dialog" <?= $openOnLoad ? 'data-auto-open-dialog' : '' ?>>
+        <div class="app-dialog-body">
+            <div class="section-head dialog-head">
+                <div>
+                    <p class="eyebrow">Sektörel mailing</p>
+                    <h2>Sektöre göre toplu mail gönder</h2>
+                    <span>Seçtiğiniz sektördeki cari kartlarının e-posta adreslerine ve bilgilendirme açık yetkililerine gönderilir.</span>
+                </div>
+                <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+            </div>
+            <form method="post" action="<?= h(url('/customers')) ?>" class="form-grid definition-dialog-form" onsubmit="return confirm('Seçili sektördeki müşterilere mailing gönderilsin mi?')">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="send_sector_mail">
+                <label>
+                    Kategori / sektör
+                    <select name="customer_sector_id" required>
+                        <option value="">Sektör seçin</option>
+                        <?php foreach ($customerSectors as $sector): ?>
+                            <?= option((string) $sector['id'], (string) $sector['name'], old('customer_sector_id')) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    Konu
+                    <input name="sector_mail_subject" value="<?= h(old('sector_mail_subject') ?: $defaultSubject) ?>" required>
+                </label>
+                <label class="span-2">
+                    Mail içeriği
+                    <textarea name="sector_mail_message" rows="8" required><?= h(old('sector_mail_message') ?: $defaultMessage) ?></textarea>
+                    <span class="muted compact">Örnek: Tarım sektörünü seçip Dünya Çiftçiler Günü mesajını sadece çiftçi müşterilere gönderebilirsiniz.</span>
+                </label>
+                <div class="form-actions span-2">
+                    <button type="button" class="button secondary" data-dialog-close>Vazgeç</button>
+                    <button type="submit" class="button primary">Mailing gönder</button>
+                </div>
+            </form>
+        </div>
+    </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_customer_create_dialog(array $customers, array $contactRows, array $parasutStatus, array $customerSectors, bool $openOnLoad = false): string
 {
     ob_start();
     ?>
@@ -12863,6 +13094,15 @@ function render_customer_create_dialog(array $customers, array $contactRows, arr
                 <input type="hidden" name="action" value="create_customer">
                 <input type="hidden" name="parasut_contact_id" value="<?= h(old('parasut_contact_id')) ?>">
                 <label>Firma adı <input name="company_name" value="<?= h(old('company_name')) ?>" required></label>
+                <label>
+                    Kategori / sektör
+                    <select name="customer_sector_id">
+                        <option value="">Sektör seçilmedi</option>
+                        <?php foreach ($customerSectors as $sector): ?>
+                            <?= option((string) $sector['id'], (string) $sector['name'], old('customer_sector_id')) ?>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
                 <label>Yetkili <input name="contact_name" value="<?= h(old('contact_name')) ?>"></label>
                 <label>E-posta <input type="email" name="email" value="<?= h(old('email')) ?>"></label>
                 <label>Telefon <input name="phone" value="<?= h(old('phone')) ?>"></label>
@@ -13031,8 +13271,9 @@ function handle_customer_edit(RenewalRepository $repo, string $method, int $id):
     }
 
     $parasutStatus = (new ParasutClient())->status();
+    $customerSectors = $repo->customerSectors(true);
 
-    render_layout('Müşteri Düzenle', static function () use ($customer, $contactRows, $parasutStatus, $errors): void {
+    render_layout('Müşteri Düzenle', static function () use ($customer, $contactRows, $parasutStatus, $customerSectors, $errors): void {
         ?>
         <div class="page-title">
             <div>
@@ -13052,7 +13293,7 @@ function handle_customer_edit(RenewalRepository $repo, string $method, int $id):
         <section class="panel narrow-form">
             <form method="post" class="form-grid" onsubmit="return confirm('Müşteri bilgileri güncellensin mi?')">
                 <?= csrf_field() ?>
-                <?= render_customer_form_fields($customer, $contactRows, $parasutStatus, false) ?>
+                <?= render_customer_form_fields($customer, $contactRows, $parasutStatus, false, 'customer', [], $customerSectors) ?>
                 <button type="submit" class="button primary">Güncelle</button>
             </form>
         </section>
@@ -13572,7 +13813,7 @@ function customer_info_status_label(string $status): string
     };
 }
 
-function render_customer_form_fields(array $customer, array $contactRows, array $parasutStatus, bool $showParasutSearch = true, string $parasutType = 'customer', array $supplierGroups = []): string
+function render_customer_form_fields(array $customer, array $contactRows, array $parasutStatus, bool $showParasutSearch = true, string $parasutType = 'customer', array $supplierGroups = [], array $customerSectors = []): string
 {
     ob_start();
     if ($showParasutSearch): ?>
@@ -13601,6 +13842,17 @@ function render_customer_form_fields(array $customer, array $contactRows, array 
         </label>
     <?php endif; ?>
     <label>Firma adı <input name="company_name" value="<?= h($customer['company_name'] ?? '') ?>" required></label>
+    <?php if ($parasutType === 'customer'): ?>
+        <label>
+            Kategori / sektör
+            <select name="customer_sector_id">
+                <option value="">Sektör seçilmedi</option>
+                <?php foreach ($customerSectors as $sector): ?>
+                    <?= option((string) $sector['id'], (string) $sector['name'], (string) ($customer['customer_sector_id'] ?? '')) ?>
+                <?php endforeach; ?>
+            </select>
+        </label>
+    <?php endif; ?>
     <label>Yetkili <input name="contact_name" value="<?= h($customer['contact_name'] ?? '') ?>"></label>
     <label>E-posta <input type="email" name="email" value="<?= h($customer['email'] ?? '') ?>"></label>
     <label>Telefon <input name="phone" value="<?= h($customer['phone'] ?? '') ?>"></label>
@@ -14072,6 +14324,24 @@ function handle_definitions(RenewalRepository $repo, string $method): void
                 flash('success', 'Görev tanımı güncellendi.');
                 redirect('/settings/definitions#contact-roles');
             }
+
+            if ($action === 'create_customer_sector') {
+                $repo->createCustomerSector($_POST);
+                flash('success', 'Müşteri sektörü kaydedildi.');
+                redirect('/settings/definitions#customer-sectors');
+            }
+
+            if ($action === 'delete_customer_sector') {
+                $repo->deleteCustomerSector((int) ($_POST['id'] ?? 0));
+                flash('success', 'Müşteri sektörü silindi.');
+                redirect('/settings/definitions#customer-sectors');
+            }
+
+            if ($action === 'update_customer_sector') {
+                $repo->updateCustomerSector((int) ($_POST['id'] ?? 0), $_POST);
+                flash('success', 'Müşteri sektörü güncellendi.');
+                redirect('/settings/definitions#customer-sectors');
+            }
         } catch (Throwable $e) {
             $error = $e->getMessage();
         }
@@ -14082,9 +14352,10 @@ function handle_definitions(RenewalRepository $repo, string $method): void
     $supplierGroups = $repo->supplierGroups();
     $paymentMethods = $repo->paymentMethods();
     $contactRoles = $repo->contactRoles();
+    $customerSectors = $repo->customerSectors();
     $backPath = Auth::can('settings.manage') ? '/settings' : (Auth::can('dashboard.view') ? '/' : '/settings/definitions');
 
-    render_layout('Tanımlamalar', static function () use ($definitions, $periods, $supplierGroups, $paymentMethods, $contactRoles, $error, $backPath): void {
+    render_layout('Tanımlamalar', static function () use ($definitions, $periods, $supplierGroups, $paymentMethods, $contactRoles, $customerSectors, $error, $backPath): void {
         ?>
         <div class="page-title">
             <div>
@@ -14253,6 +14524,61 @@ function handle_definitions(RenewalRepository $repo, string $method): void
                                             <?= csrf_field() ?>
                                             <input type="hidden" name="action" value="delete_supplier_group">
                                             <input type="hidden" name="id" value="<?= h($group['id']) ?>">
+                                            <button type="submit" class="button small danger">Sil</button>
+                                        </form>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </details>
+            </article>
+
+            <article class="definition-card" id="customer-sectors">
+                <div class="definition-card-head">
+                    <div>
+                        <p class="eyebrow">Müşteri</p>
+                        <h2>Sektörler</h2>
+                    </div>
+                    <span class="definition-count"><?= h((string) count($customerSectors)) ?></span>
+                </div>
+                <div class="definition-card-actions">
+                    <button type="button" class="button small primary" data-dialog-open="customer-sector-create-dialog">+ Yeni</button>
+                </div>
+                <details class="definition-card-details">
+                    <summary>
+                        <span>Detay</span>
+                        <strong>Kayıtları göster</strong>
+                    </summary>
+                    <div class="definition-card-body">
+                        <?php if ($customerSectors === []): ?>
+                            <div class="empty">Aktif sektör bulunmuyor.</div>
+                        <?php else: ?>
+                            <div class="definition-list">
+                                <?php foreach ($customerSectors as $sector): ?>
+                                    <div class="customer-row definition-row">
+                                        <form method="post" class="definition-edit-form definition-info-form" onsubmit="return confirm('Bu müşteri sektörü güncellensin mi?')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="action" value="update_customer_sector">
+                                            <input type="hidden" name="id" value="<?= h($sector['id']) ?>">
+                                            <label>
+                                                Sektör adı
+                                                <input name="sector_name" value="<?= h($sector['name']) ?>" required>
+                                            </label>
+                                            <label>
+                                                Sıra
+                                                <input type="number" min="0" name="sort_order" value="<?= h($sector['sort_order'] ?? 0) ?>">
+                                            </label>
+                                            <label class="definition-info-field">
+                                                Açıklama
+                                                <textarea name="sector_description" rows="4"><?= h($sector['description'] ?? '') ?></textarea>
+                                            </label>
+                                            <button type="submit" class="button small primary">Kaydet</button>
+                                        </form>
+                                        <form method="post" class="definition-delete-form" onsubmit="return confirm('Bu müşteri sektörü silinsin mi? Eski müşterilerde metin olarak görünmeye devam eder.')">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="action" value="delete_customer_sector">
+                                            <input type="hidden" name="id" value="<?= h($sector['id']) ?>">
                                             <button type="submit" class="button small danger">Sil</button>
                                         </form>
                                     </div>
@@ -14471,6 +14797,39 @@ function handle_definitions(RenewalRepository $repo, string $method): void
                     <div class="form-actions">
                         <button type="button" class="button secondary" data-dialog-close>Vazgeç</button>
                         <button type="submit" class="button primary">Grup ekle</button>
+                    </div>
+                </form>
+            </div>
+        </dialog>
+
+        <dialog class="app-dialog definition-dialog" id="customer-sector-create-dialog">
+            <div class="app-dialog-body">
+                <div class="section-head dialog-head">
+                    <div>
+                        <p class="eyebrow">Yeni sektör</p>
+                        <h2>Müşteri sektörü ekle</h2>
+                        <span>Müşterileri sektöre göre ayırıp hedefli mailing göndermek için kullanılır.</span>
+                    </div>
+                    <button type="button" class="button small secondary" data-dialog-close>Kapat</button>
+                </div>
+                <form method="post" class="form-grid definition-dialog-form">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="create_customer_sector">
+                    <label>
+                        Sektör adı
+                        <input name="sector_name" placeholder="Örn: Tarım" required>
+                    </label>
+                    <label>
+                        Sıra
+                        <input type="number" min="0" name="sort_order" value="10">
+                    </label>
+                    <label class="span-2">
+                        Açıklama
+                        <textarea name="sector_description" rows="4" placeholder="Bu sektör için kısa not"></textarea>
+                    </label>
+                    <div class="form-actions span-2">
+                        <button type="button" class="button secondary" data-dialog-close>Vazgeç</button>
+                        <button type="submit" class="button primary">Sektör ekle</button>
                     </div>
                 </form>
             </div>

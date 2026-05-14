@@ -24,6 +24,7 @@ final class RenewalRepository
     private static bool $paymentSchemaEnsured = false;
     private static bool $renewalSchemaEnsured = false;
     private static bool $definitionSchemaEnsured = false;
+    private static bool $customerSectorSchemaEnsured = false;
     private static bool $contactRoleSchemaEnsured = false;
     private static bool $paymentMethodSchemaEnsured = false;
     private static bool $itemSchemaEnsured = false;
@@ -42,6 +43,7 @@ final class RenewalRepository
         $this->ensurePaymentSchema();
         $this->ensureRenewalSchema();
         $this->ensureDefinitionSchema();
+        $this->ensureCustomerSectorSchema();
         $this->ensureContactRoleSchema();
         $this->ensurePaymentMethodSchema();
         $this->ensureItemSchema();
@@ -525,7 +527,7 @@ final class RenewalRepository
 
     public function customers(): array
     {
-        return $this->db->query('SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY company_name ASC')->fetchAll();
+        return $this->db->query($this->customerSelect() . ' WHERE c.deleted_at IS NULL ORDER BY c.company_name ASC')->fetchAll();
     }
 
     public function deletedCustomersWithContacts(): array
@@ -536,7 +538,7 @@ final class RenewalRepository
     public function customersWithContacts(bool $deleted = false): array
     {
         $customers = $deleted
-            ? $this->db->query('SELECT * FROM customers WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, company_name ASC')->fetchAll()
+            ? $this->db->query($this->customerSelect() . ' WHERE c.deleted_at IS NOT NULL ORDER BY c.deleted_at DESC, c.company_name ASC')->fetchAll()
             : $this->customers();
 
         if ($customers === []) {
@@ -548,9 +550,9 @@ final class RenewalRepository
 
     public function findCustomer(int $id, bool $includeDeleted = false): ?array
     {
-        $sql = 'SELECT * FROM customers WHERE id = :id';
+        $sql = $this->customerSelect() . ' WHERE c.id = :id';
         if (!$includeDeleted) {
-            $sql .= ' AND deleted_at IS NULL';
+            $sql .= ' AND c.deleted_at IS NULL';
         }
         $sql .= ' LIMIT 1';
 
@@ -563,6 +565,21 @@ final class RenewalRepository
         }
 
         return $this->attachContacts([$customer])[0];
+    }
+
+    public function customersBySectorWithContacts(int $sectorId): array
+    {
+        $stmt = $this->db->prepare(
+            $this->customerSelect() . ' WHERE c.deleted_at IS NULL AND c.customer_sector_id = :sector_id ORDER BY c.company_name ASC'
+        );
+        $stmt->execute(['sector_id' => $sectorId]);
+        $customers = $stmt->fetchAll();
+
+        if ($customers === []) {
+            return [];
+        }
+
+        return $this->attachContacts($customers);
     }
 
     public function updateCustomer(int $id, array $data): void
@@ -613,6 +630,74 @@ final class RenewalRepository
         $sql .= ' ORDER BY name ASC';
 
         return $this->db->query($sql)->fetchAll();
+    }
+
+    public function customerSectors(bool $includeInactive = false): array
+    {
+        $sql = 'SELECT * FROM customer_sector_definitions';
+        if (!$includeInactive) {
+            $sql .= ' WHERE is_active = 1';
+        }
+        $sql .= ' ORDER BY sort_order ASC, name ASC';
+
+        return $this->db->query($sql)->fetchAll();
+    }
+
+    public function createCustomerSector(array $data): int
+    {
+        $name = trim((string) ($data['sector_name'] ?? $data['name'] ?? ''));
+        $description = $this->nullableString($data['sector_description'] ?? $data['description'] ?? '');
+        $sortOrder = max(0, (int) ($data['sort_order'] ?? 0));
+
+        if ($name === '') {
+            throw new \RuntimeException('Sektör adı zorunlu.');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO customer_sector_definitions (name, description, sort_order, is_active)
+             VALUES (:name, :description, :sort_order, 1)
+             ON DUPLICATE KEY UPDATE description = VALUES(description), sort_order = VALUES(sort_order), is_active = 1, updated_at = NOW()'
+        );
+        $stmt->execute([
+            'name' => $name,
+            'description' => $description,
+            'sort_order' => $sortOrder,
+        ]);
+
+        return (int) $this->db->lastInsertId();
+    }
+
+    public function updateCustomerSector(int $id, array $data): void
+    {
+        $name = trim((string) ($data['sector_name'] ?? $data['name'] ?? ''));
+        $description = $this->nullableString($data['sector_description'] ?? $data['description'] ?? '');
+        $sortOrder = max(0, (int) ($data['sort_order'] ?? 0));
+
+        if ($name === '') {
+            throw new \RuntimeException('Sektör adı zorunlu.');
+        }
+
+        $stmt = $this->db->prepare(
+            'UPDATE customer_sector_definitions
+             SET name = :name,
+                 description = :description,
+                 sort_order = :sort_order,
+                 is_active = 1,
+                 updated_at = NOW()
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            'id' => $id,
+            'name' => $name,
+            'description' => $description,
+            'sort_order' => $sortOrder,
+        ]);
+    }
+
+    public function deleteCustomerSector(int $id): void
+    {
+        $stmt = $this->db->prepare('UPDATE customer_sector_definitions SET is_active = 0, updated_at = NOW() WHERE id = :id');
+        $stmt->execute(['id' => $id]);
     }
 
     public function renewalDefinitions(bool $includeInactive = false): array
@@ -4099,6 +4184,64 @@ final class RenewalRepository
         self::$definitionSchemaEnsured = true;
     }
 
+    private function ensureCustomerSectorSchema(): void
+    {
+        if (self::$customerSectorSchemaEnsured) {
+            return;
+        }
+
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS customer_sector_definitions (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(120) NOT NULL,
+                description TEXT NULL,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_customer_sector_definitions_name (name),
+                INDEX idx_customer_sector_definitions_active (is_active, sort_order, name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        $this->ensureColumn('customers', 'customer_sector_id', 'INT UNSIGNED NULL AFTER parasut_contact_id');
+        $this->ensureIndex('customers', 'idx_customers_sector', 'INDEX idx_customers_sector (customer_sector_id)');
+        $this->seedDefaultCustomerSectors();
+
+        self::$customerSectorSchemaEnsured = true;
+    }
+
+    private function seedDefaultCustomerSectors(): void
+    {
+        $stmt = $this->db->prepare(
+            'INSERT IGNORE INTO customer_sector_definitions (name, description, sort_order, is_active)
+             VALUES (:name, :description, :sort_order, 1)'
+        );
+
+        foreach (self::defaultCustomerSectors() as $index => $row) {
+            $stmt->execute([
+                'name' => $row[0],
+                'description' => $row[1],
+                'sort_order' => ($index + 1) * 10,
+            ]);
+        }
+    }
+
+    public static function defaultCustomerSectors(): array
+    {
+        return [
+            ['Tarım', 'Tarım, tohumculuk, seracılık ve üretici işletmeleri'],
+            ['Bilişim', 'Yazılım, donanım, servis ve teknoloji odaklı işletmeler'],
+            ['Eğitim', 'Okul, kurs, akademi ve eğitim kurumları'],
+            ['Turizm', 'Otel, restoran, acente ve konaklama işletmeleri'],
+            ['İnşaat', 'İnşaat, yapı, proje ve taahhüt firmaları'],
+            ['Sağlık', 'Klinik, hastane, medikal ve sağlık hizmetleri'],
+            ['Gıda', 'Gıda üretimi, dağıtımı, restoran ve perakende işletmeleri'],
+            ['Sanayi', 'Üretim, imalat ve endüstriyel işletmeler'],
+            ['Perakende', 'Mağaza, e-ticaret ve satış noktaları'],
+            ['Hizmet', 'Danışmanlık, operasyon ve profesyonel hizmet firmaları'],
+        ];
+    }
+
     private function ensureContactRoleSchema(): void
     {
         if (self::$contactRoleSchemaEnsured) {
@@ -6220,6 +6363,7 @@ final class RenewalRepository
     {
         $params = [
             'parasut_contact_id' => $this->nullableString($data['parasut_contact_id'] ?? ''),
+            'customer_sector_id' => empty($data['customer_sector_id']) ? null : (int) $data['customer_sector_id'],
             'company_name' => trim((string) $data['company_name']),
             'contact_name' => trim((string) ($data['contact_name'] ?? '')),
             'email' => trim((string) ($data['email'] ?? '')),
@@ -6235,9 +6379,9 @@ final class RenewalRepository
         if ($id === null) {
             $stmt = $this->db->prepare(
                 'INSERT INTO customers
-                    (parasut_contact_id, company_name, contact_name, email, phone, tax_office, tax_number, city, district, address, notes)
+                    (parasut_contact_id, customer_sector_id, company_name, contact_name, email, phone, tax_office, tax_number, city, district, address, notes)
                  VALUES
-                    (:parasut_contact_id, :company_name, :contact_name, :email, :phone, :tax_office, :tax_number, :city, :district, :address, :notes)'
+                    (:parasut_contact_id, :customer_sector_id, :company_name, :contact_name, :email, :phone, :tax_office, :tax_number, :city, :district, :address, :notes)'
             );
             $stmt->execute($params);
 
@@ -6248,6 +6392,7 @@ final class RenewalRepository
         $stmt = $this->db->prepare(
             'UPDATE customers SET
                 parasut_contact_id = :parasut_contact_id,
+                customer_sector_id = :customer_sector_id,
                 company_name = :company_name,
                 contact_name = :contact_name,
                 email = :email,
@@ -6943,5 +7088,12 @@ final class RenewalRepository
         return 'SELECT s.*, sg.name AS supplier_group_name
                 FROM suppliers s
                 LEFT JOIN supplier_groups sg ON sg.id = s.supplier_group_id';
+    }
+
+    private function customerSelect(): string
+    {
+        return 'SELECT c.*, cs.name AS sector_name, cs.description AS sector_description
+                FROM customers c
+                LEFT JOIN customer_sector_definitions cs ON cs.id = c.customer_sector_id';
     }
 }

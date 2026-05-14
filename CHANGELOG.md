@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.71] - 2026-05-14
+
+- Müşteri carilerine kategori/sektör seçimi eklendi; müşteriler listesinde sektör rozeti ve filtre desteği sağlandı.
+- Ayarlar > Tanımlamalar ekranına müşteri sektörleri kartı eklendi; Tarım, Bilişim, Eğitim gibi başlangıç sektörleri otomatik oluşturulur hale getirildi.
+- Müşteriler ekranına “Sektörel mailing” eklendi; seçili sektördeki cari e-postalarına ve bilgilendirme açık yetkililere toplu mail gönderilip mail loglarına kaydedilir hale getirildi.
+
 ## [2.0.70] - 2026-05-14
 
 - Firma bazlı yıllık ürün/hizmet bütçesi hazırlamak için Bütçeleme modülü eklendi.

@@ -88,9 +88,22 @@ CREATE TABLE security_events (
     INDEX idx_security_events_severity (severity, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE customer_sector_definitions (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(120) NOT NULL,
+    description TEXT NULL,
+    sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_customer_sector_definitions_name (name),
+    INDEX idx_customer_sector_definitions_active (is_active, sort_order, name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE customers (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     parasut_contact_id VARCHAR(64) NULL,
+    customer_sector_id INT UNSIGNED NULL,
     company_name VARCHAR(190) NOT NULL,
     contact_name VARCHAR(190) NULL,
     email VARCHAR(190) NULL,
@@ -104,8 +117,10 @@ CREATE TABLE customers (
     deleted_at DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_customers_sector FOREIGN KEY (customer_sector_id) REFERENCES customer_sector_definitions(id) ON DELETE SET NULL,
     UNIQUE KEY uq_customers_parasut_contact (parasut_contact_id),
     INDEX idx_customers_deleted_at (deleted_at),
+    INDEX idx_customers_sector (customer_sector_id),
     INDEX idx_customers_company (company_name),
     INDEX idx_customers_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

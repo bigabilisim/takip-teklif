@@ -34,7 +34,22 @@ ensure_table($pdo, 'user_sessions', "
         CONSTRAINT fk_user_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+ensure_table($pdo, 'customer_sector_definitions', "
+    CREATE TABLE customer_sector_definitions (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        description TEXT NULL,
+        sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_customer_sector_definitions_name (name),
+        INDEX idx_customer_sector_definitions_active (is_active, sort_order, name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+seed_default_customer_sectors($pdo);
 ensure_column($pdo, 'customers', 'parasut_contact_id', 'VARCHAR(64) NULL AFTER id');
+ensure_column($pdo, 'customers', 'customer_sector_id', 'INT UNSIGNED NULL AFTER parasut_contact_id');
 ensure_column($pdo, 'customers', 'tax_office', 'VARCHAR(120) NULL AFTER phone');
 ensure_column($pdo, 'customers', 'tax_number', 'VARCHAR(60) NULL AFTER tax_office');
 ensure_column($pdo, 'customers', 'city', 'VARCHAR(120) NULL AFTER tax_number');
@@ -43,6 +58,7 @@ ensure_column($pdo, 'customers', 'address', 'TEXT NULL AFTER district');
 ensure_column($pdo, 'customers', 'deleted_at', 'DATETIME NULL AFTER notes');
 ensure_index($pdo, 'customers', 'uq_customers_parasut_contact', 'UNIQUE KEY uq_customers_parasut_contact (parasut_contact_id)');
 ensure_index($pdo, 'customers', 'idx_customers_deleted_at', 'INDEX idx_customers_deleted_at (deleted_at)');
+ensure_index($pdo, 'customers', 'idx_customers_sector', 'INDEX idx_customers_sector (customer_sector_id)');
 ensure_table($pdo, 'customer_contacts', "
     CREATE TABLE customer_contacts (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -983,6 +999,22 @@ function seed_default_supplier_groups(PDO $pdo): void
 
     foreach ($rows as $name) {
         $stmt->execute(['name' => $name]);
+    }
+}
+
+function seed_default_customer_sectors(PDO $pdo): void
+{
+    $stmt = $pdo->prepare(
+        'INSERT IGNORE INTO customer_sector_definitions (name, description, sort_order, is_active)
+         VALUES (:name, :description, :sort_order, 1)'
+    );
+
+    foreach (App\Models\RenewalRepository::defaultCustomerSectors() as $index => $row) {
+        $stmt->execute([
+            'name' => $row[0],
+            'description' => $row[1],
+            'sort_order' => ($index + 1) * 10,
+        ]);
     }
 }
 
