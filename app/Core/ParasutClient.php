@@ -139,6 +139,155 @@ final class ParasutClient
         ];
     }
 
+    public function createCustomerContact(array $customer): array
+    {
+        return $this->createContactFromLocalRecord($customer, 'customer');
+    }
+
+    private function createContactFromLocalRecord(array $record, string $accountType): array
+    {
+        $companyId = $this->companyId();
+        $accountType = $accountType === 'supplier' ? 'supplier' : 'customer';
+        $payload = [
+            'data' => [
+                'type' => 'contacts',
+                'attributes' => $this->contactAttributesFromLocalRecord($record, $accountType),
+            ],
+        ];
+
+        $contactPeople = $this->contactPeopleFromLocalRecord($record);
+        if ($contactPeople !== []) {
+            $payload['data']['relationships'] = [
+                'contact_people' => [
+                    'data' => $contactPeople,
+                ],
+            ];
+        }
+
+        $created = $this->request('POST', sprintf('/v4/%s/contacts', rawurlencode($companyId)), $payload);
+        $contact = $this->mapContacts([$created['data'] ?? []])[0] ?? [];
+        if (trim((string) ($contact['id'] ?? '')) === '') {
+            throw new RuntimeException('Paraşüt cari oluşturdu ancak cari ID dönmedi.');
+        }
+
+        $this->clearContactCache();
+
+        return $contact;
+    }
+
+    private function contactAttributesFromLocalRecord(array $record, string $accountType): array
+    {
+        $name = trim((string) (($record['company_name'] ?? '') ?: ($record['name'] ?? '') ?: ($record['contact_name'] ?? '')));
+        if ($name === '') {
+            throw new RuntimeException('Paraşüt carisi oluşturmak için firma adı zorunlu.');
+        }
+
+        $taxNumber = preg_replace('/\D+/', '', (string) ($record['tax_number'] ?? '')) ?? '';
+        $contactType = strlen($taxNumber) === 11 && !preg_match('/(A\.?Ş|ANONİM|LTD|LİMİTED|LIMITED|ŞİRKET|SANAYİ|TİCARET|AŞ)/iu', $name)
+            ? 'person'
+            : 'company';
+        $email = $this->normalizedLocalEmail($this->firstLocalContactValue($record, 'email'));
+        $phone = $this->normalizedLocalPhone($this->firstLocalContactValue($record, 'phone'));
+        $shortName = trim((string) ($record['short_name'] ?? ''));
+        if ($shortName === '') {
+            $shortName = mb_substr($name, 0, 64, 'UTF-8');
+        }
+
+        $attributes = [
+            'name' => $name,
+            'short_name' => $shortName,
+            'contact_type' => $contactType,
+            'tax_office' => trim((string) ($record['tax_office'] ?? '')),
+            'tax_number' => $taxNumber,
+            'district' => trim((string) ($record['district'] ?? '')),
+            'city' => trim((string) ($record['city'] ?? '')),
+            'address' => trim((string) ($record['address'] ?? '')),
+            'phone' => $phone,
+            'email' => $email,
+            'account_type' => $accountType,
+        ];
+
+        return array_filter($attributes, static fn (mixed $value): bool => $value !== '' && $value !== null);
+    }
+
+    private function contactPeopleFromLocalRecord(array $record): array
+    {
+        $rows = is_array($record['contacts'] ?? null) ? $record['contacts'] : [];
+        if ($rows === [] && (trim((string) ($record['contact_name'] ?? '')) !== '' || trim((string) ($record['email'] ?? '')) !== '')) {
+            $rows[] = [
+                'full_name' => trim((string) ($record['contact_name'] ?? '')),
+                'email' => trim((string) ($record['email'] ?? '')),
+                'phone' => trim((string) ($record['phone'] ?? '')),
+            ];
+        }
+
+        $people = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $attributes = [
+                'name' => trim((string) ($row['full_name'] ?? $row['name'] ?? '')),
+                'email' => $this->normalizedLocalEmail((string) ($row['email'] ?? '')),
+                'phone' => $this->normalizedLocalPhone((string) ($row['phone'] ?? '')),
+                'notes' => trim((string) ($row['role_title'] ?? '')),
+            ];
+            $attributes = array_filter($attributes, static fn (mixed $value): bool => $value !== '' && $value !== null);
+            if ($attributes === []) {
+                continue;
+            }
+
+            $people[] = [
+                'type' => 'contact_people',
+                'attributes' => $attributes,
+            ];
+        }
+
+        return array_slice($people, 0, 20);
+    }
+
+    private function firstLocalContactValue(array $record, string $field): string
+    {
+        $value = trim((string) ($record[$field] ?? ''));
+        if ($value !== '') {
+            return $value;
+        }
+
+        foreach ((array) ($record['contacts'] ?? []) as $contact) {
+            if (!is_array($contact)) {
+                continue;
+            }
+
+            $candidate = trim((string) ($contact[$field] ?? ''));
+            if ($candidate !== '') {
+                return $candidate;
+            }
+        }
+
+        return '';
+    }
+
+    private function normalizedLocalPhone(string $phone): string
+    {
+        $phone = trim($phone);
+        if ($phone === '') {
+            return '';
+        }
+
+        return function_exists('normalize_phone_number') ? \normalize_phone_number($phone) : $phone;
+    }
+
+    private function normalizedLocalEmail(string $email): string
+    {
+        $email = trim($email);
+        if ($email === '') {
+            return '';
+        }
+
+        return filter_var($email, FILTER_VALIDATE_EMAIL) ? $email : '';
+    }
+
     public function fetchAllProducts(int $maxPages = 200): array
     {
         $companyId = $this->companyId();

@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.69] - 2026-05-14
+
+- Cari bilgi talebi tamamlanan kayıtlar için “Cariyi Paraşüt’e gönder” aksiyonu eklendi.
+- Müşteri kartı ve müşteri düzenleme ekranından eksik Paraşüt carisi tek tuşla oluşturulabilir hale getirildi.
+- Paraşüt’e gönderirken önce mevcut cari eşleşmesi aranır; bulunamazsa müşteri ve yetkili bilgileriyle yeni müşteri carisi oluşturulur.
+
 ## [2.0.68] - 2026-05-13
 
 - Teklif ve yenileme maillerinden fiyat, ara toplam, KDV ve KDV dahil toplam alanları kaldırıldı.

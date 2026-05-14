@@ -357,6 +357,9 @@ try {
     } elseif ($path === '/customer-info/request' && $method === 'POST') {
         require_permission('customers.manage');
         handle_customer_info_request_submit();
+    } elseif (preg_match('#^/customers/(\d+)/parasut-contact$#', $path, $matches) && $method === 'POST') {
+        require_permission('customers.manage');
+        handle_customer_parasut_contact_send($repo, (int) $matches[1]);
     } elseif ($path === '/customers') {
         require_permission('customers.view');
         handle_customers($repo, $method);
@@ -12064,6 +12067,120 @@ function handle_customers(RenewalRepository $repo, string $method): void
     });
 }
 
+function handle_customer_parasut_contact_send(RenewalRepository $repo, int $customerId): void
+{
+    verify_csrf();
+    $returnTo = safe_return_path($_POST['return_to'] ?? '/customers');
+    $customer = $repo->findCustomer($customerId);
+    if (!$customer) {
+        flash('error', 'Cari kartı bulunamadı.');
+        redirect($returnTo);
+    }
+
+    try {
+        $result = send_customer_to_parasut($repo, $customer);
+        $name = trim((string) ($result['name'] ?? ($customer['company_name'] ?? '')));
+        $contactId = trim((string) ($result['id'] ?? ''));
+        if (!empty($result['already_linked'])) {
+            flash('success', 'Cari zaten Paraşüt ile bağlı: #' . $contactId);
+        } elseif (!empty($result['matched'])) {
+            flash('success', ($name !== '' ? $name . ' ' : '') . 'Paraşüt’te bulundu ve cari kartına bağlandı: #' . $contactId);
+        } else {
+            flash('success', ($name !== '' ? $name . ' ' : '') . 'Paraşüt carisi olarak oluşturuldu: #' . $contactId);
+        }
+    } catch (Throwable $e) {
+        error_log('Cari Paraşüt’e gönderilemedi: ' . $e->getMessage());
+        flash('error', friendly_error_message($e));
+    }
+
+    redirect($returnTo);
+}
+
+function send_customer_to_parasut(RenewalRepository $repo, array $customer): array
+{
+    $customerId = (int) ($customer['id'] ?? 0);
+    $existingId = trim((string) ($customer['parasut_contact_id'] ?? ''));
+    if ($customerId < 1) {
+        throw new RuntimeException('Cari kartı ID bilgisi eksik.');
+    }
+    if ($existingId !== '') {
+        return [
+            'already_linked' => true,
+            'id' => $existingId,
+            'name' => (string) ($customer['company_name'] ?? ''),
+        ];
+    }
+
+    $companyName = trim((string) ($customer['company_name'] ?? ''));
+    if ($companyName === '') {
+        throw new RuntimeException('Paraşüt’e göndermek için cari ünvanı zorunlu.');
+    }
+
+    $client = new ParasutClient();
+    $status = $client->status();
+    if (empty($status['connected'])) {
+        throw new RuntimeException('Paraşüt bağlantısı aktif değil. Ayarlar > Paraşüt bölümünden bağlantıyı tamamlayın.');
+    }
+
+    $taxNumber = preg_replace('/\D+/', '', (string) ($customer['tax_number'] ?? '')) ?? '';
+    $searchTerms = array_values(array_unique(array_filter([
+        $taxNumber,
+        $companyName,
+        trim((string) ($customer['email'] ?? '')),
+    ], static fn (string $value): bool => mb_strlen($value, 'UTF-8') >= 2)));
+
+    foreach ($searchTerms as $term) {
+        $matched = parasut_contact_match_for_customer($client->searchContacts($term, 8, 'customer'), $companyName, $taxNumber);
+        $matchedId = trim((string) ($matched['id'] ?? ''));
+        if ($matchedId !== '') {
+            $repo->setCustomerParasutContactId($customerId, $matchedId);
+
+            return [
+                'matched' => true,
+                'id' => $matchedId,
+                'name' => (string) (($matched['name'] ?? '') ?: $companyName),
+            ];
+        }
+    }
+
+    $created = $client->createCustomerContact($customer);
+    $contactId = trim((string) ($created['id'] ?? ''));
+    if ($contactId === '') {
+        throw new RuntimeException('Paraşüt cari ID dönmedi.');
+    }
+    $repo->setCustomerParasutContactId($customerId, $contactId);
+
+    return [
+        'created' => true,
+        'id' => $contactId,
+        'name' => (string) (($created['name'] ?? '') ?: $companyName),
+    ];
+}
+
+function render_customer_parasut_send_control(array $customer, string $returnTo = '/customers'): string
+{
+    $customerId = (int) ($customer['id'] ?? 0);
+    $parasutContactId = trim((string) ($customer['parasut_contact_id'] ?? $customer['submitted_parasut_contact_id'] ?? ''));
+    if ($customerId < 1) {
+        return '';
+    }
+
+    if ($parasutContactId !== '') {
+        return '<span class="badge active">Paraşüt #' . h($parasutContactId) . '</span>';
+    }
+
+    ob_start();
+    ?>
+    <form method="post" action="<?= h(url('/customers/' . $customerId . '/parasut-contact')) ?>" class="inline-action-form" onsubmit="return confirm('Bu cariyi Paraşüt’e gönderelim mi?')">
+        <?= csrf_field() ?>
+        <input type="hidden" name="return_to" value="<?= h($returnTo) ?>">
+        <button type="submit" class="button small primary">Cariyi Paraşüt’e gönder</button>
+    </form>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
 function render_customer_list_card(array $customer, bool $canManage, bool $canDelete, bool $canDetails): string
 {
     $contacts = is_array($customer['contacts'] ?? null) ? $customer['contacts'] : [];
@@ -12149,6 +12266,7 @@ function render_customer_list_card(array $customer, bool $canManage, bool $canDe
                 <?php if ($canManage || $canDelete): ?>
                     <div class="customer-actions">
                         <?php if ($canManage): ?>
+                            <?= render_customer_parasut_send_control($customer, '/customers') ?>
                             <a href="<?= h(url('/customers/' . $customer['id'] . '/edit')) ?>" class="button small secondary" onclick="return confirm('Bu müşteri kartı düzenlensin mi?')">Düzenle</a>
                         <?php endif; ?>
                         <?php if ($canDelete): ?>
@@ -12186,7 +12304,10 @@ function render_recent_customer_card(array $customer, bool $canManage): string
         <strong><?= h((string) ($customer['company_name'] ?? '-')) ?></strong>
         <small><?= h($contactLine !== '' ? $contactLine : 'Yetkili yok') ?><?= $location !== '' ? ' - ' . h($location) : '' ?></small>
         <?php if ($canManage): ?>
-            <a href="<?= h(url('/customers/' . $customer['id'] . '/edit')) ?>" class="button small secondary">Düzenle</a>
+            <div class="recent-customer-actions">
+                <?= render_customer_parasut_send_control($customer, '/customers') ?>
+                <a href="<?= h(url('/customers/' . $customer['id'] . '/edit')) ?>" class="button small secondary">Düzenle</a>
+            </div>
         <?php endif; ?>
     </article>
     <?php
@@ -12321,6 +12442,8 @@ function render_customer_create_dialog(array $customers, array $contactRows, arr
 
 function render_customer_info_request_dialog(array $customers, string $returnTo = '/', bool $openOnLoad = false): string
 {
+    $recentRequests = (new CustomerInfoRequestRepository())->recent(8);
+
     ob_start();
     ?>
     <dialog class="app-dialog customer-info-request-dialog" id="customer-info-request-dialog" <?= $openOnLoad ? 'data-auto-open-dialog' : '' ?>>
@@ -12365,8 +12488,63 @@ function render_customer_info_request_dialog(array $customers, string $returnTo 
                     </div>
                 </form>
             </div>
+
+            <?php if ($recentRequests !== []): ?>
+                <div class="customer-request-recent">
+                    <div class="customer-request-recent-head">
+                        <strong>Son cari bilgi talepleri</strong>
+                        <span>Form doldurulunca buradan tek tuşla Paraşüt carisi oluşturabilirsiniz.</span>
+                    </div>
+                    <div class="customer-request-recent-list">
+                        <?php foreach ($recentRequests as $request): ?>
+                            <?= render_customer_info_request_recent_row($request, $returnTo) ?>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            <?php endif; ?>
         </div>
     </dialog>
+    <?php
+
+    return (string) ob_get_clean();
+}
+
+function render_customer_info_request_recent_row(array $request, string $returnTo): string
+{
+    $status = (string) ($request['status'] ?? '');
+    $statusLabel = match ($status) {
+        'submitted' => 'Tamamlandı',
+        'expired' => 'Süresi doldu',
+        default => 'Bekleniyor',
+    };
+    $badgeClass = match ($status) {
+        'submitted' => 'active',
+        'expired' => 'cancelled',
+        default => 'pending',
+    };
+    $customerName = trim((string) (($request['submitted_customer_name'] ?? '') ?: ($request['customer_name'] ?? '') ?: ($request['recipient_email'] ?? '-')));
+    $submittedCustomerId = (int) ($request['submitted_customer_id'] ?? 0);
+    $submittedAt = !empty($request['submitted_at']) ? date('d.m.Y H:i', strtotime((string) $request['submitted_at'])) : '';
+    $createdAt = !empty($request['created_at']) ? date('d.m.Y H:i', strtotime((string) $request['created_at'])) : '';
+    $customerForAction = [
+        'id' => $submittedCustomerId,
+        'parasut_contact_id' => (string) ($request['submitted_parasut_contact_id'] ?? ''),
+    ];
+
+    ob_start();
+    ?>
+    <article class="customer-request-recent-row">
+        <div>
+            <strong><?= h($customerName) ?></strong>
+            <span><?= h($submittedAt !== '' ? 'Doldurdu: ' . $submittedAt : 'Talep: ' . $createdAt) ?></span>
+        </div>
+        <div class="customer-request-recent-actions">
+            <span class="badge <?= h($badgeClass) ?>"><?= h($statusLabel) ?></span>
+            <?php if ($status === 'submitted' && $submittedCustomerId > 0): ?>
+                <?= render_customer_parasut_send_control($customerForAction, $returnTo) ?>
+            <?php endif; ?>
+        </div>
+    </article>
     <?php
 
     return (string) ob_get_clean();
@@ -12406,7 +12584,10 @@ function handle_customer_edit(RenewalRepository $repo, string $method, int $id):
                 <p class="eyebrow">Müşteri kartı</p>
                 <h1>Müşteri Düzenle</h1>
             </div>
-            <a href="<?= h(url('/customers')) ?>" class="button secondary">Müşterilere dön</a>
+            <div class="page-actions">
+                <?= render_customer_parasut_send_control($customer, '/customers/' . (int) $customer['id'] . '/edit') ?>
+                <a href="<?= h(url('/customers')) ?>" class="button secondary">Müşterilere dön</a>
+            </div>
         </div>
 
         <?php if ($errors): ?>

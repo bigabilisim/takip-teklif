@@ -142,7 +142,10 @@ final class CustomerInfoRequestRepository
     public function recent(int $limit = 6): array
     {
         $stmt = $this->db->prepare(
-            'SELECT cir.*, c.company_name AS customer_name, sc.company_name AS submitted_customer_name
+            'SELECT cir.*,
+                    c.company_name AS customer_name,
+                    sc.company_name AS submitted_customer_name,
+                    sc.parasut_contact_id AS submitted_parasut_contact_id
              FROM customer_info_requests cir
              LEFT JOIN customers c ON c.id = cir.customer_id
              LEFT JOIN customers sc ON sc.id = cir.submitted_customer_id
