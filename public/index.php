@@ -8199,7 +8199,8 @@ function handle_sales_offer_public(string $method, int $offerId): void
 
     if ($method === 'POST' && (string) ($_POST['action'] ?? '') === 'approve_sales_offer') {
         try {
-            if (sales_offer_has_recorded_approval($offer)) {
+            $wasApproved = sales_offer_has_recorded_approval($offer);
+            if ($wasApproved && empty($offer['payment_request_enabled'])) {
                 render_sales_offer_document($offer, false, true, sales_offer_payment_request($offer), '', $reader);
                 return;
             }
@@ -8207,7 +8208,7 @@ function handle_sales_offer_public(string $method, int $offerId): void
             $approval = sales_offer_approval_payload($reader, $readerToken);
             $paymentUrl = approve_sales_offer_and_payment_request($repo, $offer, $approval);
             $offer = $repo->findSalesOffer($offerId) ?: $offer;
-            if ((string) ($offer['status'] ?? '') === 'approved') {
+            if (!$wasApproved && (string) ($offer['status'] ?? '') === 'approved') {
                 notify_sales_offer_response($offer, 'approved');
             }
             if ($paymentUrl !== '') {
@@ -9082,6 +9083,12 @@ function render_sales_offer_document(array $offer, bool $autoPrint = false, bool
                             <?php else: ?>
                                 <a class="button primary" href="<?= h(manual_payment_request_url($paymentRequest)) ?>">Ödeme ekranına geç</a>
                             <?php endif; ?>
+                        <?php elseif ($paymentEnabled): ?>
+                            <form method="post" class="sales-offer-approval-form">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="approve_sales_offer">
+                                <button type="submit" class="button primary">Ödeme ekranına geç</button>
+                            </form>
                         <?php endif; ?>
                     <?php else: ?>
                         <div>
@@ -10574,9 +10581,11 @@ function sales_offer_dashboard_status_badge(array $offer, ?array $advancePayment
 
 function sales_offer_is_waiting_advance_payment(array $offer, ?array $advancePayment = null): bool
 {
+    $status = (string) ($offer['status'] ?? 'draft');
+
     return !empty($offer['payment_request_enabled'])
         && (int) ($offer['payment_request_id'] ?? 0) > 0
-        && (string) ($offer['status'] ?? 'draft') !== 'approved'
+        && !in_array($status, ['rejected', 'revision_requested', 'expired'], true)
         && (string) ($advancePayment['status'] ?? 'pending') !== 'paid';
 }
 

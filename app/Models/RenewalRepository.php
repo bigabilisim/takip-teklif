@@ -1752,7 +1752,7 @@ final class RenewalRepository
                  approval_user_agent = COALESCE(:approval_user_agent, approval_user_agent),
                  updated_at = NOW()
              WHERE id = :id
-               AND status <> \'approved\''
+            '
         )->execute([
             'id' => $id,
             'payment_request_id' => $paymentRequestId,

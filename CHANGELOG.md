@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.72] - 2026-05-14
+
+- Müşteri satış tekliflerinde onay sonrası ödeme yönlendirmesi, teklif daha önce onaylanmış görünse bile ödeme talebi açıkken yeniden çalışacak şekilde düzeltildi.
+- Onaylı fakat ön ödemesi bekleyen tekliflerin “ödeme bekliyor” durumu ekranda kaybolmayacak hale getirildi.
+- Teklife bağlı ödeme talebi oluştuğunda, mevcut onay kaydı olsa bile ödeme kaydı teklif üzerine güvenli şekilde bağlanır hale getirildi.
+
 ## [2.0.71] - 2026-05-14
 
 - Müşteri carilerine kategori/sektör seçimi eklendi; müşteriler listesinde sektör rozeti ve filtre desteği sağlandı.
