@@ -131,6 +131,11 @@ if ($path === '/payments/iyzico/callback') {
     exit;
 }
 
+if ($path === '/pay') {
+    handle_manual_payment_missing_token();
+    exit;
+}
+
 if (preg_match('#^/pay/([A-Za-z0-9_-]{20,120})$#', $path, $matches)) {
     handle_manual_payment_public($method, (string) $matches[1]);
     exit;
@@ -2321,7 +2326,32 @@ function payment_request_mail_body(array $row, string $message, string $paymentU
 
 function manual_payment_request_url(array $row): string
 {
-    return url('/pay/' . rawurlencode((string) ($row['public_token'] ?? '')));
+    $row = manual_payment_request_with_public_token($row);
+    $token = trim((string) ($row['public_token'] ?? ''));
+
+    return url('/pay/' . rawurlencode($token));
+}
+
+function manual_payment_request_with_public_token(array $row): array
+{
+    if (trim((string) ($row['public_token'] ?? '')) !== '') {
+        return $row;
+    }
+
+    $id = (int) ($row['id'] ?? 0);
+    if ($id <= 0) {
+        return $row;
+    }
+
+    try {
+        $fresh = (new PaymentRequestRepository())->ensurePublicToken($id);
+
+        return $fresh ?: $row;
+    } catch (Throwable $e) {
+        error_log('manual payment token could not be prepared: ' . $e->getMessage());
+
+        return $row;
+    }
 }
 
 function manual_payment_request_number(array $row): string
@@ -4729,6 +4759,20 @@ function handle_manual_payment_public(string $method, string $token): void
                     <button type="submit" class="button primary full" <?= $iyzicoReady ? '' : 'disabled' ?>>Kredi kartı ile öde</button>
                 </form>
             <?php endif; ?>
+        </section>
+        <?php
+    });
+}
+
+function handle_manual_payment_missing_token(): void
+{
+    http_response_code(400);
+    render_public_layout('Ödeme talebi', static function (): void {
+        ?>
+        <section class="public-card payment-result-card warning">
+            <p class="eyebrow">Ödeme talebi</p>
+            <h1>Ödeme bağlantısı eksik.</h1>
+            <p class="muted">Lütfen size gönderilen teklif bağlantısından “Ödeme ekranına geç” butonuna yeniden basın. Sistem yeni güvenli ödeme bağlantısını hazırlayacaktır.</p>
         </section>
         <?php
     });
@@ -8822,6 +8866,8 @@ function approve_sales_offer_and_payment_request(RenewalRepository $repo, array 
     } else {
         $repo->markSalesOfferPaymentPending($offerId, (int) ($paymentRequest['id'] ?? 0), $approval);
     }
+
+    $paymentRequest = manual_payment_request_with_public_token($paymentRequest);
 
     if ((string) ($paymentRequest['status'] ?? 'pending') === 'paid') {
         return manual_payment_request_url($paymentRequest);

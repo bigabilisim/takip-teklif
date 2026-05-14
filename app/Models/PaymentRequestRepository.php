@@ -55,9 +55,10 @@ final class PaymentRequestRepository
             'created_by' => empty($data['created_by']) ? null : (int) $data['created_by'],
         ]);
 
+        $id = (int) $this->db->lastInsertId();
         $this->syncCustomerTaxNumberIfEmpty((int) ($customerId ?? 0), $customerTaxNumber);
 
-        return $this->find((int) $this->db->lastInsertId()) ?? [];
+        return $this->ensurePublicToken($id) ?? [];
     }
 
     public function all(int $limit = 50): array
@@ -249,6 +250,44 @@ final class PaymentRequestRepository
         $row = $stmt->fetch();
 
         return $row ?: null;
+    }
+
+    public function ensurePublicToken(int $id): ?array
+    {
+        $current = $this->find($id);
+        if (!$current) {
+            return null;
+        }
+
+        if (trim((string) ($current['public_token'] ?? '')) !== '') {
+            return $current;
+        }
+
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $token = bin2hex(random_bytes(24));
+
+            try {
+                $stmt = $this->db->prepare(
+                    'UPDATE manual_payment_requests
+                     SET public_token = :public_token,
+                         updated_at = NOW()
+                     WHERE id = :id
+                       AND (public_token IS NULL OR public_token = \'\')'
+                );
+                $stmt->execute([
+                    'id' => $id,
+                    'public_token' => $token,
+                ]);
+
+                return $this->find($id);
+            } catch (\PDOException $e) {
+                if ($e->getCode() !== '23000') {
+                    throw $e;
+                }
+            }
+        }
+
+        return $this->find($id);
     }
 
     public function update(int $id, array $data): ?array
@@ -663,6 +702,7 @@ final class PaymentRequestRepository
                 INDEX idx_manual_payment_requests_created_by (created_by)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        $this->ensureColumn('manual_payment_requests', 'public_token', 'VARCHAR(96) NULL AFTER id');
         $this->ensureColumn('manual_payment_requests', 'customer_id', 'INT UNSIGNED NULL AFTER public_token');
         $this->ensureColumn('manual_payment_requests', 'recipients_json', 'MEDIUMTEXT NULL AFTER customer_tax_number');
         $this->ensureColumn('manual_payment_requests', 'payment_due_date', 'DATE NULL AFTER currency');
@@ -674,6 +714,8 @@ final class PaymentRequestRepository
         $this->ensureColumn('manual_payment_requests', 'refunded_at', 'DATETIME NULL AFTER paid_at');
         $this->ensureColumn('manual_payment_requests', 'refund_note', 'TEXT NULL AFTER refunded_at');
         $this->ensureManualPaymentStatusEnum();
+        $this->backfillMissingPublicTokens();
+        $this->ensureIndex('manual_payment_requests', 'uq_manual_payment_requests_token', 'UNIQUE KEY uq_manual_payment_requests_token (public_token)');
         $this->ensureIndex('manual_payment_requests', 'idx_manual_payment_requests_customer', 'INDEX idx_manual_payment_requests_customer (customer_id)');
         $this->ensureIndex('manual_payment_requests', 'idx_manual_payment_requests_due_reminders', 'INDEX idx_manual_payment_requests_due_reminders (status, payment_due_date, reminder_time, last_reminder_sent_at)');
 
@@ -733,6 +775,21 @@ final class PaymentRequestRepository
         );
 
         self::$schemaEnsured = true;
+    }
+
+    private function backfillMissingPublicTokens(): void
+    {
+        $stmt = $this->db->query(
+            'SELECT id
+             FROM manual_payment_requests
+             WHERE public_token IS NULL OR public_token = \'\'
+             ORDER BY id ASC
+             LIMIT 250'
+        );
+
+        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $id) {
+            $this->ensurePublicToken((int) $id);
+        }
     }
 
     private function ensureColumn(string $table, string $column, string $definition): void

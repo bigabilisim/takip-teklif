@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.73] - 2026-05-14
+
+- Eski veya yarım kalmış ödeme taleplerinde public ödeme token’ı boşsa otomatik yeniden oluşturulacak şekilde koruma eklendi.
+- Teklif onayı sonrası ödeme linkinin `/pay/#email-required` gibi eksik token’lı oluşmasına neden olan durum düzeltildi.
+- Eksik ödeme bağlantısı açılırsa kullanıcıya “sayfa bulunamadı” yerine tekrar teklif bağlantısından ödeme ekranına geçmesini söyleyen anlaşılır uyarı gösterilir hale getirildi.
+
 ## [2.0.72] - 2026-05-14
 
 - Müşteri satış tekliflerinde onay sonrası ödeme yönlendirmesi, teklif daha önce onaylanmış görünse bile ödeme talebi açıkken yeniden çalışacak şekilde düzeltildi.
